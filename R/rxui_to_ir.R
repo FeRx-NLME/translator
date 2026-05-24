@@ -43,13 +43,28 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   unsp      <- c(unsp, expr_out$unsupported)
 
   structural <- expr_out$structural
+  if (identical(structural$type, "ode")) {
+    state_names <- vapply(expr_out$odes, function(o) o$state, "")
+    obs_cmt     <- tryCatch(ui$central, error = function(e) NULL)
+    if (is.null(obs_cmt) || !is.character(obs_cmt)) {
+      obs_cmt <- tail(state_names, 1)
+      warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
+                             obs_cmt, "', verify in [structural_model]"))
+    }
+    structural$states  <- state_names
+    structural$obs_cmt <- obs_cmt
+  }
   if (identical(structural$type, "lincmt")) {
-    pk_out     <- .infer_pk_macro(expr_out$indiv_params)
-    warn       <- c(warn, pk_out$warnings)
-    unsp       <- c(unsp, pk_out$unsupported)
-    structural <- list(type    = "pk_macro",
-                       pk_call = pk_out$pk_call,
-                       pk_args = pk_out$pk_args)
+    pk_out <- .infer_pk_macro(expr_out$indiv_params)
+    warn   <- c(warn, pk_out$warnings)
+    unsp   <- c(unsp, pk_out$unsupported)
+    if (is.na(pk_out$pk_call)) {
+      structural <- list()
+    } else {
+      structural <- list(type    = "pk_macro",
+                         pk_call = pk_out$pk_call,
+                         pk_args = pk_out$pk_args)
+    }
   }
 
   fit_opts <- list(method = "focei", maxiter = 500L, covariance = TRUE)
@@ -197,6 +212,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
 .extract_sigmas <- function(ini) {
   rows <- ini[!is.na(ini$err), , drop = FALSE]
+  # rxode2 iniDf stores sigma estimates as SD, not variance.
   sigmas <- lapply(seq_len(nrow(rows)), function(i) {
     row <- rows[i, ]
     list(name = .norm(row$name), value = row$est, scale = "sd")
@@ -297,9 +313,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (fn == "+") {
     lhs_fn <- tryCatch(as.character(rhs[[2]][[1]]), error = function(e) "")
     rhs_fn <- tryCatch(as.character(rhs[[3]][[1]]), error = function(e) "")
-    if (lhs_fn == "add" && rhs_fn == "prop") {
-      params <- c(.norm(as.character(rhs[[2]][[2]])),
-                  .norm(as.character(rhs[[3]][[2]])))
+    if ((lhs_fn == "add" && rhs_fn == "prop") ||
+        (lhs_fn == "prop" && rhs_fn == "add")) {
+      add_node  <- if (lhs_fn == "add")  rhs[[2]] else rhs[[3]]
+      prop_node <- if (lhs_fn == "prop") rhs[[2]] else rhs[[3]]
+      params    <- c(.norm(as.character(add_node[[2]])),
+                     .norm(as.character(prop_node[[2]])))
       return(list(type = "combined", params = params, warnings = warn))
     }
   }

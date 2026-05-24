@@ -16,12 +16,6 @@ r2_path <- function(file) {
               mustWork = TRUE)
 }
 
-ref_text <- function(file) {
-  path <- system.file("testmodels", "reference", file, package = "ferxtranslate",
-                      mustWork = TRUE)
-  paste(readLines(path, warn = FALSE), collapse = "\n")
-}
-
 # -- NONMEM models ------------------------------------------------------------
 
 test_that("1-cpt oral NONMEM: snapshot + no unsupported", {

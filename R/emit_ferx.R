@@ -44,7 +44,7 @@ emit_ferx <- function(ir) {
 # -- helpers ------------------------------------------------------------------
 
 .fmt_num <- function(x) {
-  s <- format(x, scientific = FALSE, trim = TRUE)
+  s <- format(x, scientific = FALSE, trim = TRUE, digits = 15)
   if (!grepl("\\.", s)) paste0(s, ".0") else s
 }
 

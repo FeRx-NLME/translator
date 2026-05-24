@@ -253,6 +253,13 @@ test_that("combined error parsed", {
   expect_equal(out$params, c("ERR_ADD", "ERR_PROP"))
 })
 
+test_that("combined error parsed when prop comes first (prop + add)", {
+  map <- c("err.add" = "ERR_ADD", "err.prop" = "ERR_PROP")
+  out <- .parse_error_rhs(quote(prop(err.prop) + add(err.add)), map)
+  expect_equal(out$type,   "combined")
+  expect_equal(out$params, c("ERR_ADD", "ERR_PROP"))
+})
+
 # -- .infer_pk_macro ----------------------------------------------------------
 
 test_that("1-cpt oral inferred from ka + v (no q)", {
@@ -337,7 +344,7 @@ test_that("rxui_to_ir produces ferx_ir from mock 1-cpt oral", {
   expect_true(isTRUE(ir$fit_options$covariance))
 })
 
-test_that("rxui_to_ir ODE model sets structural type ode", {
+test_that("rxui_to_ir ODE model sets structural type ode with states and obs_cmt", {
   ini <- rbind(
     theta_row("tvcl", 0.134, 0.001, 10),
     theta_row("tvv",  8.1,   0.1,   500),
@@ -354,9 +361,30 @@ test_that("rxui_to_ir ODE model sets structural type ode", {
     quote(DV ~ prop(err.prop))
   )
   ir <- rxui_to_ir(mock_ui(ini, lst))
-  expect_equal(ir$structural$type, "ode")
+  expect_equal(ir$structural$type,   "ode")
+  expect_equal(ir$structural$states, c("depot", "central"))
+  expect_equal(ir$structural$obs_cmt, "central")
   expect_length(ir$odes, 2L)
   expect_equal(ir$odes[[1]]$state, "depot")
+})
+
+test_that("rxui_to_ir 3-cpt oral: structural is empty (structural_model omitted)", {
+  ini <- rbind(
+    theta_row("tvcl", 0.1), theta_row("tvv1", 5), theta_row("tvq",  0.5),
+    theta_row("tvv2", 10),  theta_row("tvq2", 0.2), theta_row("tvv3", 20),
+    theta_row("tvka", 1.0),
+    sigma_row("err.prop", 0.01)
+  )
+  lst <- list(
+    quote(cl <- tvcl), quote(v1 <- tvv1), quote(q  <- tvq),
+    quote(v2 <- tvv2), quote(q2 <- tvq2), quote(v3 <- tvv3),
+    quote(ka <- tvka),
+    quote(linCmt() ~ prop(err.prop))
+  )
+  ir <- rxui_to_ir(mock_ui(ini, lst))
+  expect_length(ir$structural, 0L)
+  expect_length(ir$unsupported, 1L)
+  expect_match(ir$warnings[1], "ERROR")
 })
 
 test_that("rxui_to_ir IOV model sets iov_column in fit_options", {

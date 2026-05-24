@@ -41,17 +41,25 @@ to_ferx <- function(source,
                     overwrite = FALSE) {
   format <- match.arg(format)
 
-  rxui <- switch(format,
-    nonmem  = nonmem2rx::nonmem2rx(source),
-    nlmixr2 = rxode2::rxode2(source),
-    monolix = {
-      if (!requireNamespace("monolix2rx", quietly = TRUE))
-        cli::cli_abort(c(
-          "monolix2rx is required for Monolix translation.",
-          i = "Install it with: {.code install.packages('monolix2rx')}"
-        ))
-      monolix2rx::monolix2rx(source)
-    }
+  if (format == "monolix" && !requireNamespace("monolix2rx", quietly = TRUE))
+    cli::cli_abort(c(
+      "monolix2rx is required for Monolix translation.",
+      i = "Install it with: {.code install.packages('monolix2rx')}"
+    ))
+
+  src_label <- if (is.character(source)) source else "<model function>"
+  rxui <- tryCatch(
+    switch(format,
+      nonmem  = nonmem2rx::nonmem2rx(source),
+      nlmixr2 = rxode2::rxode2(source),
+      monolix = monolix2rx::monolix2rx(source)
+    ),
+    error = function(e)
+      cli::cli_abort(
+        c(paste0("Failed to parse ", src_label, " as ", format, "."),
+          "i" = paste0("Original error: ", conditionMessage(e))),
+        call = NULL
+      )
   )
 
   src_file <- if (is.character(source)) source else NA_character_
