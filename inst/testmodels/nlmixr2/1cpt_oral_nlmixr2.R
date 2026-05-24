@@ -11,13 +11,13 @@ f_1cpt_oral <- function() {
     eta.v  ~ 0.02
     eta.ka ~ 0.40
 
-    err.prop ~ 0.01
+    prop.err <- 0.01
   })
   model({
     cl <- tvcl * exp(eta.cl)
     v  <- tvv  * exp(eta.v)
     ka <- tvka * exp(eta.ka)
 
-    linCmt() ~ prop(err.prop)
+    linCmt() ~ prop(prop.err)
   })
 }

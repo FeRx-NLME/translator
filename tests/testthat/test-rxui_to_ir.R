@@ -25,9 +25,13 @@ sigma_row <- function(name, est, err = "prop") {
              stringsAsFactors = FALSE)
 }
 
-# Construct a d/dt call as rxode2 would: `d/dt`(state, rhs_expr)
+# Construct a d/dt assignment as nonmem2rx/rxode2 would emit:
+#   d/dt(STATE) <- rhs
+# R parses d/dt(STATE) as `/`(d, dt(STATE)), wrapped in a `<-` call.
 ddt <- function(state, rhs) {
-  as.call(list(as.name("d/dt"), as.name(state), rhs))
+  lhs <- as.call(list(as.name("/"), as.name("d"),
+                      as.call(list(as.name("dt"), as.name(state)))))
+  as.call(list(as.name("<-"), lhs, rhs))
 }
 
 # -- .extract_thetas ----------------------------------------------------------
@@ -155,10 +159,11 @@ test_that("extracts sigma on sd scale", {
 
 # -- expression classifiers ---------------------------------------------------
 
-test_that(".is_ddt detects d/dt call", {
-  expect_true(.is_ddt(ddt("depot", quote(-KA * depot))))
-  expect_false(.is_ddt(quote(cl <- tvcl)))
-  expect_false(.is_ddt(quote(linCmt() ~ prop(err))))
+test_that(".is_ddt_lhs detects d/dt LHS in assignment", {
+  assign_expr <- ddt("depot", quote(-KA * depot))
+  expect_true(.is_ddt_lhs(assign_expr[[2]]))
+  expect_false(.is_ddt_lhs(quote(cl)))
+  expect_false(.is_ddt_lhs(quote(linCmt())))
 })
 
 test_that(".is_tilde detects tilde expression", {
@@ -172,11 +177,12 @@ test_that(".is_lincmt_tilde detects linCmt on LHS", {
   expect_false(.is_lincmt_tilde(quote(DV ~ prop(err.prop))))
 })
 
-test_that(".is_assignment detects <- assignment", {
+test_that(".is_assignment detects <- and = assignment", {
   expect_true(.is_assignment(quote(cl <- tvcl)))
   expect_true(.is_assignment(as.call(list(as.name("="), as.name("cl"), as.name("tvcl")))))
   expect_false(.is_assignment(quote(linCmt() ~ prop(err))))
-  expect_false(.is_assignment(ddt("depot", quote(-KA))))
+  # d/dt(depot) <- rhs IS an assignment (the d/dt is in the LHS)
+  expect_true(.is_assignment(ddt("depot", quote(-KA))))
 })
 
 # -- .normalise_expr ----------------------------------------------------------
@@ -222,7 +228,7 @@ test_that("linCmt tilde sets structural type lincmt", {
   expect_equal(out$structural$type, "lincmt")
 })
 
-test_that("d/dt expression sets structural type ode", {
+test_that("d/dt assignment sets structural type ode", {
   map <- list()
   lst <- list(ddt("depot", quote(-KA * depot)))
   out <- .parse_model_exprs(lst, map)
@@ -421,13 +427,13 @@ test_that("1-cpt oral nlmixr2 function converts correctly", {
     ini({
       tvcl <- 0.134; tvv <- 8.1; tvka <- 1.0
       eta.cl ~ 0.07; eta.v ~ 0.02
-      err.prop ~ 0.01
+      prop.err <- 0.01
     })
     model({
       cl <- tvcl * exp(eta.cl)
       v  <- tvv  * exp(eta.v)
       ka <- tvka
-      linCmt() ~ prop(err.prop)
+      linCmt() ~ prop(prop.err)
     })
   }
   ui <- rxode2::rxode2(f_1cpt)
@@ -442,11 +448,11 @@ test_that("2-cpt oral nlmixr2 function with q infers two_cpt_oral", {
     ini({
       tvcl <- 5; tvv1 <- 50; tvq <- 10; tvv2 <- 100; tvka <- 1.2
       eta.cl ~ 0.10
-      err.prop ~ 0.02
+      prop.err <- 0.02
     })
     model({
       cl <- tvcl * exp(eta.cl); v1 <- tvv1; q <- tvq; v2 <- tvv2; ka <- tvka
-      linCmt() ~ prop(err.prop)
+      linCmt() ~ prop(prop.err)
     })
   }
   ui <- rxode2::rxode2(f_2cpt)
@@ -458,12 +464,12 @@ test_that("ODE nlmixr2 model sets structural type ode", {
   skip_if_not_installed("rxode2")
   f_ode <- function() {
     ini({ tvcl <- 0.134; tvv <- 8.1; tvka <- 1.0
-          eta.cl ~ 0.07; err.prop ~ 0.01 })
+          eta.cl ~ 0.07; prop.err <- 0.01 })
     model({
       cl <- tvcl * exp(eta.cl); v <- tvv; ka <- tvka
       d/dt(depot)   = -ka * depot
       d/dt(central) =  ka * depot / v - cl / v * central
-      DV ~ prop(err.prop)
+      central ~ prop(prop.err)
     })
   }
   ui <- rxode2::rxode2(f_ode)

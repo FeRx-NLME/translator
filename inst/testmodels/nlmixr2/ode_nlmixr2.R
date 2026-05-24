@@ -11,7 +11,7 @@ f_ode_oral <- function() {
     eta.v  ~ 0.02
     eta.ka ~ 0.40
 
-    err.prop ~ 0.01
+    prop.err <- 0.01
   })
   model({
     cl <- tvcl * exp(eta.cl)
@@ -21,6 +21,6 @@ f_ode_oral <- function() {
     d/dt(depot)   = -ka * depot
     d/dt(central) =  ka * depot / v - (cl / v) * central
 
-    DV ~ prop(err.prop)
+    central ~ prop(prop.err)
   })
 }

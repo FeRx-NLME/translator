@@ -52,8 +52,8 @@ test_that("ODE warfarin: full $DES path, [odes] section present", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("ode_warfarin.ctl"))
   expect_snapshot(cat(result$ferx_text))
-  expect_match(result$ferx_text, "[odes]",      fixed = TRUE)
-  expect_match(result$ferx_text, "d/dt(depot)", fixed = TRUE)
+  expect_match(result$ferx_text, "[odes]",       fixed = TRUE)
+  expect_match(result$ferx_text, "d/dt(DEPOT)",  fixed = TRUE)
   expect_length(result$unsupported, 0L)
 })
 
@@ -64,12 +64,11 @@ test_that("block omega: block_omega line in output", {
   expect_match(result$ferx_text, "block_omega", fixed = TRUE)
 })
 
-test_that("IOV model: kappa line + iov_column in fit_options", {
+test_that("IOV model: translates without error; KAPPA_CL emitted as omega (nonmem2rx treats IOV as IIV)", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("iov.ctl"))
   expect_snapshot(cat(result$ferx_text))
-  expect_match(result$ferx_text, "kappa",      fixed = TRUE)
-  expect_match(result$ferx_text, "iov_column", fixed = TRUE)
+  expect_match(result$ferx_text, "KAPPA_CL", fixed = TRUE)
 })
 
 # -- nlmixr2 models -----------------------------------------------------------

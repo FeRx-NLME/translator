@@ -160,13 +160,13 @@ test_that("to_ferx nlmixr2 round-trip", {
     ini({
       tvcl <- 0.134; tvv <- 8.1; tvka <- 1.0
       eta.cl ~ 0.07; eta.v ~ 0.02
-      err.prop ~ 0.01
+      prop.err <- 0.01
     })
     model({
       cl <- tvcl * exp(eta.cl)
       v  <- tvv  * exp(eta.v)
       ka <- tvka
-      linCmt() ~ prop(err.prop)
+      linCmt() ~ prop(prop.err)
     })
   }
 
@@ -181,8 +181,8 @@ test_that("to_ferx nlmixr2 round-trip", {
 test_that("to_ferx writes file when output is given", {
   skip_if_not_installed("rxode2")
   f_1cpt <- function() {
-    ini({ tvcl <- 0.134; eta.cl ~ 0.07; err.prop ~ 0.01 })
-    model({ cl <- tvcl * exp(eta.cl); linCmt() ~ prop(err.prop) })
+    ini({ tvcl <- 0.134; tvv <- 8.1; eta.cl ~ 0.07; prop.err <- 0.01 })
+    model({ cl <- tvcl * exp(eta.cl); v <- tvv; linCmt() ~ prop(prop.err) })
   }
   path <- tempfile(fileext = ".ferx")
   on.exit(unlink(path))
