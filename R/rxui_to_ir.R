@@ -162,7 +162,6 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
 .extract_thetas <- function(ini) {
   rows <- ini[!is.na(ini$ntheta) & is.na(ini$err), , drop = FALSE]
-  warn <- character()
   thetas <- lapply(seq_len(nrow(rows)), function(i) {
     row <- rows[i, ]
     # Use label only if it is a single valid identifier (no whitespace).
@@ -173,12 +172,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     else
       .strip_prefix(row$name)
     nm <- .norm(lbl_raw)
-    if (isTRUE(row$fix))
-      warn <<- c(warn, paste0("INFO  | THETA ", nm,
-                              " was FIXED in source -- treated as free in ferx"))
-    list(name = nm, init = row$est, lower = row$lower, upper = row$upper)
+    list(name = nm, init = row$est, lower = row$lower, upper = row$upper,
+         fixed = isTRUE(row$fix))
   })
-  list(thetas = thetas, warnings = warn)
+  list(thetas = thetas, warnings = character())
 }
 
 .extract_omegas <- function(ini) {
@@ -577,17 +574,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   has_q2  <- "q2"  %in% lhs_lc || "q3" %in% lhs_lc
 
   pk_call <- if (has_ka && has_q2) {
-    unsp <- c(unsp, "three_cpt_oral (not supported in ferx)")
-    warn <- c(warn, "ERROR | three_cpt_oral detected -- not supported in ferx, structural model omitted")
-    NA_character_
+    "three_cpt_oral"
   } else if (has_ka && has_q) {
     "two_cpt_oral"
   } else if (has_ka) {
     "one_cpt_oral"
   } else if (has_q2) {
-    unsp <- c(unsp, "three_cpt_iv_bolus (not supported in ferx)")
-    warn <- c(warn, "ERROR | three_cpt_iv_bolus detected -- not supported in ferx, structural model omitted")
-    NA_character_
+    "three_cpt_iv_bolus"
   } else if (has_q) {
     "two_cpt_iv_bolus"
   } else {
@@ -608,8 +601,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # same pattern for peripheral: v2 -> v3 (NONMEM ADVAN4 TRANS4)
     two_cpt_oral     = list(cl = "cl", v1 = c("v1", "v", "v2"), q = "q",
                             v2 = c("v2", "v3"), ka = "ka"),
-    two_cpt_iv_bolus = list(cl = "cl", v1 = c("v1", "v"), q = "q",
-                            v2 = c("v2", "v3")),
+    two_cpt_iv_bolus  = list(cl = "cl", v1 = c("v1", "v"), q = "q",
+                             v2 = c("v2", "v3")),
+    three_cpt_oral    = list(cl = "cl", v1 = c("v1", "v"), q = "q",
+                             v2 = c("v2", "v3"), q2 = c("q2", "q3"),
+                             v3 = c("v3", "v4"), ka = "ka"),
+    three_cpt_iv_bolus = list(cl = "cl", v1 = c("v1", "v"), q = "q",
+                              v2 = c("v2", "v3"), q2 = c("q2", "q3"),
+                              v3 = c("v3", "v4")),
     list()
   )
 

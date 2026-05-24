@@ -50,11 +50,11 @@ test_that("2-cpt IV bolus: infers two_cpt_iv_bolus", {
   expect_match(result$ferx_text, "two_cpt_iv_bolus", fixed = TRUE)
 })
 
-test_that("3-cpt IV: emits ERROR for unsupported three_cpt_iv_bolus", {
+test_that("3-cpt IV: translates to three_cpt_iv_bolus pk macro", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("3cpt_iv.ctl"))
-  expect_length(result$unsupported, 1L)
-  expect_match(result$unsupported[1], "three_cpt", fixed = FALSE)
+  expect_length(result$unsupported, 0L)
+  expect_match(result$ferx_text, "three_cpt_iv_bolus", fixed = TRUE)
 })
 
 test_that("ODE warfarin: full $DES path, [odes] section present", {

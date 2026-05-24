@@ -83,8 +83,9 @@ emit_ferx <- function(ir) {
 }
 
 .emit_theta <- function(t) {
-  sprintf("  theta %s(%s, %s, %s)",
-          t$name, .fmt_num(t$init), .fmt_num(t$lower), .fmt_num(t$upper))
+  fix_str <- if (isTRUE(t$fixed)) ", FIX" else ""
+  sprintf("  theta %s(%s, %s, %s%s)",
+          t$name, .fmt_num(t$init), .fmt_num(t$lower), .fmt_num(t$upper), fix_str)
 }
 
 .emit_omega <- function(o) {
