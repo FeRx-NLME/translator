@@ -1,9 +1,9 @@
 # 1-cpt oral NONMEM: snapshot + no unsupported
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/1cpt_oral.ctl
+      # Translated from nonmem: 1cpt_oral.ctl
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -35,9 +35,9 @@
 # 2-cpt oral with covariates: snapshot + no unsupported
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/2cpt_oral_cov.ctl
+      # Translated from nonmem: 2cpt_oral_cov.ctl
       
       [parameters]
         theta TVCL(5.0, 0.1, 100.0)
@@ -77,9 +77,9 @@
 # 2-cpt IV bolus: infers two_cpt_iv_bolus
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/2cpt_iv.ctl
+      # Translated from nonmem: 2cpt_iv.ctl
       
       [parameters]
         theta TVCL(5.0, 0.1, 100.0)
@@ -114,9 +114,9 @@
 # ODE warfarin: full $DES path, [odes] section present
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/ode_warfarin.ctl
+      # Translated from nonmem: ode_warfarin.ctl
       # Warnings: 1 -- run result$warnings for details
       
       [parameters]
@@ -153,9 +153,9 @@
 # block omega: block_omega line in output
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/block_omega.ctl
+      # Translated from nonmem: block_omega.ctl
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -186,9 +186,9 @@
 # IOV model: translates without error; KAPPA_CL emitted as omega (nonmem2rx treats IOV as IIV)
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/iov.ctl
+      # Translated from nonmem: iov.ctl
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -222,7 +222,7 @@
 # 1-cpt oral nlmixr2: snapshot + one_cpt_oral
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
       # Translated from nlmixr2: unknown
       
@@ -256,7 +256,7 @@
 # ODE nlmixr2: d/dt expressions produce [odes] section
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
       # Translated from nlmixr2: unknown
       # Warnings: 1 -- run result$warnings for details
@@ -295,9 +295,9 @@
 # amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/pk_1cmt_oral.mod
+      # Translated from nonmem: pk_1cmt_oral.mod
       # Warnings: 1 -- run result$warnings for details
       
       [parameters]
@@ -333,9 +333,9 @@
 # amp.sim PKPD indirect response: 4-state ODE + additive error
 
     Code
-      cat(result$ferx_text)
+      cat(norm_snap(result$ferx_text))
     Output
-      # Translated from nonmem: /Library/Frameworks/R.framework/Versions/4.5-x86_64/Resources/library/ferxtranslate/testmodels/nonmem/pkpd_ir.mod
+      # Translated from nonmem: pkpd_ir.mod
       # Warnings: 1 -- run result$warnings for details
       
       [parameters]
