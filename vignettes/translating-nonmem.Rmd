@@ -1,0 +1,203 @@
+---
+title: "Translating NONMEM models to ferx"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Translating NONMEM models to ferx}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(collapse = TRUE, comment = "#>", eval = FALSE)
+```
+
+## Overview
+
+`ferxtranslate` converts NONMEM control stream files (`.ctl`) to ferx `.ferx`
+format in one call. This vignette walks through the bundled warfarin example
+from start to finish.
+
+The translation chain uses `nonmem2rx` as a parser, so install it first:
+
+```{r install}
+install.packages(c("nonmem2rx", "ferxtranslate"))
+```
+
+## Step 1 -- Translate
+
+Point `nm_to_ferx()` at a control stream file. If you also pass `output`, the
+`.ferx` file is written immediately:
+
+```{r translate}
+library(ferxtranslate)
+
+ctl    <- system.file("testmodels/nonmem/1cpt_oral.ctl", package = "ferxtranslate")
+result <- nm_to_ferx(ctl, output = "warfarin.ferx")
+```
+
+`result` is a `ferx_translate_result` with three fields:
+
+| Field | Contents |
+|---|---|
+| `$ferx_text` | The complete `.ferx` file as a character string |
+| `$warnings` | Translation messages (INFO / WARN / ERROR prefixed) |
+| `$unsupported` | Features present in the source that were not translated |
+
+## Step 2 -- Read the output
+
+```{r show}
+cat(result$ferx_text)
+```
+
+The output for the warfarin 1-compartment oral model looks like:
+
+```
+# Translated from nonmem: 1cpt_oral.ctl
+
+[parameters]
+  theta TVCL(0.134, 0.001, 10.0)
+  theta TVV(8.1, 0.1, 500.0)
+  theta TVKA(1.0, 0.01, 50.0)
+
+  omega ETA_CL ~ 0.07
+  omega ETA_V ~ 0.02
+  omega ETA_KA ~ 0.4
+
+  sigma PROP_ERR ~ 0.01 (sd)
+
+[individual_parameters]
+  CL = TVCL * exp(ETA_CL)
+  V = TVV * exp(ETA_V)
+  KA = TVKA * exp(ETA_KA)
+
+[structural_model]
+  pk one_cpt_oral(cl=CL, v=V, ka=KA)
+
+[error_model]
+  DV ~ proportional(PROP_ERR)
+
+[fit_options]
+  method = focei
+  maxiter = 500
+  covariance = true
+```
+
+Always review:
+
+- **Theta bounds** -- ferx always emits `(init, lower, upper)`. If the source
+  lacked bounds, the translator uses `(init, 0, Inf)` and appends a WARN.
+- **PK macro** -- inferred from the parameters defined in `$PK`. Check that
+  `one_cpt_oral` (or `two_cpt_oral` etc.) matches your model intent.
+- **Error model type** -- complex `$ERROR` blocks are classified heuristically;
+  verify against the original.
+
+## Step 3 -- Check warnings
+
+```{r warnings}
+result$warnings
+result$unsupported
+```
+
+Common messages and what to do:
+
+| Message | Action |
+|---|---|
+| `INFO | THETA X was FIXED` | ferx treats it as free; add a comment or pin post-fit |
+| `WARN | Theta bounds not found` | Open the `.ferx` file and add realistic bounds |
+| `WARN | complex $ERROR -- classified as proportional` | Verify error model against original |
+| `ERROR | MIXTURE model detected` | Manual rewrite required; ferx does not support mixtures yet |
+
+If `result$unsupported` is non-empty, the `.ferx` file has `# WARNING:` comments
+at the affected locations so you can find them quickly.
+
+## Step 4 -- Fit with ferx
+
+Once you are happy with the `.ferx` file, pass it directly to `ferx_fit()`:
+
+```{r fit}
+library(ferx)
+fit <- ferx_fit("warfarin.ferx", data = "warfarin.csv")
+print(fit)
+```
+
+## Covariates
+
+For models with covariates (weight, creatinine clearance), the allometric power
+expressions pass through unchanged:
+
+```{r cov}
+ctl2   <- system.file("testmodels/nonmem/2cpt_oral_cov.ctl", package = "ferxtranslate")
+result2 <- nm_to_ferx(ctl2)
+cat(result2$ferx_text)
+```
+
+The `[individual_parameters]` section will contain lines such as:
+
+```
+CL = TVCL * (WT/70)^THETA_WT * (CRCL/100)^THETA_CRCL * exp(ETA_CL)
+```
+
+Check that the covariate column names in the `.ferx` file match the column
+names in your dataset.
+
+## ODE models
+
+For `$DES` block models, ferxtranslate produces an `[odes]` section:
+
+```{r ode}
+ctl_ode <- system.file("testmodels/nonmem/ode_warfarin.ctl", package = "ferxtranslate")
+result_ode <- nm_to_ferx(ctl_ode)
+cat(result_ode$ferx_text)
+```
+
+The compartment names (`depot`, `central`) come from `$MODEL COMP=()` or from
+the `d/dt()` call names. Verify that the `obs_cmt` in `[structural_model]`
+points to the compartment that maps to DV in your dataset.
+
+## nlmixr2 models
+
+nlmixr2 model functions translate the same way via `nlmixr2_to_ferx()`:
+
+```{r nlmixr2}
+f_1cpt <- function() {
+  ini({
+    tvcl <- c(0.001, 0.134, 10.0)
+    eta.cl ~ 0.07
+    err.prop ~ 0.01
+  })
+  model({
+    cl <- tvcl * exp(eta.cl)
+    linCmt() ~ prop(err.prop)
+  })
+}
+result_r <- nlmixr2_to_ferx(f_1cpt)
+cat(result_r$ferx_text)
+```
+
+## What cannot be translated
+
+See the `$unsupported` field and `# WARNING:` comments in the output for a
+per-model list. The package-level catalogue:
+
+```{r unsupported_table, echo = FALSE, eval = TRUE}
+tbl <- data.frame(
+  Feature = c(
+    "3-compartment analytical",
+    "Multiple DVIDs",
+    "MIXTURE models",
+    "R1 / D1 infusion rate/duration",
+    "ALAG2 / ALAG3",
+    "F2 / F3",
+    "SIGMA BLOCK (correlated residuals)",
+    "IOV with correlated kappas",
+    "Categorical / count / TTE",
+    "ADVAN5 (general linear, >3 cpts)"
+  ),
+  Status = rep("ERROR -- manual edit required", 10L),
+  stringsAsFactors = FALSE
+)
+knitr::kable(tbl)
+```
+
+Each `ERROR` item produces a `# WARNING:` comment in the `.ferx` file at the
+point where the feature would have appeared, so you know exactly what to fix.

@@ -1,0 +1,6 @@
+^plans$
+^CLAUDE\.md$
+^\.github$
+^\.git$
+^.*\.Rproj$
+^\.Rproj\.user$

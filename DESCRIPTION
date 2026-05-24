@@ -1,0 +1,22 @@
+Package: ferxtranslate
+Title: Translate Pharmacometric Models to ferx Format
+Version: 0.1.0
+Authors@R: person("Teun", "Post", email = "teunpost@gmail.com", role = c("aut", "cre"))
+Description: Translates pharmacometric models written in NONMEM, nlmixr2, or
+    Monolix into ferx .ferx format. Uses nonmem2rx and rxode2 as parsing
+    intermediaries so that a single adapter covers all three source formats.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.3
+Imports:
+    cli,
+    nonmem2rx,
+    rxode2
+Suggests:
+    knitr,
+    monolix2rx,
+    rmarkdown,
+    testthat (>= 3.0.0)
+VignetteBuilder: knitr
+Config/testthat/edition: 3
