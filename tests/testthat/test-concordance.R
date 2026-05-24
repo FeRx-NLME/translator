@@ -185,3 +185,73 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   expect_lt(abs(fit$theta["CL"] / ref["CL"] - 1), 0.15, label = "CL")
   expect_lt(abs(fit$theta["V"]  / ref["V"]  - 1), 0.15, label = "V")
 })
+
+# ===========================================================================
+# FEATURE-GAP SKELETONS
+# Each block below corresponds to a ferx-core feature that is not yet
+# supported. The test is skipped with a labelled message so:
+#   - The skip list in CI output documents the outstanding gaps.
+#   - When ferx-core ships the feature, remove the skip(), add a test
+#     model to inst/testmodels/nonmem/, generate concordance data with
+#     data-raw/generate_concordance_data.R, and wire up the assertions.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 3-cpt infusion (ADVAN12 TRANS4 with zero-order input)
+#   ferx-core gap: three_cpt_infusion pk macro not yet implemented.
+#   When added: create 3cpt_infusion.ctl, generate concordance CSV,
+#   assert CL/V1/Q/V2/Q2/V2 within 10%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [three_cpt_infusion]: 3-cpt infusion concordance", {
+  skip("ferx-core gap: three_cpt_infusion pk macro not yet supported")
+})
+
+# ---------------------------------------------------------------------------
+# Model-defined infusion rate / duration (R1= / D1= in $PK)
+#   ferx-core gap: rate parameter in pk macro (R1/D1 passthrough).
+#   When added: create r1_infusion.ctl, generate concordance CSV,
+#   assert rate/duration params within 15%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [R1_D1_infusion]: model-defined infusion rate/duration", {
+  skip("ferx-core gap: R1/D1 model-defined infusion rate not yet supported")
+})
+
+# ---------------------------------------------------------------------------
+# Multiple DVIDs / endpoints (e.g. PK+PD with DVID column)
+#   ferx-core gap: multi-endpoint / DVID support.
+#   When added: create pkpd_dvid.ctl, generate concordance CSV per endpoint,
+#   assert PK and PD params within 15%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [multiple_dvid]: multi-endpoint DVID concordance", {
+  skip("ferx-core gap: multiple DVIDs / endpoints not yet supported")
+})
+
+# ---------------------------------------------------------------------------
+# MIXTURE models
+#   ferx-core gap: mixture model support.
+#   When added: create mixture.ctl, generate concordance CSV,
+#   assert mixture proportions and subpop params within 20%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [mixture_model]: MIXTURE model concordance", {
+  skip("ferx-core gap: MIXTURE models not yet supported")
+})
+
+# ---------------------------------------------------------------------------
+# IOV with block kappa (off-diagonal IOV omega)
+#   ferx-core gap: block kappa (currently only diagonal kappas emitted).
+#   When added: extend iov.ctl to have correlated IOV, update concordance CSV,
+#   assert block kappa elements within 20%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [iov_block_kappa]: IOV with block kappa concordance", {
+  skip("ferx-core gap: block kappa (off-diagonal IOV omega) not yet supported")
+})
+
+# ---------------------------------------------------------------------------
+# Transit compartment absorption
+#   ferx-core gap: transit compartment pk macro or ODE pattern.
+#   When added: create transit.ctl (e.g. ADVAN6 transit chain), generate
+#   concordance CSV, assert KTR/MTT/KA/CL/V within 15%.
+# ---------------------------------------------------------------------------
+test_that("FEATURE GAP [transit_compartments]: transit absorption concordance", {
+  skip("ferx-core gap: transit compartment absorption not yet supported")
+})
