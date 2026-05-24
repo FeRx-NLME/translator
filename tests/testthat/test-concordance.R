@@ -45,6 +45,27 @@ library(ferx)
   system.file(file.path("testdata", name), package = "ferxtranslate")
 }
 
+# Helper: print a deviation table and return pct errors invisibly.
+# estimated: named numeric (fit$theta or fit$omega diagonal)
+# reference: named numeric of true/reference values with matching names
+# label:     printed above the table (e.g. model name)
+.report_deviations <- function(estimated, reference, label = "") {
+  if (nzchar(label)) message("\n-- ", label, " --")
+  pct <- vapply(names(reference), function(nm) {
+    est <- if (nm %in% names(estimated)) estimated[[nm]] else NA_real_
+    (est / reference[[nm]] - 1) * 100
+  }, numeric(1))
+  rows <- data.frame(
+    param    = names(reference),
+    reference = unname(reference),
+    estimated = unname(estimated[names(reference)]),
+    pct_error = round(pct, 1),
+    stringsAsFactors = FALSE
+  )
+  message(paste(capture.output(print(rows, row.names = FALSE)), collapse = "\n"))
+  invisible(pct)
+}
+
 # ---------------------------------------------------------------------------
 # 1-cpt oral (linCmt → one_cpt_oral pk macro)
 #   True thetas: TVCL=0.134, TVV=8.1, TVKA=1.0
@@ -60,11 +81,10 @@ test_that("1-cpt oral: TVCL and TVV recover within 15% of truth", {
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  # True values from theta initials in 1cpt_oral.ctl
-  expect_lt(abs(fit$theta["TVCL"] / 0.134 - 1), 0.15,
-            label = "TVCL relative error")
-  expect_lt(abs(fit$theta["TVV"]  / 8.1   - 1), 0.15,
-            label = "TVV relative error")
+  ref <- c(TVCL = 0.134, TVV = 8.1)
+  .report_deviations(fit$theta, ref, "1-cpt oral thetas")
+  expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.15, label = "TVCL relative error")
+  expect_lt(abs(fit$theta["TVV"]  / ref["TVV"]  - 1), 0.15, label = "TVV relative error")
 })
 
 
@@ -82,11 +102,12 @@ test_that("2-cpt IV: all structural thetas recover within 10% of truth", {
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  # True values from theta initials in 2cpt_iv.ctl
-  expect_lt(abs(fit$theta["TVCL"] / 5.0  - 1), 0.10, label = "TVCL")
-  expect_lt(abs(fit$theta["TVV1"] / 20.0 - 1), 0.10, label = "TVV1")
-  expect_lt(abs(fit$theta["TVQ"]  / 8.0  - 1), 0.10, label = "TVQ")
-  expect_lt(abs(fit$theta["TVV2"] / 60.0 - 1), 0.10, label = "TVV2")
+  ref <- c(TVCL = 5.0, TVV1 = 20.0, TVQ = 8.0, TVV2 = 60.0)
+  .report_deviations(fit$theta, ref, "2-cpt IV thetas")
+  expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.10, label = "TVCL")
+  expect_lt(abs(fit$theta["TVV1"] / ref["TVV1"] - 1), 0.10, label = "TVV1")
+  expect_lt(abs(fit$theta["TVQ"]  / ref["TVQ"]  - 1), 0.10, label = "TVQ")
+  expect_lt(abs(fit$theta["TVV2"] / ref["TVV2"] - 1), 0.10, label = "TVV2")
 })
 
 test_that("2-cpt IV: omega estimates recover within 10% of truth", {
@@ -99,9 +120,14 @@ test_that("2-cpt IV: omega estimates recover within 10% of truth", {
 
   # 2-cpt IV omegas are larger (0.05-0.10) and recover within 1% in practice;
   # 10% tolerance gives a comfortable margin while still catching translation bugs.
-  expect_lt(abs(fit$omega["ETA_CL", "ETA_CL"] / 0.10 - 1), 0.10, label = "omega_CL")
-  expect_lt(abs(fit$omega["ETA_V1", "ETA_V1"] / 0.10 - 1), 0.10, label = "omega_V1")
-  expect_lt(abs(fit$omega["ETA_Q",  "ETA_Q"]  / 0.08 - 1), 0.10, label = "omega_Q")
+  omega_diag <- c(ETA_CL = fit$omega["ETA_CL", "ETA_CL"],
+                  ETA_V1 = fit$omega["ETA_V1", "ETA_V1"],
+                  ETA_Q  = fit$omega["ETA_Q",  "ETA_Q"])
+  ref_omega  <- c(ETA_CL = 0.10, ETA_V1 = 0.10, ETA_Q = 0.08)
+  .report_deviations(omega_diag, ref_omega, "2-cpt IV omegas")
+  expect_lt(abs(omega_diag["ETA_CL"] / ref_omega["ETA_CL"] - 1), 0.10, label = "omega_CL")
+  expect_lt(abs(omega_diag["ETA_V1"] / ref_omega["ETA_V1"] - 1), 0.10, label = "omega_V1")
+  expect_lt(abs(omega_diag["ETA_Q"]  / ref_omega["ETA_Q"]  - 1), 0.10, label = "omega_Q")
 })
 
 # ---------------------------------------------------------------------------
@@ -131,9 +157,11 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  expect_lt(abs(fit$theta["KA"] / ref$THETA1 - 1), 0.10, label = "KA vs amp.sim ref")
-  expect_lt(abs(fit$theta["CL"] / ref$THETA2 - 1), 0.10, label = "CL vs amp.sim ref")
-  expect_lt(abs(fit$theta["V"]  / ref$THETA3 - 1), 0.10, label = "V vs amp.sim ref")
+  ref_nm <- c(KA = ref$THETA1, CL = ref$THETA2, V = ref$THETA3)
+  .report_deviations(fit$theta, ref_nm, "amp.sim 1-cpt oral thetas vs NONMEM reference")
+  expect_lt(abs(fit$theta["KA"] / ref_nm["KA"] - 1), 0.10, label = "KA vs amp.sim ref")
+  expect_lt(abs(fit$theta["CL"] / ref_nm["CL"] - 1), 0.10, label = "CL vs amp.sim ref")
+  expect_lt(abs(fit$theta["V"]  / ref_nm["V"]  - 1), 0.10, label = "V vs amp.sim ref")
 })
 
 # ---------------------------------------------------------------------------
@@ -151,8 +179,9 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  # True values: theta initials from pk_1cmt_oral.mod
-  expect_lt(abs(fit$theta["KA"] / 0.1 - 1), 0.15, label = "KA")
-  expect_lt(abs(fit$theta["CL"] / 2.0 - 1), 0.15, label = "CL")
-  expect_lt(abs(fit$theta["V"]  / 1.0 - 1), 0.15, label = "V")
+  ref <- c(KA = 0.1, CL = 2.0, V = 1.0)
+  .report_deviations(fit$theta, ref, "ODE 1-cpt oral thetas")
+  expect_lt(abs(fit$theta["KA"] / ref["KA"] - 1), 0.15, label = "KA")
+  expect_lt(abs(fit$theta["CL"] / ref["CL"] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta["V"]  / ref["V"]  - 1), 0.15, label = "V")
 })
