@@ -252,18 +252,18 @@ test_that("additive error parsed", {
   expect_equal(out$params, "ERR_ADD")
 })
 
-test_that("combined error parsed", {
+test_that("combined error parsed -- proportional first (ferx-core order)", {
   map <- c("err.add" = "ERR_ADD", "err.prop" = "ERR_PROP")
   out <- .parse_error_rhs(quote(add(err.add) + prop(err.prop)), map)
   expect_equal(out$type,   "combined")
-  expect_equal(out$params, c("ERR_ADD", "ERR_PROP"))
+  expect_equal(out$params, c("ERR_PROP", "ERR_ADD"))
 })
 
-test_that("combined error parsed when prop comes first (prop + add)", {
+test_that("combined error parsed when prop comes first (prop + add) -- proportional first", {
   map <- c("err.add" = "ERR_ADD", "err.prop" = "ERR_PROP")
   out <- .parse_error_rhs(quote(prop(err.prop) + add(err.add)), map)
   expect_equal(out$type,   "combined")
-  expect_equal(out$params, c("ERR_ADD", "ERR_PROP"))
+  expect_equal(out$params, c("ERR_PROP", "ERR_ADD"))
 })
 
 # -- .infer_pk_macro ----------------------------------------------------------

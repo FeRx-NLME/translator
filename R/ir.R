@@ -145,6 +145,17 @@ validate_ferx_ir <- function(ir) {
       )
   }
 
+  if (identical(ir$structural$type, "pk_macro")) {
+    if (is.null(ir$structural$pk_call) || !nzchar(ir$structural$pk_call))
+      cli::cli_abort(
+        "structural$pk_call must be a non-empty string when structural$type is {.val pk_macro}."
+      )
+    if (!is.list(ir$structural$pk_args))
+      cli::cli_abort(
+        "structural$pk_args must be a named list when structural$type is {.val pk_macro}."
+      )
+  }
+
   invisible(ir)
 }
 

@@ -55,7 +55,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     structural$states  <- state_names
     structural$obs_cmt <- obs_cmt
   }
-  if (identical(structural$type, "lincmt")) {
+  lincmt_found <- identical(structural$type, "lincmt")
+  if (lincmt_found) {
     pk_out <- .infer_pk_macro(expr_out$indiv_params)
     warn   <- c(warn, pk_out$warnings)
     unsp   <- c(unsp, pk_out$unsupported)
@@ -66,6 +67,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                          pk_call = pk_out$pk_call,
                          pk_args = pk_out$pk_args)
     }
+  }
+
+  if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
+    warn <- c(warn, "ERROR | No structural model detected -- [structural_model] section omitted")
+    unsp <- c(unsp, "structural model (no linCmt() or d/dt() found in model block)")
   }
 
   fit_opts <- list(method = "focei", maxiter = 500L, covariance = TRUE)
@@ -279,6 +285,24 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   unlist(lapply(as.list(expr[-1]), .collect_symbols))
 }
 
+# Recursively substitute aux-var symbols in an expression with their definitions.
+# aux_map: named list mapping uppercase symbol name -> defining R expression.
+# Used to inline $DES-internal intermediates (e.g. C2, EFF) into ODE RHS strings
+# so that the emitted [odes] block references only thetas, etas, and states.
+.inline_aux_vars <- function(expr, aux_map, depth = 0L) {
+  if (depth > 30L) return(expr)
+  if (is.symbol(expr)) {
+    nm <- as.character(expr)
+    if (nm %in% names(aux_map))
+      return(.inline_aux_vars(aux_map[[nm]], aux_map, depth + 1L))
+    return(expr)
+  }
+  if (!is.call(expr)) return(expr)
+  as.call(c(list(expr[[1]]),
+            lapply(as.list(expr[-1]), .inline_aux_vars,
+                   aux_map = aux_map, depth = depth + 1L)))
+}
+
 # -- expression parser --------------------------------------------------------
 
 .parse_model_exprs <- function(lst, name_map, sigma_names = character()) {
@@ -323,10 +347,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
       # d/dt(STATE) <- rhs  or  d/dt(STATE) = rhs
       if (.is_ddt_lhs(lhs_expr)) {
-        state <- .ddt_state(lhs_expr)
-        rhs   <- paste(deparse(.normalise_expr(expr[[3]], name_map),
-                               width.cutoff = 500L), collapse = " ")
-        odes  <- c(odes, list(list(state = state, rhs = rhs)))
+        state         <- .ddt_state(lhs_expr)
+        rhs_expr_norm <- .normalise_expr(expr[[3]], name_map)
+        rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
+        odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))
         aux_vars <- c(aux_vars, toupper(state))  # ODE state vars are auxiliary
         if (!identical(structural$type, "ode"))
           structural <- list(type = "ode")
@@ -374,6 +398,41 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     }
   }
 
+  # Pass 2b: inline aux-var definitions into ODE RHS strings.
+  # $DES-internal intermediates (e.g. C2, EFF) are excluded from
+  # [individual_parameters] but referenced in d/dt() expressions. Without
+  # inlining, they appear as undefined names that ferx-core rejects at parse time.
+  if (length(odes) > 0) {
+    state_upper <- toupper(vapply(odes, function(o) o$state, ""))
+    sigma_upper <- toupper(sigma_names)
+    aux_map     <- list()
+    for (a in all_assigns) {
+      if (a$lhs %in% aux_vars &&
+          !a$lhs %in% state_upper &&
+          !a$lhs %in% sigma_upper)
+        aux_map[[a$lhs]] <- .normalise_expr(a$rhs_expr, name_map)
+    }
+    if (length(aux_map) > 0) {
+      odes <- lapply(odes, function(o) {
+        inlined <- .inline_aux_vars(o$rhs_expr, aux_map)
+        list(state = o$state,
+             rhs   = paste(deparse(inlined, width.cutoff = 500L), collapse = " "))
+      })
+    } else {
+      odes <- lapply(odes, function(o) list(state = o$state, rhs = o$rhs))
+    }
+  }
+
+  # Pass 2c: collect RXM_* alias map for inline substitution.
+  # nonmem2rx emits RXM_X = Y lines as internal IOV/eta copies. Collect them
+  # all before Pass 3 (ordering in ui$lstExpr is not guaranteed) so that any
+  # downstream indiv_param rhs that references RXM_X gets KAPPA_Y directly.
+  rxm_map <- character()
+  for (a in all_assigns) {
+    if (grepl("^RXM_", a$lhs))
+      rxm_map[[a$lhs]] <- a$rhs  # a$rhs is already normalised (e.g. "KAPPA_CL")
+  }
+
   # Pass 3: classify each assignment into indiv_params or error_model.
   indiv_params <- list()
   for (a in all_assigns) {
@@ -381,8 +440,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (a$lhs == a$rhs) next
 
     # SCALE* vars are NONMEM-specific scaling intermediates.
-    # RXINI* / RXF* are nonmem2rx internal initial-condition temporaries.
-    if (grepl("^SCALE\\d*$|^RXINI|^RXF_", a$lhs)) next
+    # RXINI* / RXF_* / RXM_* are nonmem2rx internal temporaries and IOV aliases.
+    if (grepl("^SCALE\\d*$|^RXINI|^RXF_|^RXM_", a$lhs)) next
 
     if (a$lhs %in% aux_vars) {
       # Check if this is the error model assignment (RHS contains sigma vars).
@@ -396,7 +455,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       next
     }
 
-    indiv_params <- c(indiv_params, list(list(lhs = a$lhs, rhs = a$rhs)))
+    # Inline RXM_* aliases so output references the real variable (e.g. KAPPA_CL).
+    rhs_final <- a$rhs
+    for (nm in names(rxm_map))
+      rhs_final <- gsub(paste0("\\b", nm, "\\b"), rxm_map[[nm]], rhs_final, perl = TRUE)
+
+    indiv_params <- c(indiv_params, list(list(lhs = a$lhs, rhs = rhs_final)))
   }
 
   list(
@@ -449,8 +513,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         (lhs_fn == "prop" && rhs_fn == "add")) {
       add_node  <- if (lhs_fn == "add")  rhs[[2]] else rhs[[3]]
       prop_node <- if (lhs_fn == "prop") rhs[[2]] else rhs[[3]]
-      params    <- c(.norm(.strip_prefix(as.character(add_node[[2]]))),
-                     .norm(.strip_prefix(as.character(prop_node[[2]]))))
+      params    <- c(.norm(.strip_prefix(as.character(prop_node[[2]]))),
+                     .norm(.strip_prefix(as.character(add_node[[2]]))))
       return(list(type = "combined", params = params, warnings = warn))
     }
   }

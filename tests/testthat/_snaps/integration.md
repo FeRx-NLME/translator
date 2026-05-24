@@ -203,8 +203,7 @@
         sigma EPS1 ~ 0.1 (sd)
       
       [individual_parameters]
-        RXM_KAPPA_CL = KAPPA_CL
-        CL = TVCL * exp(ETA_CL + RXM_KAPPA_CL)
+        CL = TVCL * exp(ETA_CL + KAPPA_CL)
         V = TVV * exp(ETA_V)
         KA = TVKA * exp(ETA_KA)
       
@@ -375,7 +374,7 @@
         d/dt(DOSE) = -K12 * DOSE
         d/dt(CENTRAL) = K12 * DOSE - K20 * CENTRAL - K23 * CENTRAL + K32 * PERIPH
         d/dt(PERIPH) = K23 * CENTRAL - K32 * PERIPH
-        d/dt(EFFECT) = EFF * RIN - KOUT * EFFECT
+        d/dt(EFFECT) = (1 - CENTRAL/V2 * EMAX/(CENTRAL/V2 + EC50)) * RIN - KOUT * EFFECT
       
       [error_model]
         DV ~ additive(EPS1)
