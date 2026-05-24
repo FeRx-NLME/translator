@@ -384,3 +384,36 @@
         maxiter = 500
         covariance = true
 
+# pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: pk_1cmt_oral_ampsim.ctl
+      
+      [parameters]
+        theta KA(0.1, 0.0, 1e15)
+        theta CL(2.0, 0.0, 1e15)
+        theta V(1.0, 0.0, 1e15)
+      
+        omega ETA_KA ~ 0.01
+        omega ETA_CL ~ 0.02
+      
+        sigma EPS1 ~ 0.316227766016838 (sd)
+      
+      [individual_parameters]
+        KA = KA * exp(ETA_KA)
+        CL = CL * exp(ETA_CL)
+        V = V
+      
+      [structural_model]
+        pk one_cpt_oral(cl=CL, v=V, ka=KA)
+      
+      [error_model]
+        DV ~ proportional(EPS1)
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+

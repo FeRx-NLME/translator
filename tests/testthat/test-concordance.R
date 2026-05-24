@@ -4,9 +4,21 @@
 # These tests are gated on ferx being installed and are skipped on CI (too slow,
 # require the ferx binary in PATH). Run locally with devtools::test().
 #
-# Bundled datasets in inst/testdata/ were simulated from the translated models
-# using ferx_simulate() at the theta initial values (which are the "true" values
-# for the simulation). See data-raw/generate_concordance_data.R for the script.
+# Two sets of tests:
+#
+# Self-contained (always run when ferx is installed):
+#   Datasets in inst/testdata/*_concordance.csv were simulated from the
+#   translated models using ferx_simulate() at the theta initial values.
+#   See data-raw/generate_concordance_data.R for the generation script.
+#
+# amp.sim (also gated on amp.sim being installed):
+#   Truth values come from published NONMEM reference estimates stored in
+#   amp.sim's PK.1CMT.ORAL.ext file. The bundled dataset was simulated at
+#   those reference values via ferx_simulate(). This tests the linCmt
+#   translation path (one_cpt_oral pk macro) against an external NONMEM
+#   reference rather than our own model initials.
+#   Note: the amp.sim ODE path (pk_1cmt_oral.mod / ADVAN6) is not tested
+#   here because the S2=V compartment scaling is not yet translated.
 #
 # Acceptance criteria (per plans/v0.1-implementation.md Section 10):
 #   structural thetas: within 15% of truth
@@ -90,4 +102,36 @@ test_that("2-cpt IV: omega estimates recover within 10% of truth", {
   expect_lt(abs(fit$omega["ETA_CL", "ETA_CL"] / 0.10 - 1), 0.10, label = "omega_CL")
   expect_lt(abs(fit$omega["ETA_V1", "ETA_V1"] / 0.10 - 1), 0.10, label = "omega_V1")
   expect_lt(abs(fit$omega["ETA_Q",  "ETA_Q"]  / 0.08 - 1), 0.10, label = "omega_Q")
+})
+
+# ---------------------------------------------------------------------------
+# amp.sim benchmark: compare against published NONMEM reference estimates
+#   Model : pk_1cmt_oral_ampsim.ctl (ADVAN2 linCmt; mirrors amp.sim
+#           PK.1CMT.ORAL IIV structure: ETA on KA and CL only, V fixed)
+#   Truth : amp.sim PK.1CMT.ORAL.ext final estimates (NONMEM FOCEI run)
+#   Data  : simulated at reference parameter values via ferx_simulate()
+#           (NM.theoph.02B.csv is not bundled in the amp.sim package)
+#
+# This validates the one_cpt_oral pk macro translation against an external
+# NONMEM reference, not just against our own model initials.
+# ---------------------------------------------------------------------------
+
+test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
+  skip_if_not_installed("amp.sim")
+
+  # Load published NONMEM reference estimates from amp.sim
+  ext_file <- system.file("example_models/PK.1CMT.ORAL.ext", package = "amp.sim")
+  ext      <- read.table(ext_file, header = TRUE, skip = 1)
+  ref      <- ext[ext$ITERATION == -1000000000, ]
+
+  ferx_file <- .translate_to_tmp("pk_1cmt_oral_ampsim.ctl")
+  data_file  <- .conc_data("ampsim_1cpt_oral_concordance.csv")
+  fit <- ferx_fit(ferx_file, data_file,
+                  method     = "focei",
+                  covariance = FALSE,
+                  verbose    = FALSE)
+
+  expect_lt(abs(fit$theta["KA"] / ref$THETA1 - 1), 0.10, label = "KA vs amp.sim ref")
+  expect_lt(abs(fit$theta["CL"] / ref$THETA2 - 1), 0.10, label = "CL vs amp.sim ref")
+  expect_lt(abs(fit$theta["V"]  / ref$THETA3 - 1), 0.10, label = "V vs amp.sim ref")
 })

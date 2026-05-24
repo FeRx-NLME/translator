@@ -57,6 +57,17 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
   lincmt_found <- identical(structural$type, "lincmt")
   if (lincmt_found) {
+    # Fixed-effect PK params (theta with no ETA) are absent from indiv_params,
+    # so the pk macro arg lookup misses them. Add passthrough entries so that
+    # e.g. `V = THETA(3)` (no ETA) still produces `v=V` in the pk macro call.
+    pk_candidates <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
+    existing_lhs  <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+    theta_names   <- vapply(theta_out$thetas, function(t) t$name, "")
+    for (tname in theta_names) {
+      if (toupper(tname) %in% pk_candidates && !toupper(tname) %in% existing_lhs)
+        expr_out$indiv_params <- c(expr_out$indiv_params,
+                                   list(list(lhs = tname, rhs = tname)))
+    }
     pk_out <- .infer_pk_macro(expr_out$indiv_params)
     warn   <- c(warn, pk_out$warnings)
     unsp   <- c(unsp, pk_out$unsupported)

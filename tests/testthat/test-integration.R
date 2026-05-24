@@ -137,3 +137,15 @@ test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
                               gregexpr("d/dt\\(", result$ferx_text))[[1]])
   expect_equal(n_odes, 4L)
 })
+
+test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pk_1cmt_oral_ampsim.ctl"))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  # Fixed-effect V (no ETA) must appear as passthrough in [individual_parameters]
+  # and be passed to the pk macro, otherwise ferx predicts zero concentration.
+  expect_match(result$ferx_text, "V = V",              fixed = TRUE)
+  expect_match(result$ferx_text, "v=V",                fixed = TRUE)
+  expect_match(result$ferx_text, "one_cpt_oral",       fixed = TRUE)
+  expect_length(result$unsupported, 0L)
+})

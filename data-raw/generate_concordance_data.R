@@ -4,10 +4,12 @@
 # Re-run only when test model parameters change.
 #
 # Requires: ferxtranslate (installed), ferx (installed)
+# amp.sim dataset additionally requires: amp.sim (installed)
 #
 # True parameter values:
-#   1cpt_oral.ctl  : TVCL=0.134, TVV=8.1, TVKA=1.0 (theta initials)
-#   2cpt_iv.ctl    : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
+#   1cpt_oral.ctl           : TVCL=0.134, TVV=8.1, TVKA=1.0 (theta initials)
+#   2cpt_iv.ctl             : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
+#   pk_1cmt_oral_ampsim.ctl : KA=0.0825, CL=2.676, V=1.588 (amp.sim NONMEM reference)
 
 library(ferxtranslate)
 library(ferx)
@@ -76,3 +78,51 @@ write.csv(final2, "inst/testdata/2cpt_iv_concordance.csv",
           row.names=FALSE, quote=FALSE)
 message("Written inst/testdata/2cpt_iv_concordance.csv (",
         nrow(final2), " rows, ", length(unique(final2$ID)), " subjects)")
+
+# ---- amp.sim 1-cpt oral (50 subjects, reference params from NONMEM .ext) ---
+# Requires amp.sim (GitHub: LeidenAdvancedPKPD/amp.sim).
+# True values come from amp.sim's published NONMEM FOCEI run on NM.theoph.02B.csv.
+# NM.theoph.02B.csv is not bundled in amp.sim, so we simulate from the reference
+# parameter values and use those simulated observations as the concordance dataset.
+if (requireNamespace("amp.sim", quietly = TRUE)) {
+  ext  <- read.table(
+    system.file("example_models/PK.1CMT.ORAL.ext", package = "amp.sim"),
+    header = TRUE, skip = 1)
+  ref  <- ext[ext$ITERATION == -1000000000, ]
+
+  ferx3_base <- translate_tmp("pk_1cmt_oral_ampsim.ctl")
+  ferx3_txt  <- readLines(ferx3_base)
+  ferx3_txt  <- paste(ferx3_txt, collapse = "\n")
+  ferx3_txt  <- sub("theta KA[(][^)]+[)]",
+                    sprintf("theta KA(%.10g, 0.0, 1e15)", ref$THETA1), ferx3_txt)
+  ferx3_txt  <- sub("theta CL[(][^)]+[)]",
+                    sprintf("theta CL(%.10g, 0.0, 1e15)", ref$THETA2), ferx3_txt)
+  ferx3_txt  <- sub("theta V[(][^)]+[)]",
+                    sprintf("theta V(%.10g, 0.0, 1e15)",  ref$THETA3), ferx3_txt)
+  ferx3_txt  <- sub("omega ETA_KA ~ [^\n]+",
+                    sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), ferx3_txt)
+  ferx3_txt  <- sub("omega ETA_CL ~ [^\n]+",
+                    sprintf("omega ETA_CL ~ %.10g", ref$OMEGA.2.2.), ferx3_txt)
+  ferx3_txt  <- sub("sigma EPS1 ~ [^\n]+",
+                    sprintf("sigma EPS1 ~ %.10g (sd)", sqrt(ref$SIGMA.1.1.)), ferx3_txt)
+  ferx3_sim  <- tempfile(fileext = ".ferx")
+  writeLines(ferx3_txt, ferx3_sim)
+
+  tmpl3 <- nm_template(50, dose = 4.0, cmt = 1L,
+                       obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24))
+  tf3   <- tempfile(fileext = ".csv")
+  write.csv(tmpl3, tf3, row.names = FALSE, quote = FALSE)
+  sim3  <- ferx_simulate(ferx3_sim, tf3, n_sim = 1L, seed = 789L)
+
+  obs3   <- tmpl3[tmpl3$EVID == 0, ]
+  obs3$DV <- round(sim3$DV_SIM, 6)
+  final3 <- rbind(tmpl3[tmpl3$EVID == 1, ], obs3)
+  final3 <- final3[order(final3$ID, final3$TIME), ]
+  rownames(final3) <- NULL
+  write.csv(final3, "inst/testdata/ampsim_1cpt_oral_concordance.csv",
+            row.names = FALSE, quote = FALSE)
+  message("Written inst/testdata/ampsim_1cpt_oral_concordance.csv (",
+          nrow(final3), " rows, ", length(unique(final3$ID)), " subjects)")
+} else {
+  message("amp.sim not installed -- skipping ampsim_1cpt_oral_concordance.csv")
+}
