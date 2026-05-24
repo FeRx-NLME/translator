@@ -142,6 +142,13 @@ Current test suite and tolerances:
 Datasets live in `inst/testdata/`. Regenerate with `data-raw/generate_concordance_data.R`
 if model files or theta initials change. Commit the regenerated CSVs.
 
+**Translation gap report** — a dedicated test translates every model in
+`inst/testmodels/nonmem/` and prints a `model -> gap` table of any
+`$unsupported` features. It always passes; the table is the signal. Do NOT
+add hardcoded skip skeletons for individual gaps — the report is generic and
+picks them up automatically. Add a model file to extend coverage; the gap
+disappears from the report when the translator or ferx-core gains support.
+
 ## Documentation rules
 
 **Run `roxygen2::roxygenize()` and commit the updated `man/` files before
