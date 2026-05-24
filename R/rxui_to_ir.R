@@ -22,7 +22,8 @@
 #' cat(emit_ferx(ir))
 #' }
 #' @export
-rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_) {
+rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
+                       scaling_hint = list()) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -55,6 +56,31 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     structural$states  <- state_names
     structural$obs_cmt <- obs_cmt
   }
+
+  scaling <- list()
+  if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
+    state_names_uc <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
+    obs_idx <- which(state_names_uc == toupper(structural$obs_cmt))
+    if (length(obs_idx) > 0L) {
+      svar <- scaling_hint[[as.character(obs_idx)]]
+      if (!is.null(svar)) {
+        norm_svar      <- toupper(gsub(".", "_", svar, fixed = TRUE))
+        theta_names_uc <- toupper(vapply(theta_out$thetas, function(t) t$name, ""))
+        indiv_lhs_uc   <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+        matched <- if (norm_svar %in% theta_names_uc) {
+          vapply(theta_out$thetas, function(t) t$name, "")[match(norm_svar, theta_names_uc)]
+        } else if (norm_svar %in% indiv_lhs_uc) {
+          vapply(expr_out$indiv_params, function(p) p$lhs, "")[match(norm_svar, indiv_lhs_uc)]
+        } else NULL
+        if (!is.null(matched)) {
+          scaling <- list(obs_scale = matched)
+          warn    <- c(warn, paste0("INFO  | S", obs_idx, " = ", svar,
+                                    " detected -- emitting [scaling] obs_scale = ", matched))
+        }
+      }
+    }
+  }
+
   lincmt_found <- identical(structural$type, "lincmt")
   if (lincmt_found) {
     # Fixed-effect PK params (theta with no ETA) are absent from indiv_params,
@@ -100,6 +126,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     structural    = structural,
     odes          = expr_out$odes,
     error_model   = expr_out$error_model,
+    scaling       = scaling,
     fit_options   = fit_opts,
     warnings      = warn,
     unsupported   = unsp

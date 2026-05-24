@@ -62,8 +62,11 @@ to_ferx <- function(source,
       )
   )
 
-  src_file <- if (is.character(source)) source else NA_character_
-  ir       <- rxui_to_ir(rxui, source_format = format, source_file = src_file)
+  src_file     <- if (is.character(source)) source else NA_character_
+  scaling_hint <- if (format == "nonmem" && is.character(source) && file.exists(source))
+    .extract_nm_scaling(source) else list()
+  ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
+                   scaling_hint = scaling_hint)
   text     <- emit_ferx(ir)
   result   <- new_ferx_translate_result(text, ir)
 

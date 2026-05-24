@@ -135,3 +135,24 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
   expect_lt(abs(fit$theta["CL"] / ref$THETA2 - 1), 0.10, label = "CL vs amp.sim ref")
   expect_lt(abs(fit$theta["V"]  / ref$THETA3 - 1), 0.10, label = "V vs amp.sim ref")
 })
+
+# ---------------------------------------------------------------------------
+# ODE path: pk_1cmt_oral.mod (ADVAN6 with S2=V scaling)
+#   True thetas: KA=0.1, CL=2.0, V=1.0 (theta initials)
+#   Tests that [scaling] obs_scale=V divides amount by V before comparing to
+#   concentration data -- without scaling, IPRED >> DV and fit diverges.
+# ---------------------------------------------------------------------------
+
+test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of truth", {
+  ferx_file <- .translate_to_tmp("pk_1cmt_oral.mod")
+  data_file  <- .conc_data("ode_1cpt_oral_concordance.csv")
+  fit <- ferx_fit(ferx_file, data_file,
+                  method     = "focei",
+                  covariance = FALSE,
+                  verbose    = FALSE)
+
+  # True values: theta initials from pk_1cmt_oral.mod
+  expect_lt(abs(fit$theta["KA"] / 0.1 - 1), 0.15, label = "KA")
+  expect_lt(abs(fit$theta["CL"] / 2.0 - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta["V"]  / 1.0 - 1), 0.15, label = "V")
+})

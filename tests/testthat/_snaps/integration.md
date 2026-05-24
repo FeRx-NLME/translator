@@ -117,7 +117,7 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: ode_warfarin.ctl
-      # Warnings: 1 -- run result$warnings for details
+      # Warnings: 2 -- run result$warnings for details
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -144,6 +144,9 @@
       
       [error_model]
         DV ~ proportional(EPS1)
+      
+      [scaling]
+        obs_scale = V
       
       [fit_options]
         method = focei
@@ -297,7 +300,7 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 1 -- run result$warnings for details
+      # Warnings: 2 -- run result$warnings for details
       
       [parameters]
         theta KA(0.1, 0.0, 1e15)
@@ -323,6 +326,9 @@
       
       [error_model]
         DV ~ proportional(EPS1)
+      
+      [scaling]
+        obs_scale = V
       
       [fit_options]
         method = focei

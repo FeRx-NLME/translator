@@ -145,7 +145,9 @@ emit_ferx <- function(ir) {
 }
 
 .emit_scaling_section <- function(ir) {
-  paste0("[scaling]\n  obs_scale = ", .fmt_num(ir$scaling$obs_scale))
+  val <- ir$scaling$obs_scale
+  out <- if (is.character(val)) val else .fmt_num(val)
+  paste0("[scaling]\n  obs_scale = ", out)
 }
 
 .emit_fit_options_section <- function(ir) {

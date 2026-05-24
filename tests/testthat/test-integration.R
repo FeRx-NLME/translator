@@ -118,11 +118,19 @@ test_that("amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
-  expect_match(result$ferx_text, "[odes]",     fixed = TRUE)
-  expect_match(result$ferx_text, "obs_cmt=",   fixed = TRUE)
-  expect_match(result$ferx_text, "d/dt(",      fixed = TRUE)
-  expect_match(result$ferx_text, "proportional", fixed = TRUE)
+  expect_match(result$ferx_text, "[odes]",        fixed = TRUE)
+  expect_match(result$ferx_text, "obs_cmt=",      fixed = TRUE)
+  expect_match(result$ferx_text, "d/dt(",         fixed = TRUE)
+  expect_match(result$ferx_text, "proportional",  fixed = TRUE)
   expect_length(result$unsupported, 0L)
+})
+
+test_that("pk_1cmt_oral.mod: S2=V scaling emits [scaling] obs_scale = V", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
+  expect_match(result$ferx_text, "[scaling]",      fixed = TRUE)
+  expect_match(result$ferx_text, "obs_scale = V",  fixed = TRUE)
+  expect_true(any(grepl("S2 = V", result$warnings, fixed = TRUE)))
 })
 
 test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {

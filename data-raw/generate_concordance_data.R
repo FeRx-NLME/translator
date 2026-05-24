@@ -126,3 +126,23 @@ if (requireNamespace("amp.sim", quietly = TRUE)) {
 } else {
   message("amp.sim not installed -- skipping ampsim_1cpt_oral_concordance.csv")
 }
+
+# ---- ODE 1-cpt oral with S2=V scaling (50 subjects, proportional error) ----
+# Tests that [scaling] obs_scale=V is correctly applied: data are concentrations,
+# ODE predicts amounts, ferx divides by V before comparing to DV.
+ferx_ode <- translate_tmp("pk_1cmt_oral.mod")
+tmpl_ode <- nm_template(50, dose=4.0, cmt=1L,
+                        obs_times=c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24))
+tf_ode <- tempfile(fileext=".csv")
+write.csv(tmpl_ode, tf_ode, row.names=FALSE, quote=FALSE)
+sim_ode <- ferx_simulate(ferx_ode, tf_ode, n_sim=1L, seed=321L)
+
+obs_ode <- tmpl_ode[tmpl_ode$EVID == 0, ]
+obs_ode$DV <- round(sim_ode$DV_SIM, 6)
+final_ode <- rbind(tmpl_ode[tmpl_ode$EVID == 1, ], obs_ode)
+final_ode <- final_ode[order(final_ode$ID, final_ode$TIME), ]
+rownames(final_ode) <- NULL
+write.csv(final_ode, "inst/testdata/ode_1cpt_oral_concordance.csv",
+          row.names=FALSE, quote=FALSE)
+message("Written inst/testdata/ode_1cpt_oral_concordance.csv (",
+        nrow(final_ode), " rows, ", length(unique(final_ode$ID)), " subjects)")
