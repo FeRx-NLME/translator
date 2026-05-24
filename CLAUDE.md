@@ -42,7 +42,34 @@ R CMD check --as-cran .
 Rscript -e 'devtools::check(cran = FALSE)'
 ```
 
-## Three-tier test structure
+## Known gotchas
+
+**nonmem2rx drops `S2=V`** — NONMEM `$PK` scaling assignments (`S1`, `S2`, etc.) are
+silently omitted from `ui$lstExpr`. Without them, an ODE model predicts amounts but
+data are concentrations, so IPRED >> DV and estimation diverges silently.
+Always parse the raw `.ctl`/`.mod` file for scaling via `.extract_nm_scaling()` (in
+`R/utils.R`); do not rely on the rxode2 UI object for this.
+
+**Fixed-effect PK params are absent from `indiv_params`** — When a PK param has no
+ETA (e.g. `V = THETA(3)`), nonmem2rx does not emit it as an assignment in `lstExpr`.
+The linCmt pk macro arg lookup then silently drops `v=V`, producing IPRED=0.
+The passthrough logic in `rxui_to_ir.R` handles this; do not remove it.
+
+**Snapshot acceptance after output changes** — If a code change affects the `.ferx`
+text of any bundled test model, the integration snapshots in
+`tests/testthat/_snaps/integration.md` will fail. Run
+`testthat::snapshot_review("integration")` to inspect the diff before accepting.
+Only accept if the new output is deliberately correct.
+
+**amp.sim package** — `amp.sim` (GitHub: LeidenAdvancedPKPD/amp.sim) is used for
+the external NONMEM reference benchmark in `test-concordance.R`. It is a `Suggests`
+dependency. Install with `remotes::install_github("LeidenAdvancedPKPD/amp.sim")`.
+`NM.theoph.02B.csv` is NOT bundled in amp.sim — the concordance dataset is
+pre-simulated and stored in `inst/testdata/ampsim_1cpt_oral_concordance.csv`.
+If the amp.sim reference estimates ever change, re-run
+`data-raw/generate_concordance_data.R` to regenerate the dataset.
+
+## Four-tier test structure
 
 Every new function or behaviour needs a test. Put the test in the lowest tier
 that covers it. Do not write tests at the end — write them as you build.
@@ -86,6 +113,34 @@ changed for a real model.
 Reference snapshots live in `tests/testthat/_snaps/`. Accept updated snapshots
 with `testthat::snapshot_accept()` only after manually verifying the new output
 is correct.
+
+**Tier 4 — Numerical concordance tests** (`tests/testthat/test-concordance.R`)
+
+Translate a bundled model, fit pre-simulated data with `ferx_fit()`, and assert
+that estimated parameters are within tolerance of the known true values. These
+are the only tests that can catch silent semantic errors: wrong ODE sign, swapped
+parameter, missing scaling, wrong sigma interpretation.
+
+Gated with `skip_if_not_installed("ferx")` and `skip_on_ci()` — run locally only.
+Require the `ferx` binary in PATH and take ~2 minutes.
+
+```r
+# Run concordance tests locally
+Rscript -e 'devtools::test(filter="concordance")'
+```
+
+Current test suite and tolerances:
+
+| Test | Model | True params | Tolerance |
+|---|---|---|---|
+| linCmt 1-cpt oral: TVCL/TVV | `1cpt_oral.ctl` | TVCL=0.134, TVV=8.1 | 15% |
+| linCmt 2-cpt IV: 4 thetas | `2cpt_iv.ctl` | CL=5, V1=20, Q=8, V2=60 | 10% |
+| linCmt 2-cpt IV: omegas | `2cpt_iv.ctl` | om_CL/V1=0.10, om_Q=0.08 | 10% |
+| amp.sim linCmt benchmark | `pk_1cmt_oral_ampsim.ctl` | KA=0.0825, CL=2.676, V=1.588 | 10% |
+| ODE 1-cpt oral with S2=V | `pk_1cmt_oral.mod` | KA=0.1, CL=2.0, V=1.0 | 15% |
+
+Datasets live in `inst/testdata/`. Regenerate with `data-raw/generate_concordance_data.R`
+if model files or theta initials change. Commit the regenerated CSVs.
 
 ## Documentation rules
 
