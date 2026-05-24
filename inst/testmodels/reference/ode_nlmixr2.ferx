@@ -1,0 +1,32 @@
+# Translated from nlmixr2: ode_nlmixr2.R
+
+[parameters]
+  theta TVCL(0.134, 0.001, 10.0)
+  theta TVV(8.1, 0.1, 500.0)
+  theta TVKA(1.0, 0.01, 50.0)
+
+  omega ETA_CL ~ 0.07
+  omega ETA_V ~ 0.02
+  omega ETA_KA ~ 0.4
+
+  sigma ERR_PROP ~ 0.01 (sd)
+
+[individual_parameters]
+  CL = TVCL * exp(ETA_CL)
+  V = TVV * exp(ETA_V)
+  KA = TVKA * exp(ETA_KA)
+
+[structural_model]
+  ode(obs_cmt=central, states=[depot, central])
+
+[odes]
+  d/dt(depot) = -KA * depot
+  d/dt(central) = KA * depot/V - (CL/V) * central
+
+[error_model]
+  DV ~ proportional(ERR_PROP)
+
+[fit_options]
+  method = focei
+  maxiter = 500
+  covariance = true
