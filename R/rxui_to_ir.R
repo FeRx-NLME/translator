@@ -248,7 +248,6 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   structural   <- list()
   warnings     <- character()
   unsupported  <- character()
-  lincmt_seen  <- FALSE
 
   for (expr in lst) {
     if (.is_ddt(expr)) {
@@ -259,7 +258,6 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         structural <- list(type = "ode")
 
     } else if (.is_lincmt_tilde(expr)) {
-      lincmt_seen <- TRUE
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
       error_model <- c(error_model,
                        list(list(dv = "DV", type = err_out$type,
@@ -344,7 +342,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   } else if ("ka" %in% lhs_lc) {
     "one_cpt_oral"
   } else if ("q2" %in% lhs_lc) {
-    "three_cpt_iv_bolus"
+    unsp <- c(unsp, "three_cpt_iv_bolus (not supported in ferx)")
+    warn <- c(warn, "ERROR | three_cpt_iv_bolus detected -- not supported in ferx, structural model omitted")
+    NA_character_
   } else if ("q" %in% lhs_lc) {
     "two_cpt_iv_bolus"
   } else {
@@ -356,11 +356,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                 warnings = warn, unsupported = unsp))
 
   arg_keys <- switch(pk_call,
-    one_cpt_oral       = c("cl", "v",  "ka"),
-    one_cpt_iv_bolus   = c("cl", "v"),
-    two_cpt_oral       = c("cl", "v1", "q", "v2", "ka"),
-    two_cpt_iv_bolus   = c("cl", "v1", "q", "v2"),
-    three_cpt_iv_bolus = c("cl", "v1", "q", "v2", "q2", "v3"),
+    one_cpt_oral     = c("cl", "v",  "ka"),
+    one_cpt_iv_bolus = c("cl", "v"),
+    two_cpt_oral     = c("cl", "v1", "q", "v2", "ka"),
+    two_cpt_iv_bolus = c("cl", "v1", "q", "v2"),
     character()
   )
 

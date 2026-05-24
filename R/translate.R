@@ -110,7 +110,6 @@ mlx_to_ferx <- function(mlxtran, output = NULL, ...) {
 #'                    fit_options = list(method = "foce"))
 #' res <- new_ferx_translate_result(emit_ferx(ir), ir)
 #' res$ferx_text
-#' @export
 new_ferx_translate_result <- function(text, ir) {
   structure(
     list(

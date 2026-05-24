@@ -305,6 +305,16 @@ test_that("3-cpt oral emits ERROR and NA pk_call", {
   expect_length(out$unsupported, 1L)
 })
 
+test_that("3-cpt IV bolus (Q2, no KA) also unsupported -- ferx has no 3-cpt analytical", {
+  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q2"),
+                 list(lhs = "V2"), list(lhs = "V3"))
+  out    <- .infer_pk_macro(params)
+  expect_true(is.na(out$pk_call))
+  expect_match(out$warnings[1], "ERROR")
+  expect_length(out$unsupported, 1L)
+  expect_match(out$unsupported[1], "three_cpt_iv_bolus")
+})
+
 test_that("bioavailability f added to pk_args when present", {
   params <- list(list(lhs = "CL"), list(lhs = "V"), list(lhs = "KA"),
                  list(lhs = "F"))

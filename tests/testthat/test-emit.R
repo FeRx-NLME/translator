@@ -1,3 +1,12 @@
+# -- .fmt_num -----------------------------------------------------------------
+
+test_that(".fmt_num handles Inf and -Inf without producing invalid text", {
+  expect_equal(.fmt_num(Inf),  "1e15")
+  expect_equal(.fmt_num(-Inf), "-1e15")
+  expect_equal(.fmt_num(0.134), "0.134")
+  expect_equal(.fmt_num(10L),   "10.0")
+})
+
 # -- helpers ------------------------------------------------------------------
 
 warfarin_1cpt_ir <- function(...) {

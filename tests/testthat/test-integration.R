@@ -103,3 +103,29 @@ test_that("nm_to_ferx writes file when output path given", {
   expect_true(file.exists(path))
   expect_match(paste(readLines(path), collapse = "\n"), "[parameters]", fixed = TRUE)
 })
+
+# -- amp.sim example models ---------------------------------------------------
+
+test_that("amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
+  expect_snapshot(cat(result$ferx_text))
+  expect_match(result$ferx_text, "[odes]",     fixed = TRUE)
+  expect_match(result$ferx_text, "obs_cmt=",   fixed = TRUE)
+  expect_match(result$ferx_text, "d/dt(",      fixed = TRUE)
+  expect_match(result$ferx_text, "proportional", fixed = TRUE)
+  expect_length(result$unsupported, 0L)
+})
+
+test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pkpd_ir.mod"))
+  expect_snapshot(cat(result$ferx_text))
+  expect_match(result$ferx_text, "[odes]",   fixed = TRUE)
+  expect_match(result$ferx_text, "obs_cmt=", fixed = TRUE)
+  expect_match(result$ferx_text, "d/dt(",    fixed = TRUE)
+  expect_match(result$ferx_text, "additive", fixed = TRUE)
+  n_odes <- length(regmatches(result$ferx_text,
+                              gregexpr("d/dt\\(", result$ferx_text))[[1]])
+  expect_equal(n_odes, 4L)
+})

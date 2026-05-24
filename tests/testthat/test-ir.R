@@ -54,6 +54,32 @@ test_that("validate_ferx_ir rejects non-ferx_ir input", {
   expect_error(validate_ferx_ir(list()), "ferx_ir")
 })
 
+test_that("validate_ferx_ir accepts ode structural with states and obs_cmt", {
+  ir <- new_ferx_ir(
+    structural = list(type = "ode", states = c("depot", "central"), obs_cmt = "central"),
+    odes       = list(list(state = "depot", rhs = "-KA * depot"),
+                      list(state = "central", rhs = "KA * depot - CL/V * central"))
+  )
+  expect_invisible(validate_ferx_ir(ir))
+})
+
+test_that("validate_ferx_ir rejects ode structural missing states", {
+  ir <- new_ferx_ir(
+    structural = list(type = "ode", obs_cmt = "central"),
+    odes       = list(list(state = "central", rhs = "-CL/V * central"))
+  )
+  expect_error(validate_ferx_ir(ir), "structural\\$states")
+})
+
+test_that("validate_ferx_ir rejects ode structural missing obs_cmt", {
+  ir <- new_ferx_ir(
+    structural = list(type = "ode", states = c("depot", "central")),
+    odes       = list(list(state = "depot", rhs = "-KA * depot"),
+                      list(state = "central", rhs = "KA * depot"))
+  )
+  expect_error(validate_ferx_ir(ir), "structural\\$obs_cmt")
+})
+
 test_that("print.ferx_ir runs without error", {
   ir <- new_ferx_ir(
     source_format = "nonmem",

@@ -134,6 +134,17 @@ validate_ferx_ir <- function(ir) {
       "odes is non-empty but structural$type is not {.val ode}."
     )
 
+  if (identical(ir$structural$type, "ode")) {
+    if (is.null(ir$structural$states) || length(ir$structural$states) == 0)
+      cli::cli_abort(
+        "structural$states must be a non-empty character vector when structural$type is {.val ode}."
+      )
+    if (is.null(ir$structural$obs_cmt) || !is.character(ir$structural$obs_cmt))
+      cli::cli_abort(
+        "structural$obs_cmt must be a character scalar when structural$type is {.val ode}."
+      )
+  }
+
   invisible(ir)
 }
 
