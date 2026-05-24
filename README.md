@@ -83,8 +83,8 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
 | IOV (diagonal kappas) | Translated |
 | ODE models (`$DES` / `d/dt()`) | Translated |
 | Proportional / additive / combined error | Translated |
-| FIXED thetas | Translated with INFO warning |
-| 3-compartment | ERROR -- not yet in ferx |
+| FIXED thetas | Translated (emits `FIX` in ferx) |
+| 3-compartment (oral / IV bolus) | Translated |
 | Multiple DVIDs | ERROR -- not yet in ferx |
 | MIXTURE models | ERROR -- not yet in ferx |
 | IOV block omega | WARN -- diagonal only emitted |
