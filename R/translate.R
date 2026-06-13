@@ -1,8 +1,8 @@
 #' Translate a pharmacometric model to ferx format
 #'
 #' Parses `source` via the appropriate intermediary (`nonmem2rx`, `rxode2`, or
-#' `monolix2rx`), converts to a [ferx_ir], emits a `.ferx` string, and
-#' optionally writes it to disk.
+#' `monolix2rx`), converts to a [new_ferx_ir()] object, emits a `.ferx` string,
+#' and optionally writes it to disk.
 #'
 #' @param source For `"nonmem"`: path to a `.ctl` file. For `"nlmixr2"`: an
 #'   nlmixr2/rxode2 model function. For `"monolix"`: path to a `.mlxtran` file.
@@ -76,6 +76,7 @@ to_ferx <- function(source,
 
 #' @rdname to_ferx
 #' @param ctl_file Path to a NONMEM control stream file.
+#' @param ... Additional arguments passed to [to_ferx()] (e.g. `overwrite`).
 #' @export
 nm_to_ferx <- function(ctl_file, output = NULL, ...) {
   to_ferx(ctl_file, "nonmem", output, ...)
@@ -107,12 +108,7 @@ mlx_to_ferx <- function(mlxtran, output = NULL, ...) {
 #'   `unsupported`, `source_format`, and `source_file`.
 #'
 #' @seealso [to_ferx()], [write_ferx()]
-#'
-#' @examples
-#' ir  <- new_ferx_ir(source_format = "nonmem",
-#'                    fit_options = list(method = "foce"))
-#' res <- new_ferx_translate_result(emit_ferx(ir), ir)
-#' res$ferx_text
+#' @noRd
 new_ferx_translate_result <- function(text, ir) {
   structure(
     list(

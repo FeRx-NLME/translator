@@ -17,6 +17,9 @@
 #'
 #' @seealso [new_ferx_ir()], [emit_ferx()], [to_ferx()]
 #'
+#' @importFrom stats setNames
+#' @importFrom utils tail
+#'
 #' @examples
 #' \dontrun{
 #' ui <- rxode2::rxode2(function() {
