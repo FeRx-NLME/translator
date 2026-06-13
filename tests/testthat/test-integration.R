@@ -94,6 +94,19 @@ test_that("1-cpt oral nlmixr2: snapshot + one_cpt_oral", {
   expect_match(result$ferx_text, "one_cpt_oral", fixed = TRUE)
 })
 
+test_that("nlmixr2 source: a KAPPA-named IIV eta does NOT trigger the NONMEM-only IOV warning", {
+  skip_if_not_installed("rxode2")
+  fn     <- source(r2_path("iov_kappa_nlmixr2.R"))$value
+  # suppressWarnings() silences rxode2's benign "non-mu referenced" parse note
+  # for exp(eta.cl + kappa.cl); it does not touch result$warnings (the
+  # translator's own channel), which is what the assertions below check.
+  result <- suppressWarnings(nlmixr2_to_ferx(fn))
+  # The eta is present in the IIV block (so the helper would match its name)...
+  expect_match(result$ferx_text, "omega KAPPA_CL", fixed = TRUE)
+  # ...but the flattening warning is nonmem2rx-specific and must stay silent here.
+  expect_false(any(grepl("inter-occasion", result$warnings, fixed = TRUE)))
+})
+
 test_that("ODE nlmixr2: d/dt expressions produce [odes] section", {
   skip_if_not_installed("rxode2")
   fn     <- source(r2_path("ode_nlmixr2.R"))$value
