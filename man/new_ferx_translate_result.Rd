@@ -7,7 +7,7 @@
 new_ferx_translate_result(text, ir)
 }
 \arguments{
-\item{text}{Character string — the complete \code{.ferx} file content.}
+\item{text}{Character string: the complete \code{.ferx} file content.}
 
 \item{ir}{A \code{ferx_ir} object from which \code{warnings} and \code{unsupported} are
 pulled.}

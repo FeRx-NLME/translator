@@ -4,7 +4,12 @@
 \alias{rxui_to_ir}
 \title{Convert a rxode2 UI object to a ferx intermediate representation}
 \usage{
-rxui_to_ir(ui, source_format = NA_character_, source_file = NA_character_)
+rxui_to_ir(
+  ui,
+  source_format = NA_character_,
+  source_file = NA_character_,
+  scaling_hint = list()
+)
 }
 \arguments{
 \item{ui}{A rxUI S3 object (environment with \verb{$iniDf} and \verb{$lstExpr}).}
@@ -12,6 +17,12 @@ rxui_to_ir(ui, source_format = NA_character_, source_file = NA_character_)
 \item{source_format}{One of \code{"nonmem"}, \code{"nlmixr2"}, \code{"monolix"}, or \code{NA}.}
 
 \item{source_file}{Path to the source file, or \code{NA}.}
+
+\item{scaling_hint}{Named list mapping compartment number (as a character
+string) to the NONMEM \verb{Sn=} scaling variable name, as returned by
+\code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block for ODE models
+where the observed compartment is scaled (e.g. \code{S2=V}). The default empty
+list disables scaling translation.}
 }
 \value{
 A \code{ferx_ir} object.
@@ -24,8 +35,8 @@ or \code{monolix2rx::monolix2rx()} and converts it to a \code{\link[=new_ferx_ir
 \examples{
 \dontrun{
 ui <- rxode2::rxode2(function() {
-  ini({ tvcl <- 0.134; eta.cl ~ 0.07; err.prop ~ 0.01 })
-  model({ cl <- tvcl * exp(eta.cl); linCmt() ~ prop(err.prop) })
+  ini({ tvcl <- 0.134; eta.cl ~ 0.07; prop.err <- 0.01 })
+  model({ cl <- tvcl * exp(eta.cl); linCmt() ~ prop(prop.err) })
 })
 ir <- rxui_to_ir(ui, source_format = "nlmixr2")
 cat(emit_ferx(ir))

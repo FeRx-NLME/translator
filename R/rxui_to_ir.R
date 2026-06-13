@@ -7,6 +7,11 @@
 #' @param ui A rxUI S3 object (environment with `$iniDf` and `$lstExpr`).
 #' @param source_format One of `"nonmem"`, `"nlmixr2"`, `"monolix"`, or `NA`.
 #' @param source_file Path to the source file, or `NA`.
+#' @param scaling_hint Named list mapping compartment number (as a character
+#'   string) to the NONMEM `Sn=` scaling variable name, as returned by
+#'   `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
+#'   where the observed compartment is scaled (e.g. `S2=V`). The default empty
+#'   list disables scaling translation.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -60,8 +65,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   scaling <- list()
   if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
     state_names_uc <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
-    obs_idx <- which(state_names_uc == toupper(structural$obs_cmt))
-    if (length(obs_idx) > 0L) {
+    # which() may match more than one state if two share an uppercased name;
+    # take the first so the list [[ ]] index below is always scalar.
+    obs_idx <- which(state_names_uc == toupper(structural$obs_cmt))[1L]
+    if (!is.na(obs_idx)) {
       svar <- scaling_hint[[as.character(obs_idx)]]
       if (!is.null(svar)) {
         norm_svar      <- toupper(gsub(".", "_", svar, fixed = TRUE))
@@ -90,9 +97,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     existing_lhs  <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
     theta_names   <- vapply(theta_out$thetas, function(t) t$name, "")
     for (tname in theta_names) {
-      if (toupper(tname) %in% pk_candidates && !toupper(tname) %in% existing_lhs)
+      if (toupper(tname) %in% pk_candidates && !toupper(tname) %in% existing_lhs) {
         expr_out$indiv_params <- c(expr_out$indiv_params,
                                    list(list(lhs = tname, rhs = tname)))
+        # Track the added name so a second theta normalising to the same PK
+        # candidate does not append a duplicate passthrough entry.
+        existing_lhs <- c(existing_lhs, toupper(tname))
+      }
     }
     pk_out <- .infer_pk_macro(expr_out$indiv_params)
     warn   <- c(warn, pk_out$warnings)
@@ -580,37 +591,49 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   } else if (has_ka) {
     "one_cpt_oral"
   } else if (has_q2) {
-    "three_cpt_iv_bolus"
+    "three_cpt_iv"
   } else if (has_q) {
-    "two_cpt_iv_bolus"
+    "two_cpt_iv"
   } else {
-    "one_cpt_iv_bolus"
+    "one_cpt_iv"
   }
-
-  if (is.na(pk_call))
-    return(list(pk_call = NA_character_, pk_args = list(),
-                warnings = warn, unsupported = unsp))
 
   # For each ferx argument key, define an ordered list of candidate lhs_lc names.
   # nonmem2rx ADVAN4/TRANS4 (2cpt oral) names volumes v2/v3 instead of v1/v2.
   # nonmem2rx ADVAN3 (2cpt IV) names volumes v1/v2 directly.
   arg_aliases <- switch(pk_call,
-    one_cpt_oral     = list(cl = "cl", v = c("v", "v1", "v2"), ka = "ka"),
-    one_cpt_iv_bolus = list(cl = "cl", v = c("v", "v1", "v2")),
+    one_cpt_oral = list(cl = "cl", v = c("v", "v1", "v2"), ka = "ka"),
+    one_cpt_iv   = list(cl = "cl", v = c("v", "v1", "v2")),
     # two_cpt_oral: try v1 first, then plain v (nlmixr2 alias), then v2 (NONMEM ADVAN4 TRANS4)
     # same pattern for peripheral: v2 -> v3 (NONMEM ADVAN4 TRANS4)
-    two_cpt_oral     = list(cl = "cl", v1 = c("v1", "v", "v2"), q = "q",
-                            v2 = c("v2", "v3"), ka = "ka"),
-    two_cpt_iv_bolus  = list(cl = "cl", v1 = c("v1", "v"), q = "q",
-                             v2 = c("v2", "v3")),
-    three_cpt_oral    = list(cl = "cl", v1 = c("v1", "v"), q = "q",
-                             v2 = c("v2", "v3"), q2 = c("q2", "q3"),
-                             v3 = c("v3", "v4"), ka = "ka"),
-    three_cpt_iv_bolus = list(cl = "cl", v1 = c("v1", "v"), q = "q",
-                              v2 = c("v2", "v3"), q2 = c("q2", "q3"),
-                              v3 = c("v3", "v4")),
+    two_cpt_oral = list(cl = "cl", v1 = c("v1", "v", "v2"), q = "q",
+                        v2 = c("v2", "v3"), ka = "ka"),
+    two_cpt_iv   = list(cl = "cl", v1 = c("v1", "v"), q = "q",
+                        v2 = c("v2", "v3")),
+    # 3-cpt: ferx slot Q (first inter-compartmental clearance) accepts arg name
+    # `q` or `q2`; slot Q3 (second clearance) accepts ONLY `q3` (see ferx-core
+    # PkParams::name_to_index). NONMEM ADVAN11 names them Q2 (first) / Q3
+    # (second), so emit `q2=Q2` and `q3=Q3` -- emitting both clearances, not
+    # dropping Q3.
+    three_cpt_oral = list(cl = "cl", v1 = c("v1", "v"), q2 = c("q2", "q"),
+                          v2 = "v2", q3 = "q3", v3 = c("v3", "v4"), ka = "ka"),
+    three_cpt_iv   = list(cl = "cl", v1 = c("v1", "v"), q2 = c("q2", "q"),
+                          v2 = "v2", q3 = "q3", v3 = c("v3", "v4")),
     list()
   )
+
+  # A pk_call with no argument mapping (switch fell through to the default
+  # empty list) is an unrecognised structure. Degrade gracefully: emit an
+  # ERROR and omit the structural model rather than emitting an argument-less
+  # macro call that ferx-core would reject at parse time. This keeps the
+  # downstream is.na(pk_call) guard in rxui_to_ir() a live safety net.
+  if (length(arg_aliases) == 0) {
+    unsp <- c(unsp, paste0(pk_call, " (unsupported structure -- no argument mapping)"))
+    warn <- c(warn, paste0("ERROR | ", pk_call,
+                           " has no argument mapping -- structural model omitted"))
+    return(list(pk_call = NA_character_, pk_args = list(),
+                warnings = warn, unsupported = unsp))
+  }
 
   # Optional args
   if ("f"    %in% lhs_lc) arg_aliases[["f"]]    <- "f"

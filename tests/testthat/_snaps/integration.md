@@ -74,7 +74,7 @@
         maxiter = 500
         covariance = true
 
-# 2-cpt IV bolus: infers two_cpt_iv_bolus
+# 2-cpt IV: infers two_cpt_iv
 
     Code
       cat(norm_snap(result$ferx_text))
@@ -101,7 +101,7 @@
         V2 = TVV2 * exp(ETA_V2)
       
       [structural_model]
-        pk two_cpt_iv_bolus(cl=CL, v1=V1, q=Q, v2=V2)
+        pk two_cpt_iv(cl=CL, v1=V1, q=Q, v2=V2)
       
       [error_model]
         DV ~ proportional(EPS1)

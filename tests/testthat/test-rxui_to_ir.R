@@ -278,7 +278,7 @@ test_that("1-cpt oral inferred from ka + v (no q)", {
 test_that("1-cpt iv inferred when no ka", {
   params <- list(list(lhs = "CL"), list(lhs = "V"))
   out    <- .infer_pk_macro(params)
-  expect_equal(out$pk_call, "one_cpt_iv_bolus")
+  expect_equal(out$pk_call, "one_cpt_iv")
   expect_null(out$pk_args$ka)
 })
 
@@ -301,23 +301,28 @@ test_that("v alias: V used when v1 expected", {
 })
 
 test_that("3-cpt oral maps to three_cpt_oral pk_call", {
-  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q"),
-                 list(lhs = "V2"), list(lhs = "Q2"), list(lhs = "V3"),
+  # NONMEM ADVAN11 names the two inter-compartmental clearances Q2 (first,
+  # paired with V2) and Q3 (second, paired with V3). Both must reach the pk
+  # macro: q2 -> ferx slot Q, q3 -> ferx slot Q3.
+  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q2"),
+                 list(lhs = "V2"), list(lhs = "Q3"), list(lhs = "V3"),
                  list(lhs = "KA"))
   out    <- .infer_pk_macro(params)
   expect_equal(out$pk_call, "three_cpt_oral")
   expect_length(out$unsupported, 0L)
   expect_equal(out$pk_args$ka, "KA")
   expect_equal(out$pk_args$q2, "Q2")
+  expect_equal(out$pk_args$q3, "Q3")
 })
 
-test_that("3-cpt IV bolus maps to three_cpt_iv_bolus pk_call", {
-  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q"),
-                 list(lhs = "V2"), list(lhs = "Q2"), list(lhs = "V3"))
+test_that("3-cpt IV maps to three_cpt_iv pk_call", {
+  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q2"),
+                 list(lhs = "V2"), list(lhs = "Q3"), list(lhs = "V3"))
   out    <- .infer_pk_macro(params)
-  expect_equal(out$pk_call, "three_cpt_iv_bolus")
+  expect_equal(out$pk_call, "three_cpt_iv")
   expect_length(out$unsupported, 0L)
   expect_equal(out$pk_args$q2, "Q2")
+  expect_equal(out$pk_args$q3, "Q3")
 })
 
 test_that("bioavailability f added to pk_args when present", {

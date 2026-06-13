@@ -43,18 +43,18 @@ test_that("2-cpt oral with covariates: snapshot + no unsupported", {
   expect_match(result$ferx_text, "two_cpt_oral", fixed = TRUE)
 })
 
-test_that("2-cpt IV bolus: infers two_cpt_iv_bolus", {
+test_that("2-cpt IV: infers two_cpt_iv", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("2cpt_iv.ctl"))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
-  expect_match(result$ferx_text, "two_cpt_iv_bolus", fixed = TRUE)
+  expect_match(result$ferx_text, "two_cpt_iv", fixed = TRUE)
 })
 
-test_that("3-cpt IV: translates to three_cpt_iv_bolus pk macro", {
+test_that("3-cpt IV: translates to three_cpt_iv pk macro", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("3cpt_iv.ctl"))
   expect_length(result$unsupported, 0L)
-  expect_match(result$ferx_text, "three_cpt_iv_bolus", fixed = TRUE)
+  expect_match(result$ferx_text, "three_cpt_iv", fixed = TRUE)
 })
 
 test_that("ODE warfarin: full $DES path, [odes] section present", {

@@ -17,8 +17,9 @@
 #   those reference values via ferx_simulate(). This tests the linCmt
 #   translation path (one_cpt_oral pk macro) against an external NONMEM
 #   reference rather than our own model initials.
-#   Note: the amp.sim ODE path (pk_1cmt_oral.mod / ADVAN6) is not tested
-#   here because the S2=V compartment scaling is not yet translated.
+#   Note: the amp.sim benchmark uses the linCmt path only. The ODE variant
+#   (pk_1cmt_oral.mod / ADVAN6, with S2=V scaling) is exercised separately by
+#   the ODE concordance test below, not against the amp.sim reference.
 #
 # Acceptance criteria (per plans/v0.1-implementation.md Section 10):
 #   structural thetas: within 15% of truth
@@ -89,7 +90,7 @@ test_that("1-cpt oral: TVCL and TVV recover within 15% of truth", {
 
 
 # ---------------------------------------------------------------------------
-# 2-cpt IV bolus (linCmt → two_cpt_iv_bolus pk macro)
+# 2-cpt IV (linCmt -> two_cpt_iv pk macro)
 #   True thetas: TVCL=5.0, TVV1=20.0, TVQ=8.0, TVV2=60.0
 #   Small IIV (omega <= 0.10); all four PK params expected within 10%.
 # ---------------------------------------------------------------------------
@@ -200,8 +201,16 @@ test_that("translation gap report: unsupported features across all bundled model
   models    <- list.files(model_dir, pattern = "\\.(ctl|mod)$", full.names = TRUE)
 
   gaps <- do.call(rbind, lapply(models, function(path) {
-    result <- tryCatch(nm_to_ferx(path), error = function(e) NULL)
-    if (is.null(result) || length(result$unsupported) == 0) return(NULL)
+    result <- tryCatch(nm_to_ferx(path),
+                       error = function(e) conditionMessage(e))
+    # A translation crash is itself a gap worth surfacing -- record it as an
+    # ERROR row instead of silently dropping the model from the report (which
+    # would let a broken translator masquerade as "no gaps detected").
+    if (is.character(result))
+      return(data.frame(model = basename(path),
+                        gap   = paste0("ERROR: ", result),
+                        stringsAsFactors = FALSE))
+    if (length(result$unsupported) == 0) return(NULL)
     data.frame(model    = basename(path),
                gap      = result$unsupported,
                stringsAsFactors = FALSE)
