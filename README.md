@@ -85,13 +85,25 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
 | 1, 2, 3-compartment, oral and IV | Translated |
 | Covariates (allometric power, linear) | Translated |
 | Block omega | Translated |
-| IOV (diagonal kappas) | Translated |
+| IOV (diagonal kappas) | Translated [^iov] |
 | ODE models (`$DES` / `d/dt()`) | Translated |
 | Proportional / additive / combined error | Translated |
 | FIXED thetas | Translated (emits `FIX` in ferx) |
-| Multiple DVIDs | Not yet supported |
-| MIXTURE models | Not yet supported |
+| Multiple DVIDs / joint PK-PD | ferx supports it; translator does not emit it yet [^dvid] |
+| MIXTURE models | Not yet in ferx |
 | IOV block omega | WARN -- diagonal kappas only emitted |
+
+[^iov]: ferx and the emitter fully support IOV (`kappa` + `iov_column`), and it
+    translates cleanly when the source exposes occasion-level random effects
+    (e.g. nlmixr2 `iov`). For NONMEM, `nonmem2rx` commonly reads an ETA-coded
+    IOV term (`KAPPA = ETA(n)`) as ordinary IIV, so it arrives as an extra
+    `omega` and the occasion structure is lost -- check that `kappa` /
+    `iov_column` actually made it into the output.
+
+[^dvid]: ferx supports multiple observation types via a per-CMT error model
+    (`CMT=2: DV ~ proportional(...)`, `CMT=3: DV ~ additive(...)`, with per-CMT
+    `y[CMT=N] = ...` readouts). The translator currently maps every observation
+    to a single `DV` and does not emit the per-CMT dispatch.
 
 ## Development
 
