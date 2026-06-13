@@ -70,6 +70,7 @@ Every result carries a `$warnings` vector with prefixed messages:
 ```
 INFO  | S2 = V detected -- emitting [scaling] obs_scale = V
 WARN  | complex $ERROR -- classified as proportional, verify
+WARN  | ETA 'KAPPA_CL' looks like inter-occasion variability but was emitted as IIV
 ERROR | No structural model detected -- [structural_model] section omitted
 ```
 
@@ -103,8 +104,10 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
     translates cleanly when the source exposes occasion-level random effects
     (e.g. nlmixr2 `iov`). For NONMEM, `nonmem2rx` commonly reads an ETA-coded
     IOV term (`KAPPA = ETA(n)`) as ordinary IIV, so it arrives as an extra
-    `omega` and the occasion structure is lost -- check that `kappa` /
-    `iov_column` actually made it into the output.
+    `omega` and the occasion structure is lost. This is no longer silent: the
+    translator emits a `WARN` when a `KAPPA*`/`IOV*`-named eta lands in the
+    `[omega]` block, telling you to declare it as a `kappa` and set
+    `iov_column`.
 
 [^dvid]: ferx supports multiple observation types via a per-CMT error model
     (`CMT=2: DV ~ proportional(...)`, `CMT=3: DV ~ additive(...)`, with per-CMT
