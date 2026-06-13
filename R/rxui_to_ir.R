@@ -41,7 +41,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, theta_out$warnings)
 
   omega_out <- .extract_omegas(ini)
-  warn      <- c(warn, .iov_flattening_warnings(omega_out$omegas))
+  # The flattening (ETA-coded IOV read as IIV) is a nonmem2rx behaviour, so the
+  # warning -- which names nonmem2rx -- is only emitted for NONMEM sources.
+  if (identical(source_format, "nonmem"))
+    warn <- c(warn, .iov_flattening_warnings(omega_out$omegas))
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
 

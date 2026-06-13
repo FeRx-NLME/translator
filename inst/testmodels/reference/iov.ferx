@@ -1,4 +1,5 @@
 # Translated from nonmem: iov.ctl
+# Warnings: 1 -- run result$warnings for details
 
 [parameters]
   theta TVCL(0.134, 0.001, 10.0)
@@ -8,9 +9,9 @@
   omega ETA_CL ~ 0.07
   omega ETA_V ~ 0.02
   omega ETA_KA ~ 0.4
-  kappa KAPPA_CL ~ 0.04
+  omega KAPPA_CL ~ 0.04
 
-  sigma PROP_ERR ~ 0.01 (sd)
+  sigma EPS1 ~ 0.1 (sd)
 
 [individual_parameters]
   CL = TVCL * exp(ETA_CL + KAPPA_CL)
@@ -21,10 +22,9 @@
   pk one_cpt_oral(cl=CL, v=V, ka=KA)
 
 [error_model]
-  DV ~ proportional(PROP_ERR)
+  DV ~ proportional(EPS1)
 
 [fit_options]
   method = focei
   maxiter = 500
   covariance = true
-  iov_column = OCC
