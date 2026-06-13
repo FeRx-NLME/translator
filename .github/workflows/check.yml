@@ -21,15 +21,13 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
-      # Hard deps only (Imports: cli, nonmem2rx, rxode2) plus the test tooling.
-      # ferx / amp.sim are Suggests and are deliberately NOT installed here, so
-      # no Rust toolchain or engine build is needed.
+      # All declared deps are on CRAN/RSPM (cli, nonmem2rx, rxode2, knitr,
+      # monolix2rx, rmarkdown, testthat). ferx / amp.sim are NOT declared in
+      # DESCRIPTION and are installed only in the engine job, so this job needs
+      # no Rust toolchain or engine build. Concordance self-skips (ferx absent).
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          dependencies: '"hard"'
-          extra-packages: |
-            any::rcmdcheck
-            any::testthat
+          extra-packages: any::rcmdcheck
       - uses: r-lib/actions/check-r-package@v2
         with:
           args: 'c("--no-manual", "--ignore-vignettes")'
@@ -51,12 +49,19 @@ jobs:
         with:
           use-public-rspm: true
       - uses: dtolnay/rust-toolchain@stable
-      # Installs Imports + Suggests; ferx and amp.sim resolve from the pinned
-      # Remotes in DESCRIPTION. The first run compiles the ferx Rust crate
-      # (~minutes); setup-r-dependencies caches the built package for later runs.
+      # Install the translator's hard deps plus, EXPLICITLY, the pinned engine
+      # (ferx-r@54f25d4 = ferx 0.1.5) and the amp.sim benchmark. Installing them
+      # as explicit extra-packages (rather than via a DESCRIPTION Remote) lets
+      # pak read each repo's own Package name, avoiding the repo-name vs
+      # package-name mismatch (ferx-r -> ferx). The first run compiles the ferx
+      # Rust crate (~minutes); the built package is cached for later runs.
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          dependencies: '"all"'
-          extra-packages: any::devtools
+          dependencies: '"hard"'
+          extra-packages: |
+            any::devtools
+            any::testthat
+            FeRx-NLME/ferx-r@54f25d4
+            LeidenAdvancedPKPD/amp.sim
       - name: Tier-4 concordance (pinned ferx)
         run: Rscript -e 'devtools::test(filter = "concordance", stop_on_failure = TRUE)'

@@ -14,14 +14,9 @@ Imports:
     nonmem2rx,
     rxode2
 Suggests:
-    amp.sim,
-    ferx,
     knitr,
     monolix2rx,
     rmarkdown,
     testthat (>= 3.0.0)
-Remotes:
-    FeRx-NLME/ferx-r@54f25d4,
-    LeidenAdvancedPKPD/amp.sim
 VignetteBuilder: knitr
 Config/testthat/edition: 3
