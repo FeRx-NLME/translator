@@ -186,12 +186,13 @@
         maxiter = 500
         covariance = true
 
-# IOV model: translates without error; KAPPA_CL emitted as omega (nonmem2rx treats IOV as IIV)
+# IOV model: KAPPA_CL emitted as omega + flattening warning (nonmem2rx treats IOV as IIV)
 
     Code
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: iov.ctl
+      # Warnings: 1 -- run result$warnings for details
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
