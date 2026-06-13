@@ -22,15 +22,21 @@ All three source formats share the same translation path.
 
 ## Installation
 
-```r
-# Install ferxtranslate
-install.packages("ferxtranslate")             # once on CRAN
-remotes::install_github("FeRx-NLME/translator") # development version
+Install with [pak](https://pak.r-lib.org). One call resolves CRAN and GitHub
+packages and pulls the `nonmem2rx` and `rxode2` parsing backends automatically.
 
-# Install the parsing backends you need:
-install.packages("nonmem2rx")       # for NONMEM
-install.packages("rxode2")          # for nlmixr2
-install.packages("monolix2rx")      # for Monolix (requires Monolix installation)
+```r
+# install.packages("pak")   # if you don't have it yet
+
+# Development version from GitHub:
+pak::pak("FeRx-NLME/translator")
+
+# ...or once published on CRAN:
+pak::pak("ferxtranslate")
+
+# Optional add-ons:
+pak::pak("monolix2rx")        # for Monolix .mlxtran sources
+pak::pak("FeRx-NLME/ferx-r")  # the ferx engine, to fit the translated .ferx (needs Rust/cargo)
 ```
 
 ## Quick start
