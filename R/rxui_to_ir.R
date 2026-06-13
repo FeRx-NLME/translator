@@ -41,6 +41,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, theta_out$warnings)
 
   omega_out <- .extract_omegas(ini)
+  warn      <- c(warn, .iov_flattening_warnings(omega_out$omegas))
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
 
@@ -273,6 +274,24 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     list(name = .norm(.strip_prefix(diag$name[i])), value = diag$est[i])
   )
   list(kappas = kappas, iov_column = iov_col, warnings = warn)
+}
+
+# Detect etas that look like inter-occasion variability (IOV) but landed in the
+# IIV [omega] block. NONMEM IOV coded as an extra ETA (`KAPPA = ETA(n)`, no
+# `$OMEGA ... SAME`) is read as ordinary IIV by nonmem2rx, so the occasion
+# structure is silently lost. Flag the conventional KAPPA*/IOV* names so the
+# user can restore it as a `kappa` declaration. Returns one WARN string per
+# matching eta (character(0) when none match). `omegas` is the list returned by
+# .extract_omegas(); each element's `names` is one eta (diagonal) or several
+# (block).
+.iov_flattening_warnings <- function(omegas) {
+  nms <- unlist(lapply(omegas, function(o) o$names), use.names = FALSE)
+  iov <- unique(nms[grepl("^(KAPPA|IOV)", nms, ignore.case = TRUE)])
+  vapply(iov, function(nm) paste0(
+    "WARN  | ETA '", nm, "' looks like inter-occasion variability but was ",
+    "emitted as IIV (nonmem2rx reads ETA-coded IOV as IIV). If this is IOV, ",
+    "declare it as 'kappa ", nm, " ~ ...' and set 'iov_column' in [fit_options]."
+  ), character(1), USE.NAMES = FALSE)
 }
 
 .extract_sigmas <- function(ini, ui_sigma = NULL) {

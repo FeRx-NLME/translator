@@ -73,11 +73,14 @@ test_that("block omega: block_omega line in output", {
   expect_match(result$ferx_text, "block_omega", fixed = TRUE)
 })
 
-test_that("IOV model: translates without error; KAPPA_CL emitted as omega (nonmem2rx treats IOV as IIV)", {
+test_that("IOV model: KAPPA_CL emitted as omega + flattening warning (nonmem2rx treats IOV as IIV)", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("iov.ctl"))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "KAPPA_CL", fixed = TRUE)
+  # nonmem2rx flattens the ETA-coded IOV to IIV; the translator must warn so the
+  # silent loss of occasion structure is visible to the user.
+  expect_true(any(grepl("inter-occasion", result$warnings, fixed = TRUE)))
 })
 
 # -- nlmixr2 models -----------------------------------------------------------
