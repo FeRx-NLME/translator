@@ -42,7 +42,34 @@ R CMD check --as-cran .
 Rscript -e 'devtools::check(cran = FALSE)'
 ```
 
-## Three-tier test structure
+## Known gotchas
+
+**nonmem2rx drops `S2=V`** — NONMEM `$PK` scaling assignments (`S1`, `S2`, etc.) are
+silently omitted from `ui$lstExpr`. Without them, an ODE model predicts amounts but
+data are concentrations, so IPRED >> DV and estimation diverges silently.
+Always parse the raw `.ctl`/`.mod` file for scaling via `.extract_nm_scaling()` (in
+`R/utils.R`); do not rely on the rxode2 UI object for this.
+
+**Fixed-effect PK params are absent from `indiv_params`** — When a PK param has no
+ETA (e.g. `V = THETA(3)`), nonmem2rx does not emit it as an assignment in `lstExpr`.
+The linCmt pk macro arg lookup then silently drops `v=V`, producing IPRED=0.
+The passthrough logic in `rxui_to_ir.R` handles this; do not remove it.
+
+**Snapshot acceptance after output changes** — If a code change affects the `.ferx`
+text of any bundled test model, the integration snapshots in
+`tests/testthat/_snaps/integration.md` will fail. Run
+`testthat::snapshot_review("integration")` to inspect the diff before accepting.
+Only accept if the new output is deliberately correct.
+
+**amp.sim package** — `amp.sim` (GitHub: LeidenAdvancedPKPD/amp.sim) is used for
+the external NONMEM reference benchmark in `test-concordance.R`. It is a `Suggests`
+dependency. Install with `remotes::install_github("LeidenAdvancedPKPD/amp.sim")`.
+`NM.theoph.02B.csv` is NOT bundled in amp.sim — the concordance dataset is
+pre-simulated and stored in `inst/testdata/ampsim_1cpt_oral_concordance.csv`.
+If the amp.sim reference estimates ever change, re-run
+`data-raw/generate_concordance_data.R` to regenerate the dataset.
+
+## Four-tier test structure
 
 Every new function or behaviour needs a test. Put the test in the lowest tier
 that covers it. Do not write tests at the end — write them as you build.
@@ -86,6 +113,59 @@ changed for a real model.
 Reference snapshots live in `tests/testthat/_snaps/`. Accept updated snapshots
 with `testthat::snapshot_accept()` only after manually verifying the new output
 is correct.
+
+**Tier 4 — Numerical concordance tests** (`tests/testthat/test-concordance.R`)
+
+Translate a bundled model, fit pre-simulated data with `ferx_fit()`, and assert
+that estimated parameters are within tolerance of the known true values. These
+are the only tests that can catch silent semantic errors: wrong ODE sign, swapped
+parameter, missing scaling, wrong sigma interpretation.
+
+Gated with `skip_if_not_installed("ferx")`. They require the `ferx` package
+(the Rust engine) and take ~2 minutes. They run:
+
+- **Locally** whenever `ferx` is installed - `Rscript -e 'devtools::test(filter="concordance")'`.
+- **In CI** only in the dedicated `engine` job (`.github/workflows/check.yml`),
+  which installs a pinned `ferx` and sets `FERXTRANSLATE_ENGINE_TESTS=true`. The
+  fast PR job skips them. This is what makes a green check actually mean the
+  engine accepted and fit the emitted `.ferx` - do not re-add a blanket
+  `skip_on_ci()`, or the only tier that exercises the engine stops running in CI.
+
+The `engine` job pins `ferx` (currently `ferx-r@54f25d4` = 0.1.5). The reference
+omegas in `test-concordance.R` are tied to that engine build - bump the pin and
+re-baseline the references in the same commit.
+
+```r
+# Run concordance tests locally (ferx installed)
+Rscript -e 'devtools::test(filter="concordance")'
+```
+
+Current test suite and tolerances:
+
+| Test | Model | Reference | Tolerance |
+|---|---|---|---|
+| linCmt 1-cpt oral: TVCL/TVV | `1cpt_oral.ctl` | truth: TVCL=0.134, TVV=8.1 | 15% |
+| linCmt 2-cpt IV: 4 thetas | `2cpt_iv.ctl` | truth: CL=5, V1=20, Q=8, V2=60 | 10% |
+| linCmt 2-cpt IV: omegas | `2cpt_iv.ctl` | reference fit (ML), not truth | 10% |
+| amp.sim linCmt benchmark | `pk_1cmt_oral_ampsim.ctl` | NONMEM: KA=0.0825, CL=2.676, V=1.588 | 10% |
+| ODE 1-cpt oral with S2=V | `pk_1cmt_oral.mod` | truth: KA=0.1, CL=2.0, V=1.0 | 15% |
+
+Structural thetas are well identified, so they are asserted against the nominal
+simulation truth. Omega variances from 50 subjects carry ~20% sampling SE, so
+the 2-cpt IV omega test asserts against the **reference ML fit** (a deterministic
+regression check on eta wiring), not the nominal truth - see the comment in
+`test-concordance.R`. Re-baseline those reference omegas if the engine or the
+dataset changes.
+
+Datasets live in `inst/testdata/`. Regenerate with `data-raw/generate_concordance_data.R`
+if model files or theta initials change. Commit the regenerated CSVs.
+
+**Translation gap report** — a dedicated test translates every model in
+`inst/testmodels/nonmem/` and prints a `model -> gap` table of any
+`$unsupported` features. It always passes; the table is the signal. Do NOT
+add hardcoded skip skeletons for individual gaps — the report is generic and
+picks them up automatically. Add a model file to extend coverage; the gap
+disappears from the report when the translator or ferx-core gains support.
 
 ## Documentation rules
 

@@ -1,4 +1,5 @@
 ^plans$
+^data-raw$
 ^CLAUDE\.md$
 ^\.github$
 ^\.git$

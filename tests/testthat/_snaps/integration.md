@@ -74,7 +74,7 @@
         maxiter = 500
         covariance = true
 
-# 2-cpt IV bolus: infers two_cpt_iv_bolus
+# 2-cpt IV: infers two_cpt_iv
 
     Code
       cat(norm_snap(result$ferx_text))
@@ -101,7 +101,7 @@
         V2 = TVV2 * exp(ETA_V2)
       
       [structural_model]
-        pk two_cpt_iv_bolus(cl=CL, v1=V1, q=Q, v2=V2)
+        pk two_cpt_iv(cl=CL, v1=V1, q=Q, v2=V2)
       
       [error_model]
         DV ~ proportional(EPS1)
@@ -117,7 +117,7 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: ode_warfarin.ctl
-      # Warnings: 1 -- run result$warnings for details
+      # Warnings: 2 -- run result$warnings for details
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -144,6 +144,9 @@
       
       [error_model]
         DV ~ proportional(EPS1)
+      
+      [scaling]
+        obs_scale = V
       
       [fit_options]
         method = focei
@@ -297,7 +300,7 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 1 -- run result$warnings for details
+      # Warnings: 2 -- run result$warnings for details
       
       [parameters]
         theta KA(0.1, 0.0, 1e15)
@@ -323,6 +326,9 @@
       
       [error_model]
         DV ~ proportional(EPS1)
+      
+      [scaling]
+        obs_scale = V
       
       [fit_options]
         method = focei
@@ -378,6 +384,39 @@
       
       [error_model]
         DV ~ additive(EPS1)
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+
+# pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: pk_1cmt_oral_ampsim.ctl
+      
+      [parameters]
+        theta KA(0.1, 0.0, 1e15)
+        theta CL(2.0, 0.0, 1e15)
+        theta V(1.0, 0.0, 1e15)
+      
+        omega ETA_KA ~ 0.01
+        omega ETA_CL ~ 0.02
+      
+        sigma EPS1 ~ 0.316227766016838 (sd)
+      
+      [individual_parameters]
+        KA = KA * exp(ETA_KA)
+        CL = CL * exp(ETA_CL)
+        V = V
+      
+      [structural_model]
+        pk one_cpt_oral(cl=CL, v=V, ka=KA)
+      
+      [error_model]
+        DV ~ proportional(EPS1)
       
       [fit_options]
         method = focei

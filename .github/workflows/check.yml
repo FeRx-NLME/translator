@@ -1,0 +1,67 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Fast tier: R CMD check + unit/integration/snapshot tests. No engine, no Rust.
+  # The Tier-4 concordance tests self-skip here (ferx is not installed, and CI is
+  # set without the engine opt-in), so this job stays a couple of minutes.
+  fast:
+    runs-on: ubuntu-latest
+    env:
+      _R_CHECK_FORCE_SUGGESTS_: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      # All declared deps are on CRAN/RSPM (cli, nonmem2rx, rxode2, knitr,
+      # monolix2rx, rmarkdown, testthat). ferx / amp.sim are NOT declared in
+      # DESCRIPTION and are installed only in the engine job, so this job needs
+      # no Rust toolchain or engine build. Concordance self-skips (ferx absent).
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          extra-packages: any::rcmdcheck
+      - uses: r-lib/actions/check-r-package@v2
+        with:
+          args: 'c("--no-manual", "--ignore-vignettes")'
+          build_args: 'c("--no-build-vignettes")'
+          error-on: '"warning"'
+
+  # Engine tier: build a PINNED ferx (Rust) and run the Tier-4 concordance tests
+  # so a green check actually proves the engine accepts and fits the emitted
+  # .ferx. The pin (ferx-r@54f25d4 = ferx 0.1.5) must match the reference omegas
+  # asserted in tests/testthat/test-concordance.R -- bump both together.
+  engine:
+    runs-on: ubuntu-latest
+    env:
+      FERXTRANSLATE_ENGINE_TESTS: "true"
+      FERX_NO_AUTODIFF: "1"   # stable-Rust path; Enzyme is not available/needed in CI
+    steps:
+      - uses: actions/checkout@v4
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+      - uses: dtolnay/rust-toolchain@stable
+      # Install the translator's hard deps plus, EXPLICITLY, the pinned engine
+      # (ferx-r@54f25d4 = ferx 0.1.5) and the amp.sim benchmark. Installing them
+      # as explicit extra-packages (rather than via a DESCRIPTION Remote) lets
+      # pak read each repo's own Package name, avoiding the repo-name vs
+      # package-name mismatch (ferx-r -> ferx). The first run compiles the ferx
+      # Rust crate (~minutes); the built package is cached for later runs.
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          dependencies: '"hard"'
+          extra-packages: |
+            any::devtools
+            any::testthat
+            FeRx-NLME/ferx-r@54f25d4
+            LeidenAdvancedPKPD/amp.sim
+      - name: Tier-4 concordance (pinned ferx)
+        run: Rscript -e 'devtools::test(filter = "concordance", stop_on_failure = TRUE)'

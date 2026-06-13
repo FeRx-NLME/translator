@@ -52,13 +52,11 @@ test_that("normalises theta name with dots", {
   expect_equal(out$thetas[[1]]$name, "TV_CL")
 })
 
-test_that("FIXED theta emits INFO warning", {
+test_that("FIXED theta sets fixed = TRUE in theta list", {
   ini <- theta_row("tvcl", est = 0.134, fix = TRUE)
   out <- .extract_thetas(ini)
-  expect_length(out$warnings, 1L)
-  expect_match(out$warnings[1], "INFO")
-  expect_match(out$warnings[1], "TVCL")
-  expect_match(out$warnings[1], "FIXED")
+  expect_true(out$thetas[[1]]$fixed)
+  expect_length(out$warnings, 0L)
 })
 
 test_that("multiple thetas extracted in order", {
@@ -280,7 +278,7 @@ test_that("1-cpt oral inferred from ka + v (no q)", {
 test_that("1-cpt iv inferred when no ka", {
   params <- list(list(lhs = "CL"), list(lhs = "V"))
   out    <- .infer_pk_macro(params)
-  expect_equal(out$pk_call, "one_cpt_iv_bolus")
+  expect_equal(out$pk_call, "one_cpt_iv")
   expect_null(out$pk_args$ka)
 })
 
@@ -302,23 +300,29 @@ test_that("v alias: V used when v1 expected", {
   expect_equal(out$pk_args$v1, "V")
 })
 
-test_that("3-cpt oral emits ERROR and NA pk_call", {
-  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q"),
-                 list(lhs = "V2"), list(lhs = "Q2"), list(lhs = "KA"))
+test_that("3-cpt oral maps to three_cpt_oral pk_call", {
+  # NONMEM ADVAN11 names the two inter-compartmental clearances Q2 (first,
+  # paired with V2) and Q3 (second, paired with V3). Both must reach the pk
+  # macro: q2 -> ferx slot Q, q3 -> ferx slot Q3.
+  params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q2"),
+                 list(lhs = "V2"), list(lhs = "Q3"), list(lhs = "V3"),
+                 list(lhs = "KA"))
   out    <- .infer_pk_macro(params)
-  expect_true(is.na(out$pk_call))
-  expect_match(out$warnings[1], "ERROR")
-  expect_length(out$unsupported, 1L)
+  expect_equal(out$pk_call, "three_cpt_oral")
+  expect_length(out$unsupported, 0L)
+  expect_equal(out$pk_args$ka, "KA")
+  expect_equal(out$pk_args$q2, "Q2")
+  expect_equal(out$pk_args$q3, "Q3")
 })
 
-test_that("3-cpt IV bolus (Q2, no KA) also unsupported -- ferx has no 3-cpt analytical", {
+test_that("3-cpt IV maps to three_cpt_iv pk_call", {
   params <- list(list(lhs = "CL"), list(lhs = "V1"), list(lhs = "Q2"),
-                 list(lhs = "V2"), list(lhs = "V3"))
+                 list(lhs = "V2"), list(lhs = "Q3"), list(lhs = "V3"))
   out    <- .infer_pk_macro(params)
-  expect_true(is.na(out$pk_call))
-  expect_match(out$warnings[1], "ERROR")
-  expect_length(out$unsupported, 1L)
-  expect_match(out$unsupported[1], "three_cpt_iv_bolus")
+  expect_equal(out$pk_call, "three_cpt_iv")
+  expect_length(out$unsupported, 0L)
+  expect_equal(out$pk_args$q2, "Q2")
+  expect_equal(out$pk_args$q3, "Q3")
 })
 
 test_that("bioavailability f added to pk_args when present", {
@@ -384,7 +388,7 @@ test_that("rxui_to_ir ODE model sets structural type ode with states and obs_cmt
   expect_equal(ir$odes[[1]]$state, "depot")
 })
 
-test_that("rxui_to_ir 3-cpt oral: structural is empty (structural_model omitted)", {
+test_that("rxui_to_ir 3-cpt oral: translates to three_cpt_oral pk macro", {
   ini <- rbind(
     theta_row("tvcl", 0.1), theta_row("tvv1", 5), theta_row("tvq",  0.5),
     theta_row("tvv2", 10),  theta_row("tvq2", 0.2), theta_row("tvv3", 20),
@@ -398,9 +402,9 @@ test_that("rxui_to_ir 3-cpt oral: structural is empty (structural_model omitted)
     quote(linCmt() ~ prop(err.prop))
   )
   ir <- rxui_to_ir(mock_ui(ini, lst))
-  expect_length(ir$structural, 0L)
-  expect_length(ir$unsupported, 1L)
-  expect_match(ir$warnings[1], "ERROR")
+  expect_equal(ir$structural$type,    "pk_macro")
+  expect_equal(ir$structural$pk_call, "three_cpt_oral")
+  expect_length(ir$unsupported, 0L)
 })
 
 test_that("rxui_to_ir IOV model sets iov_column in fit_options", {

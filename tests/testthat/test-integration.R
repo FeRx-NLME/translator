@@ -43,18 +43,18 @@ test_that("2-cpt oral with covariates: snapshot + no unsupported", {
   expect_match(result$ferx_text, "two_cpt_oral", fixed = TRUE)
 })
 
-test_that("2-cpt IV bolus: infers two_cpt_iv_bolus", {
+test_that("2-cpt IV: infers two_cpt_iv", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("2cpt_iv.ctl"))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
-  expect_match(result$ferx_text, "two_cpt_iv_bolus", fixed = TRUE)
+  expect_match(result$ferx_text, "two_cpt_iv", fixed = TRUE)
 })
 
-test_that("3-cpt IV: emits ERROR for unsupported three_cpt_iv_bolus", {
+test_that("3-cpt IV: translates to three_cpt_iv pk macro", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("3cpt_iv.ctl"))
-  expect_length(result$unsupported, 1L)
-  expect_match(result$unsupported[1], "three_cpt", fixed = FALSE)
+  expect_length(result$unsupported, 0L)
+  expect_match(result$ferx_text, "three_cpt_iv", fixed = TRUE)
 })
 
 test_that("ODE warfarin: full $DES path, [odes] section present", {
@@ -118,11 +118,19 @@ test_that("amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred", {
   skip_if_not_installed("nonmem2rx")
   result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
-  expect_match(result$ferx_text, "[odes]",     fixed = TRUE)
-  expect_match(result$ferx_text, "obs_cmt=",   fixed = TRUE)
-  expect_match(result$ferx_text, "d/dt(",      fixed = TRUE)
-  expect_match(result$ferx_text, "proportional", fixed = TRUE)
+  expect_match(result$ferx_text, "[odes]",        fixed = TRUE)
+  expect_match(result$ferx_text, "obs_cmt=",      fixed = TRUE)
+  expect_match(result$ferx_text, "d/dt(",         fixed = TRUE)
+  expect_match(result$ferx_text, "proportional",  fixed = TRUE)
   expect_length(result$unsupported, 0L)
+})
+
+test_that("pk_1cmt_oral.mod: S2=V scaling emits [scaling] obs_scale = V", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
+  expect_match(result$ferx_text, "[scaling]",      fixed = TRUE)
+  expect_match(result$ferx_text, "obs_scale = V",  fixed = TRUE)
+  expect_true(any(grepl("S2 = V", result$warnings, fixed = TRUE)))
 })
 
 test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
@@ -136,4 +144,16 @@ test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
   n_odes <- length(regmatches(result$ferx_text,
                               gregexpr("d/dt\\(", result$ferx_text))[[1]])
   expect_equal(n_odes, 4L)
+})
+
+test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path("pk_1cmt_oral_ampsim.ctl"))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  # Fixed-effect V (no ETA) must appear as passthrough in [individual_parameters]
+  # and be passed to the pk macro, otherwise ferx predicts zero concentration.
+  expect_match(result$ferx_text, "V = V",              fixed = TRUE)
+  expect_match(result$ferx_text, "v=V",                fixed = TRUE)
+  expect_match(result$ferx_text, "one_cpt_oral",       fixed = TRUE)
+  expect_length(result$unsupported, 0L)
 })

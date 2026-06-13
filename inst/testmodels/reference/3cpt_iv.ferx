@@ -1,5 +1,4 @@
 # Translated from nonmem: 3cpt_iv.ctl
-# WARNING: three_cpt_iv_bolus (not supported in ferx)
 
 [parameters]
   theta TVCL(3.0, 0.1, 50.0)
@@ -14,7 +13,7 @@
   omega ETA_Q2 ~ 0.1
   omega ETA_V2 ~ 0.08
 
-  sigma PROP_ERR ~ 0.02 (sd)
+  sigma EPS1 ~ 0.14142135623731 (sd)
 
 [individual_parameters]
   CL = TVCL * exp(ETA_CL)
@@ -24,8 +23,11 @@
   Q3 = TVQ3
   V3 = TVV3
 
+[structural_model]
+  pk three_cpt_iv(cl=CL, v1=V1, q2=Q2, v2=V2, q3=Q3, v3=V3)
+
 [error_model]
-  DV ~ proportional(PROP_ERR)
+  DV ~ proportional(EPS1)
 
 [fit_options]
   method = focei

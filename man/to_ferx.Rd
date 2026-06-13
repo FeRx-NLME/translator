@@ -34,6 +34,8 @@ to overwrite it. Default \code{FALSE}.}
 
 \item{ctl_file}{Path to a NONMEM control stream file.}
 
+\item{...}{Additional arguments passed to \code{\link[=to_ferx]{to_ferx()}} (e.g. \code{overwrite}).}
+
 \item{model_fn}{An nlmixr2 / rxode2 model function.}
 
 \item{mlxtran}{Path to a Monolix \code{.mlxtran} project file.}
@@ -44,8 +46,8 @@ A \code{ferx_translate_result} invisibly, with fields \verb{$ferx_text},
 }
 \description{
 Parses \code{source} via the appropriate intermediary (\code{nonmem2rx}, \code{rxode2}, or
-\code{monolix2rx}), converts to a \link{ferx_ir}, emits a \code{.ferx} string, and
-optionally writes it to disk.
+\code{monolix2rx}), converts to a \code{\link[=new_ferx_ir]{new_ferx_ir()}} object, emits a \code{.ferx} string,
+and optionally writes it to disk.
 }
 \examples{
 \dontrun{

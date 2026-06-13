@@ -83,8 +83,9 @@ emit_ferx <- function(ir) {
 }
 
 .emit_theta <- function(t) {
-  sprintf("  theta %s(%s, %s, %s)",
-          t$name, .fmt_num(t$init), .fmt_num(t$lower), .fmt_num(t$upper))
+  fix_str <- if (isTRUE(t$fixed)) ", FIX" else ""
+  sprintf("  theta %s(%s, %s, %s%s)",
+          t$name, .fmt_num(t$init), .fmt_num(t$lower), .fmt_num(t$upper), fix_str)
 }
 
 .emit_omega <- function(o) {
@@ -145,7 +146,9 @@ emit_ferx <- function(ir) {
 }
 
 .emit_scaling_section <- function(ir) {
-  paste0("[scaling]\n  obs_scale = ", .fmt_num(ir$scaling$obs_scale))
+  val <- ir$scaling$obs_scale
+  out <- if (is.character(val)) val else .fmt_num(val)
+  paste0("[scaling]\n  obs_scale = ", out)
 }
 
 .emit_fit_options_section <- function(ir) {
