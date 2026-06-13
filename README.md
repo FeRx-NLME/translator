@@ -1,5 +1,9 @@
 # ferxtranslate
 
+<!-- badges: start -->
+[![check](https://github.com/FeRx-NLME/translator/actions/workflows/check.yml/badge.svg)](https://github.com/FeRx-NLME/translator/actions/workflows/check.yml)
+<!-- badges: end -->
+
 Translate pharmacometric models written in NONMEM, nlmixr2, or Monolix into
 [ferx](https://github.com/FeRx-NLME/ferx-r) `.ferx` format, so you can move
 to ferx without rewriting your models by hand.
@@ -18,14 +22,21 @@ All three source formats share the same translation path.
 
 ## Installation
 
-```r
-# Install ferxtranslate
-install.packages("ferxtranslate")   # once on CRAN
+Install with [pak](https://pak.r-lib.org). One call resolves CRAN and GitHub
+packages and pulls the `nonmem2rx` and `rxode2` parsing backends automatically.
 
-# Install the parsing backends you need:
-install.packages("nonmem2rx")       # for NONMEM
-install.packages("rxode2")          # for nlmixr2
-install.packages("monolix2rx")      # for Monolix (requires Monolix installation)
+```r
+# install.packages("pak")   # if you don't have it yet
+
+# Development version from GitHub:
+pak::pak("FeRx-NLME/translator")
+
+# ...or once published on CRAN:
+pak::pak("ferxtranslate")
+
+# Optional add-ons:
+pak::pak("monolix2rx")        # for Monolix .mlxtran sources
+pak::pak("FeRx-NLME/ferx-r")  # the ferx engine, to fit the translated .ferx (needs Rust/cargo)
 ```
 
 ## Quick start
@@ -57,9 +68,9 @@ cat(to_ferx("run001.ctl", format = "nonmem")$ferx_text)
 Every result carries a `$warnings` vector with prefixed messages:
 
 ```
-INFO  | THETA TVCL was FIXED in source -- treated as free in ferx
-WARN  | Theta bounds not found for THETA2 -- set to (init, 0, Inf), please review
-ERROR | MIXTURE model detected -- not supported in ferx, removed from output
+INFO  | S2 = V detected -- emitting [scaling] obs_scale = V
+WARN  | complex $ERROR -- classified as proportional, verify
+ERROR | No structural model detected -- [structural_model] section omitted
 ```
 
 `ERROR`-level items also appear in `$unsupported` so you can programmatically
@@ -77,22 +88,49 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
 
 | Source feature | Status |
 |---|---|
-| 1/2-cpt oral and IV bolus | Translated |
+| 1, 2, 3-compartment, oral and IV | Translated |
 | Covariates (allometric power, linear) | Translated |
 | Block omega | Translated |
-| IOV (diagonal kappas) | Translated |
+| IOV (diagonal kappas) | Translated [^iov] |
 | ODE models (`$DES` / `d/dt()`) | Translated |
 | Proportional / additive / combined error | Translated |
 | FIXED thetas | Translated (emits `FIX` in ferx) |
-| 3-compartment (oral / IV bolus) | Translated |
-| Multiple DVIDs | ERROR -- not yet in ferx |
-| MIXTURE models | ERROR -- not yet in ferx |
-| IOV block omega | WARN -- diagonal only emitted |
+| Multiple DVIDs / joint PK-PD | ferx supports it; translator does not emit it yet [^dvid] |
+| MIXTURE models | Not yet in ferx |
+| IOV block omega | WARN -- diagonal kappas only emitted |
+
+[^iov]: ferx and the emitter fully support IOV (`kappa` + `iov_column`), and it
+    translates cleanly when the source exposes occasion-level random effects
+    (e.g. nlmixr2 `iov`). For NONMEM, `nonmem2rx` commonly reads an ETA-coded
+    IOV term (`KAPPA = ETA(n)`) as ordinary IIV, so it arrives as an extra
+    `omega` and the occasion structure is lost -- check that `kappa` /
+    `iov_column` actually made it into the output.
+
+[^dvid]: ferx supports multiple observation types via a per-CMT error model
+    (`CMT=2: DV ~ proportional(...)`, `CMT=3: DV ~ additive(...)`, with per-CMT
+    `y[CMT=N] = ...` readouts). The translator currently maps every observation
+    to a single `DV` and does not emit the per-CMT dispatch.
+
+## Development
+
+The test suite runs in four tiers -- unit, integration, reference snapshot, and
+numerical concordance (which fits translated models against pre-simulated data
+and checks that the recovered parameters match). CI runs two jobs on every pull
+request:
+
+- **fast** -- `R CMD check` plus the unit, integration, and snapshot tiers.
+- **engine** -- builds a pinned [ferx](https://github.com/FeRx-NLME/ferx-r) and
+  runs the concordance tier, so a green check means the engine actually accepted
+  and fit the emitted `.ferx`.
+
+```r
+devtools::test()   # concordance runs locally when ferx is installed
+```
 
 ## Learn more
 
 ```r
 vignette("translating-nonmem")   # step-by-step NONMEM walkthrough
 ?to_ferx                         # main function reference
-?ferx_ir                         # intermediate representation
+?new_ferx_ir                     # intermediate representation
 ```

@@ -144,6 +144,32 @@ test_that("empty IOV gives empty kappas", {
   expect_equal(out$kappas, list())
 })
 
+test_that(".iov_flattening_warnings flags a KAPPA-named IIV omega", {
+  omegas <- list(
+    list(type = "diagonal", names = "ETA_CL",   values = 0.10),
+    list(type = "diagonal", names = "KAPPA_CL", values = 0.04)
+  )
+  w <- .iov_flattening_warnings(omegas)
+  expect_length(w, 1L)
+  expect_match(w, "KAPPA_CL", fixed = TRUE)
+  expect_match(w, "inter-occasion")
+  expect_match(w, "iov_column", fixed = TRUE)
+})
+
+test_that(".iov_flattening_warnings matches IOV* names and block etas", {
+  omegas <- list(list(type = "block", names = c("ETA_CL", "IOV_V"),
+                      values = c(0.1, 0.02, 0.05)))
+  w <- .iov_flattening_warnings(omegas)
+  expect_length(w, 1L)
+  expect_match(w, "IOV_V", fixed = TRUE)
+})
+
+test_that(".iov_flattening_warnings is silent without IOV-named etas", {
+  omegas <- list(list(type = "diagonal", names = "ETA_CL", values = 0.10))
+  expect_length(.iov_flattening_warnings(omegas), 0L)
+  expect_length(.iov_flattening_warnings(list()), 0L)
+})
+
 # -- .extract_sigmas ----------------------------------------------------------
 
 test_that("extracts sigma on sd scale", {
