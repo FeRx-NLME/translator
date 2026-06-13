@@ -26,7 +26,15 @@
 #   random-effect variances: within 20% of truth
 
 skip_if_not_installed("ferx")
-skip_on_ci()
+# These Tier-4 tests exercise the ferx engine. In CI they run ONLY in the
+# dedicated "engine" job, which installs a pinned ferx and sets
+# FERXTRANSLATE_ENGINE_TESTS=true; the fast PR job (no ferx) skips them. Locally
+# they run whenever ferx is installed -- same as the old skip_on_ci() behaviour.
+# Force a local run of just this tier with:
+#   FERXTRANSLATE_ENGINE_TESTS=true Rscript -e 'devtools::test(filter="concordance")'
+if (tolower(Sys.getenv("CI")) %in% c("true", "1") &&
+    !identical(Sys.getenv("FERXTRANSLATE_ENGINE_TESTS"), "true"))
+  skip("engine (Tier-4) tests run only in the CI 'engine' job (pinned ferx)")
 
 library(ferxtranslate)
 library(ferx)

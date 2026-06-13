@@ -121,11 +121,22 @@ that estimated parameters are within tolerance of the known true values. These
 are the only tests that can catch silent semantic errors: wrong ODE sign, swapped
 parameter, missing scaling, wrong sigma interpretation.
 
-Gated with `skip_if_not_installed("ferx")` and `skip_on_ci()` — run locally only.
-Require the `ferx` binary in PATH and take ~2 minutes.
+Gated with `skip_if_not_installed("ferx")`. They require the `ferx` package
+(the Rust engine) and take ~2 minutes. They run:
+
+- **Locally** whenever `ferx` is installed - `Rscript -e 'devtools::test(filter="concordance")'`.
+- **In CI** only in the dedicated `engine` job (`.github/workflows/check.yml`),
+  which installs a pinned `ferx` and sets `FERXTRANSLATE_ENGINE_TESTS=true`. The
+  fast PR job skips them. This is what makes a green check actually mean the
+  engine accepted and fit the emitted `.ferx` - do not re-add a blanket
+  `skip_on_ci()`, or the only tier that exercises the engine stops running in CI.
+
+The `engine` job pins `ferx` (currently `ferx-r@54f25d4` = 0.1.5). The reference
+omegas in `test-concordance.R` are tied to that engine build - bump the pin and
+re-baseline the references in the same commit.
 
 ```r
-# Run concordance tests locally
+# Run concordance tests locally (ferx installed)
 Rscript -e 'devtools::test(filter="concordance")'
 ```
 
