@@ -131,13 +131,20 @@ Rscript -e 'devtools::test(filter="concordance")'
 
 Current test suite and tolerances:
 
-| Test | Model | True params | Tolerance |
+| Test | Model | Reference | Tolerance |
 |---|---|---|---|
-| linCmt 1-cpt oral: TVCL/TVV | `1cpt_oral.ctl` | TVCL=0.134, TVV=8.1 | 15% |
-| linCmt 2-cpt IV: 4 thetas | `2cpt_iv.ctl` | CL=5, V1=20, Q=8, V2=60 | 10% |
-| linCmt 2-cpt IV: omegas | `2cpt_iv.ctl` | om_CL/V1=0.10, om_Q=0.08 | 10% |
-| amp.sim linCmt benchmark | `pk_1cmt_oral_ampsim.ctl` | KA=0.0825, CL=2.676, V=1.588 | 10% |
-| ODE 1-cpt oral with S2=V | `pk_1cmt_oral.mod` | KA=0.1, CL=2.0, V=1.0 | 15% |
+| linCmt 1-cpt oral: TVCL/TVV | `1cpt_oral.ctl` | truth: TVCL=0.134, TVV=8.1 | 15% |
+| linCmt 2-cpt IV: 4 thetas | `2cpt_iv.ctl` | truth: CL=5, V1=20, Q=8, V2=60 | 10% |
+| linCmt 2-cpt IV: omegas | `2cpt_iv.ctl` | reference fit (ML), not truth | 10% |
+| amp.sim linCmt benchmark | `pk_1cmt_oral_ampsim.ctl` | NONMEM: KA=0.0825, CL=2.676, V=1.588 | 10% |
+| ODE 1-cpt oral with S2=V | `pk_1cmt_oral.mod` | truth: KA=0.1, CL=2.0, V=1.0 | 15% |
+
+Structural thetas are well identified, so they are asserted against the nominal
+simulation truth. Omega variances from 50 subjects carry ~20% sampling SE, so
+the 2-cpt IV omega test asserts against the **reference ML fit** (a deterministic
+regression check on eta wiring), not the nominal truth - see the comment in
+`test-concordance.R`. Re-baseline those reference omegas if the engine or the
+dataset changes.
 
 Datasets live in `inst/testdata/`. Regenerate with `data-raw/generate_concordance_data.R`
 if model files or theta initials change. Commit the regenerated CSVs.
