@@ -180,11 +180,14 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  ref_nm <- c(KA = ref$THETA1, CL = ref$THETA2, V = ref$THETA3)
+  # Theta names carry the TV prefix: the source names them KA/CL/V, which would
+  # shadow the identically named individual parameters, so the translator
+  # renames the thetas (see .deshadow_theta_names()).
+  ref_nm <- c(TVKA = ref$THETA1, TVCL = ref$THETA2, TVV = ref$THETA3)
   .report_deviations(fit$theta, ref_nm, "amp.sim 1-cpt oral thetas vs NONMEM reference")
-  expect_lt(abs(fit$theta["KA"] / ref_nm["KA"] - 1), 0.10, label = "KA vs amp.sim ref")
-  expect_lt(abs(fit$theta["CL"] / ref_nm["CL"] - 1), 0.10, label = "CL vs amp.sim ref")
-  expect_lt(abs(fit$theta["V"]  / ref_nm["V"]  - 1), 0.10, label = "V vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVKA"] / ref_nm["TVKA"] - 1), 0.10, label = "KA vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVCL"] / ref_nm["TVCL"] - 1), 0.10, label = "CL vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVV"]  / ref_nm["TVV"]  - 1), 0.10, label = "V vs amp.sim ref")
 })
 
 # ---------------------------------------------------------------------------
@@ -202,11 +205,14 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  ref <- c(KA = 0.1, CL = 2.0, V = 1.0)
+  # KA and CL are renamed away from the individual parameters that would shadow
+  # them; V has no ETA, so it stays a plain theta. Before that fix, ETA_CL had
+  # no effect on this model at all -- K20 = CL/V read the theta.
+  ref <- c(TVKA = 0.1, TVCL = 2.0, V = 1.0)
   .report_deviations(fit$theta, ref, "ODE 1-cpt oral thetas")
-  expect_lt(abs(fit$theta["KA"] / ref["KA"] - 1), 0.15, label = "KA")
-  expect_lt(abs(fit$theta["CL"] / ref["CL"] - 1), 0.15, label = "CL")
-  expect_lt(abs(fit$theta["V"]  / ref["V"]  - 1), 0.15, label = "V")
+  expect_lt(abs(fit$theta["TVKA"] / ref["TVKA"] - 1), 0.15, label = "KA")
+  expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta["V"]    / ref["V"]    - 1), 0.15, label = "V")
 })
 
 # ===========================================================================

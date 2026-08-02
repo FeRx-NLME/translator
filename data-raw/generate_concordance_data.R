@@ -26,6 +26,22 @@ translate_tmp <- function(model_name) {
   ferx_file
 }
 
+# Helper: overwrite one theta's initial value in emitted .ferx text.
+# The translator renames a theta that would shadow an identically named
+# individual parameter (KA -> TVKA and so on), so match either spelling and keep
+# whichever it actually emitted. Stops rather than silently leaving the value
+# untouched if neither matches -- a no-op sub() here would quietly simulate from
+# the wrong parameters.
+set_theta <- function(txt, nm, value) {
+  pat <- sprintf("theta (TV)?%s\\([^)]+\\)", nm)
+  hit <- regmatches(txt, regexpr(pat, txt))
+  if (length(hit) == 0L)
+    stop("no theta matching '", nm, "' in the emitted .ferx -- ",
+         "has the translator's theta naming changed?", call. = FALSE)
+  actual <- sub(sprintf("theta ((TV)?%s)\\(.*", nm), "\\1", hit)
+  sub(pat, sprintf("theta %s(%.10g, 0.0, 1e15)", actual, value), txt)
+}
+
 # Helper: build a standard NONMEM-format dosing+observation template
 nm_template <- function(n_subj, dose, cmt, obs_times) {
   rows <- vector("list", n_subj * (length(obs_times) + 1))
@@ -93,12 +109,9 @@ if (requireNamespace("amp.sim", quietly = TRUE)) {
   ferx3_base <- translate_tmp("pk_1cmt_oral_ampsim.ctl")
   ferx3_txt  <- readLines(ferx3_base)
   ferx3_txt  <- paste(ferx3_txt, collapse = "\n")
-  ferx3_txt  <- sub("theta KA[(][^)]+[)]",
-                    sprintf("theta KA(%.10g, 0.0, 1e15)", ref$THETA1), ferx3_txt)
-  ferx3_txt  <- sub("theta CL[(][^)]+[)]",
-                    sprintf("theta CL(%.10g, 0.0, 1e15)", ref$THETA2), ferx3_txt)
-  ferx3_txt  <- sub("theta V[(][^)]+[)]",
-                    sprintf("theta V(%.10g, 0.0, 1e15)",  ref$THETA3), ferx3_txt)
+  ferx3_txt  <- set_theta(ferx3_txt, "KA", ref$THETA1)
+  ferx3_txt  <- set_theta(ferx3_txt, "CL", ref$THETA2)
+  ferx3_txt  <- set_theta(ferx3_txt, "V",  ref$THETA3)
   ferx3_txt  <- sub("omega ETA_KA ~ [^\n]+",
                     sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), ferx3_txt)
   ferx3_txt  <- sub("omega ETA_CL ~ [^\n]+",

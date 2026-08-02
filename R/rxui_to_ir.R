@@ -52,6 +52,28 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   name_map  <- .norm_map_from_ini(ini)
   sigma_names_norm <- toupper(vapply(sigma_out$sigmas, function(s) s$name, ""))
+
+  # Rename thetas that would shadow an individual parameter, before parsing, so
+  # every reference resolves to the right one. theta_orig keeps the pre-rename
+  # names for the linCmt passthrough, which keys on the PK parameter name.
+  theta_orig <- vapply(theta_out$thetas, function(t) t$name, "")
+  desh <- .deshadow_theta_names(
+    theta_names = theta_orig,
+    indiv_names = .predict_indiv_names(lst, theta_orig, name_map),
+    reserved    = c(unlist(lapply(omega_out$omegas, function(o) o$names)),
+                    vapply(kappa_out$kappas,  function(k) k$name, ""),
+                    vapply(sigma_out$sigmas,  function(s) s$name, ""))
+  )
+  if (length(desh$map) > 0) {
+    for (i in seq_along(theta_out$thetas)) {
+      j <- match(theta_orig[i], names(desh$map))
+      if (is.na(j)) next
+      theta_out$thetas[[i]]$name <- unname(desh$map[j])
+      name_map[[theta_out$raw_names[i]]] <- unname(desh$map[j])
+    }
+    warn <- c(warn, desh$warnings)
+  }
+
   expr_out  <- .parse_model_exprs(lst, name_map, sigma_names_norm)
   warn      <- c(warn, expr_out$warnings)
   unsp      <- c(unsp, expr_out$unsupported)
@@ -100,16 +122,19 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # Fixed-effect PK params (theta with no ETA) are absent from indiv_params,
     # so the pk macro arg lookup misses them. Add passthrough entries so that
     # e.g. `V = THETA(3)` (no ETA) still produces `v=V` in the pk macro call.
-    pk_candidates <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
+    # The LHS is the PK name as written in the source (theta_orig) and the RHS
+    # the possibly de-shadowed theta, so a passthrough reads `V = TVV` and never
+    # the self-shadowing `V = V`.
     existing_lhs  <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
     theta_names   <- vapply(theta_out$thetas, function(t) t$name, "")
-    for (tname in theta_names) {
-      if (toupper(tname) %in% pk_candidates && !toupper(tname) %in% existing_lhs) {
+    for (i in seq_along(theta_names)) {
+      pk_name <- theta_orig[i]
+      if (toupper(pk_name) %in% .PK_CANDIDATES && !toupper(pk_name) %in% existing_lhs) {
         expr_out$indiv_params <- c(expr_out$indiv_params,
-                                   list(list(lhs = tname, rhs = tname)))
+                                   list(list(lhs = pk_name, rhs = theta_names[i])))
         # Track the added name so a second theta normalising to the same PK
         # candidate does not append a duplicate passthrough entry.
-        existing_lhs <- c(existing_lhs, toupper(tname))
+        existing_lhs <- c(existing_lhs, toupper(pk_name))
       }
     }
     pk_out <- .infer_pk_macro(expr_out$indiv_params)
@@ -176,6 +201,111 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
             lapply(as.list(expr[-1]), .normalise_expr, map = map)))
 }
 
+# -- theta / individual-parameter de-shadowing --------------------------------
+
+# ferx resolves a bare identifier as theta first, then eta, then individual
+# parameter (ferx-core parse_atom). A theta whose name matches an individual
+# parameter therefore SHADOWS it everywhere thetas are in scope --
+# [individual_parameters], [scaling], [initial_conditions] -- so
+#   CL = CL * exp(ETA_CL)
+#   K20 = CL / V          # reads the THETA CL, not the line above
+# leaves the first line dead and the model fits without that IIV. ferx emits no
+# diagnostic for it. [odes] is unaffected (thetas are not in scope there) and so
+# are `pk ...(cl=CL)` arguments (resolved by direct name lookup), which is why
+# the same file can carry correct ODEs and a silently wrong derived parameter.
+#
+# nonmem2rx names thetas after the $PK parameters whenever $THETA carries
+# labels, so the collision is the common case, not an edge case. Rename the
+# theta, not the individual parameter: `theta TVCL` + `CL = TVCL * ...` is the
+# idiomatic ferx form and leaves the model-facing names untouched.
+#
+# The rename is applied to `name_map` BEFORE the model expressions are parsed,
+# never to the emitted strings afterwards. A textual pass cannot tell the two
+# apart: in `cl <- t.CL * exp(eta2)` the RHS means the theta, but in the
+# following `k20 <- cl/v` it means the individual parameter, and both deparse
+# to the same token once normalised.
+
+# PK parameter names the linCmt pk-macro arg lookup recognises. Shared with the
+# passthrough in rxui_to_ir() so both agree on which fixed-effect thetas become
+# individual parameters.
+.PK_CANDIDATES <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
+
+# Resolve one symbol to the name it will carry after normalisation.
+.mapped_name <- function(sym, name_map) {
+  nm <- as.character(sym)
+  if (nm %in% names(name_map)) name_map[[nm]] else .norm(nm)
+}
+
+# Names that will end up as individual-parameter LHSs, determined before the
+# expression parser runs. Mirrors the two filters .parse_model_exprs() applies
+# in pass 3 -- internal temporaries and theta-alias self-assignments -- because
+# neither reaches [individual_parameters] and so neither can shadow a theta.
+# Skipping the alias case matters: nonmem2rx emits `tvcl <- t.TVCL`, and
+# counting that would rename a perfectly good `TVCL` to `TVTVCL`.
+# Also mirrors the linCmt passthrough, which invents an individual parameter for
+# a fixed-effect PK theta that has no assignment of its own.
+.predict_indiv_names <- function(lst, theta_names, name_map = character()) {
+  nms <- character()
+  has_lincmt <- FALSE
+  for (expr in lst) {
+    if (.is_lincmt_tilde(expr)) { has_lincmt <- TRUE; next }
+    if (!.is_assignment(expr)) next
+    lhs <- expr[[2]]
+    if (.is_ddt_lhs(lhs)) next
+    rhs <- expr[[3]]
+    if (is.call(rhs) && identical(rhs[[1]], as.name("linCmt"))) {
+      has_lincmt <- TRUE
+      next
+    }
+    if (!is.symbol(lhs)) next
+    nm <- .norm(as.character(lhs))
+    if (grepl("^SCALE\\d*$|^RXINI|^RXF_|^RXM_", nm)) next
+    if (is.symbol(rhs) && identical(.mapped_name(rhs, name_map), nm)) next
+    nms <- c(nms, nm)
+  }
+  if (has_lincmt)
+    nms <- c(nms, theta_names[toupper(theta_names) %in% .PK_CANDIDATES])
+  unique(nms)
+}
+
+# Pick a free replacement for a shadowed theta. `taken` is uppercase.
+.free_theta_name <- function(old, taken) {
+  for (cand in c(paste0("TV", old), paste0("THETA_", old)))
+    if (!toupper(cand) %in% taken) return(cand)
+  i <- 1L
+  repeat {
+    cand <- paste0(old, "_", i)
+    if (!toupper(cand) %in% taken) return(cand)
+    i <- i + 1L
+  }
+}
+
+# Map each theta name that collides (case-insensitively, ferx's own rule) with
+# a predicted individual-parameter name to a free replacement. Returns a named
+# character vector old -> new, plus one INFO warning per rename.
+.deshadow_theta_names <- function(theta_names, indiv_names,
+                                  reserved = character()) {
+  empty <- list(map = character(), warnings = character())
+  if (length(theta_names) == 0L || length(indiv_names) == 0L) return(empty)
+
+  clash <- which(toupper(theta_names) %in% toupper(indiv_names))
+  if (length(clash) == 0L) return(empty)
+
+  taken <- toupper(c(theta_names, indiv_names, reserved))
+  map   <- character()
+  warn  <- character()
+  for (i in clash) {
+    new   <- .free_theta_name(theta_names[i], taken)
+    taken <- c(taken, toupper(new))
+    map[[theta_names[i]]] <- new
+    warn <- c(warn, paste0(
+      "INFO  | theta '", theta_names[i], "' shares a name with an individual ",
+      "parameter -- renamed to '", new, "' (in ferx a theta silently shadows ",
+      "an identically named individual parameter)"))
+  }
+  list(map = map, warnings = warn)
+}
+
 # -- iniDf extractors ---------------------------------------------------------
 
 .extract_thetas <- function(ini) {
@@ -193,7 +323,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     list(name = nm, init = row$est, lower = row$lower, upper = row$upper,
          fixed = isTRUE(row$fix))
   })
-  list(thetas = thetas, warnings = character())
+  # raw_names keeps the iniDf key for each theta so a later rename can be
+  # written back into the normalisation map, not just into the emitted name.
+  list(thetas = thetas, raw_names = as.character(rows$name),
+       warnings = character())
 }
 
 .extract_omegas <- function(ini) {

@@ -168,8 +168,40 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   # Fixed-effect V (no ETA) must appear as passthrough in [individual_parameters]
   # and be passed to the pk macro, otherwise ferx predicts zero concentration.
-  expect_match(result$ferx_text, "V = V",              fixed = TRUE)
+  # The passthrough reads `V = TVV`, not `V = V`: the source names the theta V
+  # too, and a theta silently shadows an identically named individual parameter,
+  # so the theta is renamed.
+  expect_match(result$ferx_text, "V = TVV",            fixed = TRUE)
+  expect_no_match(result$ferx_text, "V = V\n",        perl  = TRUE)
   expect_match(result$ferx_text, "v=V",                fixed = TRUE)
   expect_match(result$ferx_text, "one_cpt_oral",       fixed = TRUE)
   expect_length(result$unsupported, 0L)
+})
+
+# -- corpus-wide invariants ---------------------------------------------------
+
+# A theta that shares a name with an individual parameter shadows it in every
+# ferx block where thetas are in scope, so the individual definition is written
+# and never read -- silently, with no diagnostic from ferx_model_validate().
+# Assert the invariant over the whole bundled corpus rather than per model, so
+# a newly added test model cannot reintroduce it unnoticed.
+test_that("no bundled model emits a theta that shadows an individual parameter", {
+  skip_if_not_installed("nonmem2rx")
+  models <- list.files(
+    system.file("testmodels", "nonmem", package = "ferxtranslate"),
+    full.names = TRUE
+  )
+  expect_gt(length(models), 0L)
+
+  offenders <- character()
+  for (m in models) {
+    ir <- rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem")
+    clash <- intersect(
+      toupper(vapply(ir$thetas, function(t) t$name, "")),
+      toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
+    )
+    if (length(clash) > 0)
+      offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
+  }
+  expect_equal(offenders, character())
 })

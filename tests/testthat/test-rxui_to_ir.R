@@ -507,3 +507,121 @@ test_that("ODE nlmixr2 model sets structural type ode", {
   expect_equal(ir$structural$type, "ode")
   expect_length(ir$odes, 2L)
 })
+
+# -- theta / individual-parameter de-shadowing --------------------------------
+
+test_that("no rename when theta and individual parameter names are disjoint", {
+  out <- .deshadow_theta_names(c("TVCL", "TVV"), c("CL", "V"))
+  expect_length(out$map, 0L)
+  expect_length(out$warnings, 0L)
+})
+
+test_that("a theta colliding with an individual parameter is renamed to TV<name>", {
+  out <- .deshadow_theta_names(c("CL", "TVV"), c("CL", "V"))
+  expect_equal(out$map[["CL"]], "TVCL")
+  expect_length(out$map, 1L)
+  expect_match(out$warnings, "^INFO", all = TRUE)
+  expect_match(out$warnings, "renamed to 'TVCL'")
+})
+
+test_that("collision detection is case-insensitive, as in ferx", {
+  out <- .deshadow_theta_names("cl", "CL")
+  expect_equal(out$map[["cl"]], "TVcl")
+})
+
+test_that("rename falls back when TV<name> is already taken", {
+  out <- .deshadow_theta_names(c("CL", "TVCL"), "CL")
+  expect_equal(out$map[["CL"]], "THETA_CL")
+})
+
+test_that("rename falls back to a numeric suffix when both prefixes are taken", {
+  out <- .deshadow_theta_names(c("CL", "TVCL", "THETA_CL"), "CL")
+  expect_equal(out$map[["CL"]], "CL_1")
+})
+
+test_that("rename avoids omega, kappa and sigma names", {
+  out <- .deshadow_theta_names("CL", "CL", reserved = c("TVCL", "THETA_CL"))
+  expect_equal(out$map[["CL"]], "CL_1")
+})
+
+test_that("two colliding thetas do not rename onto each other", {
+  out <- .deshadow_theta_names(c("CL", "TVCL"), c("CL", "TVCL"))
+  # CL cannot take TVCL (already a theta), so it falls through to THETA_CL;
+  # TVCL takes TVTVCL. Ugly, but the names stay distinct, which is the point.
+  expect_equal(sort(unname(out$map)), c("THETA_CL", "TVTVCL"))
+  expect_length(unique(unname(out$map)), 2L)
+})
+
+test_that("predicted individual names cover assignments but not d/dt or temporaries", {
+  lst <- list(
+    quote(cl <- t.CL * exp(eta1)),
+    quote(scale1 <- v),
+    quote(rxini.x. <- 1),
+    ddt("central", quote(-cl * central))
+  )
+  nms <- .predict_indiv_names(lst, theta_names = character())
+  expect_true("CL" %in% nms)
+  expect_false("SCALE1" %in% nms)
+  expect_false("RXINI_X_" %in% nms)
+  expect_false("CENTRAL" %in% nms)
+})
+
+test_that("predicted individual names include linCmt pk passthrough candidates", {
+  lst <- list(quote(cl <- t.CL * exp(eta1)), quote(rxlincmt1 <- linCmt()))
+  nms <- .predict_indiv_names(lst, theta_names = c("CL", "V", "TVKA"))
+  expect_true(all(c("CL", "V") %in% nms))
+  expect_false("TVKA" %in% nms)
+})
+
+test_that("a fixed-effect PK theta is not predicted as an individual parameter without linCmt", {
+  lst <- list(quote(cl <- t.CL * exp(eta1)))
+  expect_false("V" %in% .predict_indiv_names(lst, theta_names = c("CL", "V")))
+})
+
+test_that("rxui_to_ir de-shadows so downstream references reach the individual parameter", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              quote(v <- t.V),
+              quote(k20 <- cl/v),
+              ddt("central", quote(-k20 * central)))
+  ir <- rxui_to_ir(mock_ui(ini, lst))
+
+  # Only CL is renamed: `v <- t.V` is a bare theta alias, so V never becomes an
+  # individual parameter and there is nothing for the theta V to shadow.
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "V"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["CL"]], "TVCL * exp(ETA1)")
+  # The reference that means the individual CL must stay bare, or ferx would
+  # resolve it to the theta and the IIV would be silently dropped.
+  expect_equal(rhs[["K20"]], "CL/V")
+})
+
+test_that("emitted theta names never collide with individual parameter names", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)), quote(v <- t.V),
+              ddt("central", quote(-cl/v * central)))
+  ir <- rxui_to_ir(mock_ui(ini, lst))
+  expect_length(
+    intersect(toupper(vapply(ir$thetas, function(t) t$name, "")),
+              toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))),
+    0L
+  )
+})
+
+test_that("every shadowed theta is renamed when all PK params carry an ETA", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L), eta_row("eta2", 0.02, 2L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              quote(v <- t.V * exp(eta2)),
+              quote(k20 <- cl/v),
+              ddt("central", quote(-k20 * central)))
+  ir <- rxui_to_ir(mock_ui(ini, lst))
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "TVV"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["V"]], "TVV * exp(ETA2)")
+  expect_equal(rhs[["K20"]], "CL/V")
+})

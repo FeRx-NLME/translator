@@ -301,11 +301,11 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 2 -- run result$warnings for details
+      # Warnings: 4 -- run result$warnings for details
       
       [parameters]
-        theta KA(0.1, 0.0, 1e15)
-        theta CL(2.0, 0.0, 1e15)
+        theta TVKA(0.1, 0.0, 1e15)
+        theta TVCL(2.0, 0.0, 1e15)
         theta V(1.0, 0.0, 1e15)
       
         omega ETA_KA ~ 0.01
@@ -314,8 +314,8 @@
         sigma EPS1 ~ 0.316227766016838 (sd)
       
       [individual_parameters]
-        KA = KA * exp(ETA_KA)
-        CL = CL * exp(ETA_CL)
+        KA = TVKA * exp(ETA_KA)
+        CL = TVCL * exp(ETA_CL)
         K20 = CL/V
       
       [structural_model]
@@ -397,11 +397,12 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral_ampsim.ctl
+      # Warnings: 3 -- run result$warnings for details
       
       [parameters]
-        theta KA(0.1, 0.0, 1e15)
-        theta CL(2.0, 0.0, 1e15)
-        theta V(1.0, 0.0, 1e15)
+        theta TVKA(0.1, 0.0, 1e15)
+        theta TVCL(2.0, 0.0, 1e15)
+        theta TVV(1.0, 0.0, 1e15)
       
         omega ETA_KA ~ 0.01
         omega ETA_CL ~ 0.02
@@ -409,9 +410,9 @@
         sigma EPS1 ~ 0.316227766016838 (sd)
       
       [individual_parameters]
-        KA = KA * exp(ETA_KA)
-        CL = CL * exp(ETA_CL)
-        V = V
+        KA = TVKA * exp(ETA_KA)
+        CL = TVCL * exp(ETA_CL)
+        V = TVV
       
       [structural_model]
         pk one_cpt_oral(cl=CL, v=V, ka=KA)
