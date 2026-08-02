@@ -43,13 +43,28 @@ library(ferx)
 .translate_to_tmp <- function(model_name) {
   ctl <- system.file(file.path("testmodels/nonmem", model_name),
                      package = "ferxtranslate")
-  result <- nm_to_ferx(ctl)
+  result <- suppressWarnings(nm_to_ferx(ctl))
   ferx_file <- tempfile(fileext = ".ferx")
   writeLines(result$ferx_text, ferx_file)
   ferx_file
 }
 
 # Helper: bundled concordance dataset path
+# Named diagonal of the fitted omega. unlist() on a matrix is a no-op, so
+# positional indexing into it silently means "first and last cell", not the two
+# etas -- and drops ETA_CL entirely the moment a third eta is added.
+.omega_diag <- function(fit) {
+  om <- fit$omega
+  if (is.matrix(om)) {
+    d <- diag(om)
+    nm <- rownames(om) %||% colnames(om)
+    if (!is.null(nm)) names(d) <- nm
+    return(d)
+  }
+  unlist(om)
+}
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
 .conc_data <- function(name) {
   system.file(file.path("testdata", name), package = "ferxtranslate")
 }
@@ -76,7 +91,7 @@ library(ferx)
 }
 
 # ---------------------------------------------------------------------------
-# 1-cpt oral (linCmt → one_cpt_oral pk macro)
+# 1-cpt oral (linCmt -> one_cpt_oral pk macro)
 #   True thetas: TVCL=0.134, TVV=8.1, TVKA=1.0
 #   Simulated with 100 subjects; large omega_KA (0.4) means KA needs wider
 #   tolerance -- TVCL and TVV are the more sensitive translation targets.
@@ -200,6 +215,13 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
 test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of truth", {
   ferx_file <- .translate_to_tmp("pk_1cmt_oral.mod")
   data_file  <- .conc_data("ode_1cpt_oral_concordance.csv")
+  # Start ETA_CL's variance away from the truth it must recover, so that
+  # "returned its initial value" and "recovered the truth" are distinguishable.
+  start_om  <- 0.005
+  txt <- sub("omega ETA_CL ~ [^\n]+", paste0("omega ETA_CL ~ ", start_om),
+             paste(readLines(ferx_file), collapse = "\n"))
+  expect_match(txt, paste0("omega ETA_CL ~ ", start_om), fixed = TRUE)
+  writeLines(txt, ferx_file)
   fit <- ferx_fit(ferx_file, data_file,
                   method     = "focei",
                   covariance = FALSE,
@@ -217,85 +239,64 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   # Regression guard for the theta-shadowing defect. CL reaches the ODEs only
   # through the derived K20 = CL/V, which lives in [individual_parameters] --
   # the one block where a theta named CL would shadow the individual CL. When it
-  # did, ETA_CL had no gradient and its omega came back as exactly its 0.02
-  # initial value. Assert recovery of the simulation truth (0.01, 0.02) instead,
-  # which is only possible if the individual CL is what the ODE actually sees.
-  omega <- unlist(fit$omega)
-  omega <- omega[c(1L, length(omega))]   # diagonal of the 2x2: ETA_KA, ETA_CL
-  expect_lt(abs(omega[1] / 0.01 - 1), 0.30, label = "omega ETA_KA")
-  expect_lt(abs(omega[2] / 0.02 - 1), 0.30, label = "omega ETA_CL")
+  # did, ETA_CL had no gradient and its omega came back untouched at its initial
+  # value.
+  #
+  # Asserting recovery of the truth is NOT enough on its own: the model's $OMEGA
+  # initials ARE the simulation truth (0.01, 0.02), so the broken case returns
+  # exactly the asserted value and passes with a deviation of ~1e-15. The fit is
+  # therefore started away from the truth, so only a live gradient can reach it.
+  om <- .omega_diag(fit)
+  expect_named(om, c("ETA_KA", "ETA_CL"))
+  expect_lt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.35, label = "omega ETA_KA")
+  expect_lt(abs(om[["ETA_CL"]] / 0.02 - 1), 0.35, label = "omega ETA_CL")
+  # A dead parameter cannot move off its start; a live one must.
+  expect_gt(abs(om[["ETA_CL"]] / start_om - 1), 0.20, label = "omega ETA_CL moved")
 })
 
 # ===========================================================================
-# TRANSLATION GAP REPORT
-# Translates every bundled NONMEM test model, validates the emitted .ferx with
-# the ferx engine, and prints a table of what is still missing. Add a model to
-# inst/testmodels/nonmem/ to extend coverage automatically.
-#
-# Two kinds of finding, deliberately treated differently:
-#
-#   * $unsupported / engine WARNINGS are reported, not failed. They are the
-#     living record of what the translator and ferx-core cannot yet express.
-#   * Engine ERRORS fail the test. An emitted .ferx the engine rejects is a
-#     regression, not a gap, and letting it merely print is how a dotted state
-#     name and an undefined $DES intermediate reached a user (issue #6).
-#
-# Translation runs with strict = FALSE so one bad model yields a row in the
-# table instead of aborting the sweep at the first failure.
+# ENGINE VALIDATION SWEEP (Tier 4)
+# Validates every bundled model's emitted .ferx with the engine and fails on
+# error-severity diagnostics. The engine-free half of this sweep -- translate
+# every model, fail on a crash, report $unsupported -- lives in
+# test-integration.R so it runs on every PR without a Rust build.
 # ===========================================================================
-test_that("translation gap report: every bundled model translates and validates", {
+test_that("engine accepts the emitted .ferx for every bundled model", {
   skip_if_not_installed("nonmem2rx")
 
-  model_dir <- system.file("testmodels/nonmem", package = "ferxtranslate")
-  models    <- list.files(model_dir, pattern = "\\.(ctl|mod)$", full.names = TRUE)
+  models <- .bundled_nm_models()
   expect_gt(length(models), 0L)
 
   rows <- lapply(models, function(path) {
     result <- tryCatch(
       suppressWarnings(suppressMessages(nm_to_ferx(path, strict = FALSE))),
-      error = function(e) conditionMessage(e)
+      error = function(e) NULL
     )
-    # A translation crash is itself a gap worth surfacing -- record it as an
-    # ERROR row instead of silently dropping the model from the report (which
-    # would let a broken translator masquerade as "no gaps detected").
-    if (is.character(result))
-      return(data.frame(model = basename(path), severity = "error",
-                        finding = paste0("translation failed: ", result),
-                        stringsAsFactors = FALSE))
-
-    out <- NULL
-    if (length(result$unsupported) > 0)
-      out <- rbind(out, data.frame(model = basename(path), severity = "gap",
-                                   finding = result$unsupported,
-                                   stringsAsFactors = FALSE))
-
+    if (is.null(result)) return(NULL)   # crashes are the integration test's job
     diags <- result$validation$diagnostics
-    if (!is.null(diags) && nrow(diags) > 0)
-      out <- rbind(out, data.frame(
-        model    = basename(path),
-        severity = as.character(diags$severity),
-        finding  = paste0(diags$code, ": ",
-                          gsub("\\s+", " ", trimws(as.character(diags$message)))),
-        stringsAsFactors = FALSE))
-    out
+    if (is.null(diags) || nrow(diags) == 0) return(NULL)
+    data.frame(model    = basename(path),
+               severity = as.character(diags$severity),
+               finding  = paste0(diags$code, ": ", .one_line(diags$message)),
+               stringsAsFactors = FALSE)
   })
+  found <- do.call(rbind, rows)
 
-  gaps <- do.call(rbind, rows)
-
-  if (is.null(gaps) || nrow(gaps) == 0) {
-    message("translation gap report: nothing to report across ",
-            length(models), " models")
+  if (is.null(found) || nrow(found) == 0) {
+    message("engine validation sweep: no diagnostics across ", length(models),
+            " models")
   } else {
-    message("\ntranslation gap report (", nrow(gaps), " finding(s) across ",
+    message("\nengine validation sweep (", nrow(found), " diagnostic(s) across ",
             length(models), " models):")
-    message(paste(capture.output(print(gaps, row.names = FALSE)), collapse = "\n"))
+    message(paste(capture.output(print(found, row.names = FALSE)), collapse = "\n"))
   }
 
-  # Gaps and engine warnings are reported; engine errors fail.
+  # Engine warnings are reported; engine errors fail. paste0() recycles
+  # zero-length arguments against the length-1 separator, so guard on nrow().
   fatal <- character()
-  if (!is.null(gaps) && nrow(gaps) > 0) {
-    err   <- gaps[gaps$severity == "error", , drop = FALSE]
-    fatal <- paste0(err$model, " -- ", err$finding)
+  if (!is.null(found) && nrow(found) > 0) {
+    err <- found[which(found$severity == "error"), , drop = FALSE]
+    if (nrow(err) > 0) fatal <- paste0(err$model, " -- ", err$finding)
   }
   expect_equal(fatal, character())
 })

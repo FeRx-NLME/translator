@@ -117,7 +117,8 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: ode_warfarin.ctl
-      # Warnings: 2 -- run result$warnings for details
+      # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -193,6 +194,7 @@
     Output
       # Translated from nonmem: iov.ctl
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: ETA 'KAPPA_CL' looks like inter-occasion variability but was emitted as IIV (nonmem2rx reads ETA-coded IOV as IIV). If this is IOV, declare it as 'kappa KAPPA_CL ~ ...' and set 'iov_column' in [fit_options].
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -263,6 +265,7 @@
     Output
       # Translated from nlmixr2: unknown
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'central', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -301,7 +304,8 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 4 -- run result$warnings for details
+      # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
         theta TVKA(0.1, 0.0, 1e15)
@@ -343,6 +347,7 @@
     Output
       # Translated from nonmem: pkpd_ir.mod
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'EFFECT', verify in [structural_model]
       
       [parameters]
         theta TH1(1.95, -1e15, 1e15)
@@ -397,7 +402,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral_ampsim.ctl
-      # Warnings: 3 -- run result$warnings for details
       
       [parameters]
         theta TVKA(0.1, 0.0, 1e15)

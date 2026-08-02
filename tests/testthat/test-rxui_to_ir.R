@@ -375,7 +375,7 @@ test_that("rxui_to_ir produces ferx_ir from mock 1-cpt oral", {
     quote(ka <- tvka),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst), source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst), source_format = "nlmixr2"))
 
   expect_s3_class(ir, "ferx_ir")
   expect_equal(ir$source_format, "nlmixr2")
@@ -406,7 +406,7 @@ test_that("rxui_to_ir ODE model sets structural type ode with states and obs_cmt
     ddt("central", quote(ka * depot / v - cl / v * central)),
     quote(DV ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_equal(ir$structural$type,   "ode")
   expect_equal(ir$structural$states, c("depot", "central"))
   expect_equal(ir$structural$obs_cmt, "central")
@@ -427,7 +427,7 @@ test_that("rxui_to_ir 3-cpt oral: translates to three_cpt_oral pk macro", {
     quote(ka <- tvka),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_equal(ir$structural$type,    "pk_macro")
   expect_equal(ir$structural$pk_call, "three_cpt_oral")
   expect_length(ir$unsupported, 0L)
@@ -444,7 +444,7 @@ test_that("rxui_to_ir IOV model sets iov_column in fit_options", {
     quote(cl <- tvcl * exp(eta.cl + kappa.cl)),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_length(ir$kappas, 1L)
   expect_equal(ir$fit_options$iov_column, "OCC")
 })
@@ -467,7 +467,7 @@ test_that("1-cpt oral nlmixr2 function converts correctly", {
     })
   }
   ui <- rxode2::rxode2(f_1cpt)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$pk_call, "one_cpt_oral")
   expect_length(ir$thetas, 3L)
 })
@@ -486,7 +486,7 @@ test_that("2-cpt oral nlmixr2 function with q infers two_cpt_oral", {
     })
   }
   ui <- rxode2::rxode2(f_2cpt)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$pk_call, "two_cpt_oral")
 })
 
@@ -503,7 +503,7 @@ test_that("ODE nlmixr2 model sets structural type ode", {
     })
   }
   ui <- rxode2::rxode2(f_ode)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$type, "ode")
   expect_length(ir$odes, 2L)
 })
@@ -568,32 +568,6 @@ test_that("a duplicated AND shadowing theta gets two distinct names", {
   expect_false(anyNA(out$map))
 })
 
-test_that("predicted individual names cover assignments but not d/dt or temporaries", {
-  lst <- list(
-    quote(cl <- t.CL * exp(eta1)),
-    quote(scale1 <- v),
-    quote(rxini.x. <- 1),
-    ddt("central", quote(-cl * central))
-  )
-  nms <- .predict_indiv_names(lst, theta_names = character())
-  expect_true("CL" %in% nms)
-  expect_false("SCALE1" %in% nms)
-  expect_false("RXINI_X_" %in% nms)
-  expect_false("CENTRAL" %in% nms)
-})
-
-test_that("predicted individual names include linCmt pk passthrough candidates", {
-  lst <- list(quote(cl <- t.CL * exp(eta1)), quote(rxlincmt1 <- linCmt()))
-  nms <- .predict_indiv_names(lst, theta_names = c("CL", "V", "TVKA"))
-  expect_true(all(c("CL", "V") %in% nms))
-  expect_false("TVKA" %in% nms)
-})
-
-test_that("a fixed-effect PK theta is not predicted as an individual parameter without linCmt", {
-  lst <- list(quote(cl <- t.CL * exp(eta1)))
-  expect_false("V" %in% .predict_indiv_names(lst, theta_names = c("CL", "V")))
-})
-
 test_that("rxui_to_ir de-shadows so downstream references reach the individual parameter", {
   ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
                eta_row("eta1", 0.09, 1L))
@@ -601,7 +575,7 @@ test_that("rxui_to_ir de-shadows so downstream references reach the individual p
               quote(v <- t.V),
               quote(k20 <- cl/v),
               ddt("central", quote(-k20 * central)))
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
   # Only CL is renamed: `v <- t.V` is a bare theta alias, so V never becomes an
   # individual parameter and there is nothing for the theta V to shadow.
@@ -619,7 +593,7 @@ test_that("emitted theta names never collide with individual parameter names", {
                eta_row("eta1", 0.09, 1L))
   lst <- list(quote(cl <- t.CL * exp(eta1)), quote(v <- t.V),
               ddt("central", quote(-cl/v * central)))
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_length(
     intersect(toupper(vapply(ir$thetas, function(t) t$name, "")),
               toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))),
@@ -634,7 +608,7 @@ test_that("every shadowed theta is renamed when all PK params carry an ETA", {
               quote(v <- t.V * exp(eta2)),
               quote(k20 <- cl/v),
               ddt("central", quote(-k20 * central)))
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "TVV"))
   rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
                   vapply(ir$indiv_params, function(p) p$lhs, ""))
@@ -651,7 +625,7 @@ test_that("a self-referential assignment resolves its RHS to the theta", {
     ini({ cl <- 1.0; v <- 10.0; eta.cl ~ 0.09; prop.err <- 0.1 })
     model({ cl <- cl * exp(eta.cl); v <- v; linCmt() ~ prop(prop.err) })
   }
-  ir  <- rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
   rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
                   vapply(ir$indiv_params, function(p) p$lhs, ""))
   expect_equal(rhs[["CL"]], "TVCL * exp(ETA_CL)")
@@ -664,7 +638,7 @@ test_that("duplicate $THETA labels do not leave a reference dangling", {
   ini$label <- c("CL", "CL", NA_character_)
   lst <- list(quote(cl <- theta1 * exp(eta1)), quote(v <- theta2),
               ddt("central", quote(-cl/v * central)))
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
   nms <- vapply(ir$thetas, function(t) t$name, "")
   expect_length(unique(nms), 2L)

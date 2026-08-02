@@ -98,18 +98,23 @@ to_ferx <- function(source,
     # emit "# Warnings: 1" for a note that says nothing is wrong.
     findings <- val$warnings[!startsWith(val$warnings, "INFO")]
     ir$warnings <- c(ir$warnings, findings)
-    ir$unsupported <- c(ir$unsupported, val$unsupported)
+    # Engine rejections deliberately do NOT join ir$unsupported. That field is
+    # the ferx-core feature-gap signal -- "ferx cannot express this, wait for
+    # it" -- and an E_PARSE on our own output means the opposite: file a
+    # ferxtranslate bug. Merging them made the gap report emit two rows per
+    # finding, one of them labelled a gap. The ERROR-prefixed warning above
+    # already carries it into $warnings and into the file's # WARNING: block.
     # Re-emit only when something was added, so a clean translation stays
     # byte-identical. The emitter is pure, so this cannot change the model.
-    if (length(findings) > 0 || length(val$unsupported) > 0)
-      text <- emit_ferx(ir)
+    if (length(findings) > 0) text <- emit_ferx(ir)
   }
 
   result <- new_ferx_translate_result(text, ir, validation = val)
 
   # Surface diagnostics before writing, so a strict failure cannot leave an
-  # invalid file on disk that the user believes was checked.
-  .report_validation(val, strict = strict)
+  # invalid file on disk that the user believes was checked. `result` rides on
+  # the condition so a strict abort still hands back something actionable.
+  .report_validation(val, strict = strict, result = result)
 
   if (!is.null(output)) write_ferx(result, output, overwrite)
   invisible(result)
@@ -186,8 +191,8 @@ print.ferx_translate_result <- function(x, ...) {
 
   cli::cli_h2("Engine validation")
   if (is.null(x$validation)) {
-    cli::cli_alert_info("not run ({.code validate = FALSE})")
-  } else if (is.na(x$validation$ok)) {
+    cli::cli_alert_info("not run")
+  } else if (!isTRUE(length(x$validation$ok) == 1L) || is.na(x$validation$ok)) {
     cli::cli_alert_info("skipped -- {.pkg ferx} is not installed")
   } else {
     scope <- if (is.na(x$validation$data_file)) "model only, no data"

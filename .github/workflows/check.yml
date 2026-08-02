@@ -73,5 +73,10 @@ jobs:
             any::testthat
             FeRx-NLME/ferx-r@731adc9
             LeidenAdvancedPKPD/amp.sim
-      - name: Tier-4 concordance (pinned ferx)
-        run: Rscript -e 'devtools::test(filter = "concordance", stop_on_failure = TRUE)'
+      # The FULL suite, not filter="concordance". Four of the validation tests are
+      # skip_if_not_installed("ferx"), so a filtered run left the entire feature
+      # this package validates with -- strict abort, diagnostics mapping,
+      # $unsupported population -- executed by neither job. A filter also passes
+      # green on zero matched tests, so a file rename would silently disable this.
+      - name: Full suite incl. Tier-4 concordance (pinned ferx)
+        run: Rscript -e 'devtools::test(stop_on_failure = TRUE)'

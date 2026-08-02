@@ -1,10 +1,5 @@
 # -- helpers ------------------------------------------------------------------
 
-nm_path_t <- function(file) {
-  system.file("testmodels", "nonmem", file, package = "ferxtranslate",
-              mustWork = TRUE)
-}
-
 minimal_ir <- function(...) {
   new_ferx_ir(
     source_format = "nonmem",
@@ -255,7 +250,7 @@ test_that("$DATA ignores a trailing comment", {
 
 test_that("validate = FALSE skips validation and reports nothing", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path_t("1cpt_oral.ctl"), validate = FALSE)
+  result <- nm_to_ferx(nm_path("1cpt_oral.ctl"), validate = FALSE)
   expect_null(result$validation)
   expect_false(any(grepl("validated", result$warnings)))
 })
@@ -263,7 +258,7 @@ test_that("validate = FALSE skips validation and reports nothing", {
 test_that("a valid model validates clean and records the outcome", {
   skip_if_not_installed("nonmem2rx")
   skip_if_not_installed("ferx")
-  result <- suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+  result <- suppressMessages(nm_to_ferx(nm_path("1cpt_oral.ctl")))
   expect_true(result$validation$ok)
   expect_equal(nrow(result$validation$diagnostics), 0L)
   expect_length(result$unsupported, 0L)
@@ -275,7 +270,7 @@ test_that("validating without a dataset says so rather than implying a clean bil
   # The bundled .ctl files name datasets that are not shipped, so this is the
   # no-data path. It matters because an unknown name is read as a covariate in
   # every block that accepts one, and only data turns that into an error.
-  result <- suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+  result <- suppressMessages(nm_to_ferx(nm_path("1cpt_oral.ctl")))
   expect_true(is.na(result$validation$data_file))
   expect_true(any(grepl("^INFO.*without data", result$validation$warnings)))
   # The note is about the session, not the model, so it must not leak into the
@@ -305,7 +300,7 @@ test_that("a missing ferx skips validation without failing the translation", {
   # translation into an error, so assert the degradation rather than assume it.
   local_mocked_bindings(.has_ferx = function() FALSE)
   result <- expect_no_error(
-    suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+    suppressMessages(nm_to_ferx(nm_path("1cpt_oral.ctl")))
   )
   expect_true(is.na(result$validation$ok))
   expect_match(result$validation$warnings, "ferx is not installed", all = FALSE)
@@ -341,5 +336,136 @@ test_that("a strict abort leaves no output file behind", {
     nm_to_ferx(ctl, output = out, strict = FALSE)))
   expect_true(file.exists(out))
   expect_false(res$validation$ok)
-  expect_match(res$ferx_text, "# WARNING: ferx rejected")
+  # Engine rejections are carried as ERROR-prefixed warnings, not as
+  # $unsupported (which is the ferx-core feature-gap signal), and the emitter
+  # renders every WARN/ERROR into the file's # WARNING: block.
+  expect_match(res$ferx_text, "# WARNING: ferx E_PARSE")
+  expect_length(res$unsupported, 0L)
+})
+
+# -- behaviours a mutation campaign found unasserted ---------------------------
+
+test_that("the resolved $DATA path actually reaches the validator", {
+  skip_if_not_installed("ferx")
+  skip_if_not_installed("nonmem2rx")
+  # Stubbing data_file to NA in to_ferx() previously left the whole suite green:
+  # the $DATA tests exercised .extract_nm_data_path() in isolation and nothing
+  # asserted the wiring, so the documented reason for resolving it at all
+  # (covariate references cannot be checked without data) was untested.
+  dir <- tmp_ctl_dir()
+  file.copy(nm_path("1cpt_oral.ctl"), file.path(dir, "m.ctl"))
+  writeLines(c("ID,TIME,AMT,DV,MDV,EVID,CMT", "1,0,100,.,1,1,1"),
+             file.path(dir, "1cpt_oral.csv"))
+  res <- suppressWarnings(suppressMessages(
+    nm_to_ferx(file.path(dir, "m.ctl"), strict = FALSE)))
+  expect_false(is.na(res$validation$data_file))
+  expect_match(res$validation$data_file, "1cpt_oral\\.csv$")
+})
+
+test_that("engine severities route to the right console channel", {
+  # Swapping cli_warn and cli_inform in .report_validation() previously changed
+  # nothing any test could see.
+  val <- list(ok = FALSE, diagnostics = .empty_diagnostics(),
+              data_file = NA_character_,
+              warnings = c("INFO  | a note", "WARN  | an engine warning"),
+              unsupported = character())
+  expect_message(suppressWarnings(.report_validation(val, strict = FALSE)), "a note")
+  expect_warning(suppressMessages(.report_validation(val, strict = FALSE)),
+                 "an engine warning")
+})
+
+test_that("engine text with braces is never evaluated as cli syntax", {
+  # cli glue-interpolates its first argument, so raw engine text used as a
+  # format string would execute R code or die with a cli parse error.
+  val <- list(ok = FALSE, diagnostics = .empty_diagnostics(),
+              data_file = NA_character_,
+              warnings = "WARN  | value must be in {0, 1}",
+              unsupported = 'rejected: {Sys.getenv("USER")}')
+  w <- tryCatch(suppressMessages(.report_validation(val, strict = FALSE)),
+                warning = function(w) conditionMessage(w))
+  expect_match(w, "value must be in {0, 1}", fixed = TRUE)
+  err <- tryCatch(.report_validation(val, strict = TRUE), error = function(e) e)
+  expect_match(conditionMessage(err), 'Sys.getenv("USER")', fixed = TRUE)
+})
+
+test_that("a strict abort carries the result on the condition", {
+  val <- list(ok = FALSE, diagnostics = .empty_diagnostics(),
+              data_file = NA_character_, warnings = character(),
+              unsupported = "rejected")
+  err <- tryCatch(.report_validation(val, strict = TRUE, result = "THE-RESULT"),
+                  error = function(e) e)
+  expect_s3_class(err, "ferxtranslate_invalid_output")
+  expect_equal(err$result, "THE-RESULT")
+})
+
+test_that("an invalid verdict aborts even with no error-severity diagnostic", {
+  # ferx has two notions of validity; gating only on severity == "error" let an
+  # ok = FALSE model be written to disk as a success.
+  val <- list(ok = FALSE, diagnostics = .empty_diagnostics(),
+              data_file = NA_character_, warnings = character(),
+              unsupported = character())
+  expect_error(.report_validation(val, strict = TRUE), "not valid")
+})
+
+test_that("a data-read failure degrades to model-only instead of failing", {
+  skip_if_not_installed("ferx")
+  skip_if_not_installed("nonmem2rx")
+  # E_DATA is about the dataset, which the translator neither produces nor
+  # controls, and whose $DATA IGNORE= options it cannot convey to the engine.
+  # A model that is itself fine must not be rejected because of it.
+  dir <- tmp_ctl_dir()
+  file.copy(nm_path("1cpt_oral.ctl"), file.path(dir, "m.ctl"))
+  writeLines(c("# a comment line NONMEM would IGNORE", "nonsense,columns"),
+             file.path(dir, "1cpt_oral.csv"))
+  res <- expect_no_error(suppressWarnings(suppressMessages(
+    nm_to_ferx(file.path(dir, "m.ctl")))))
+  expect_true(res$validation$ok)
+  expect_true(any(grepl("could not read the dataset", res$validation$warnings)))
+})
+
+test_that("a directory is never offered to the engine as a dataset", {
+  dir <- tmp_ctl_dir()
+  dir.create(file.path(dir, "dat"))
+  ctl <- file.path(dir, "m.ctl")
+  writeLines(c("$PROBLEM x", "$DATA dat IGNORE=#"), ctl)
+  expect_true(is.na(.extract_nm_data_path(ctl)))
+})
+
+test_that("an absolute $DATA path is used as given", {
+  dir  <- tmp_ctl_dir()
+  data <- file.path(dir, "abs.csv"); writeLines("ID", data)
+  ctl  <- file.path(dir, "m.ctl")
+  writeLines(c("$PROBLEM x", paste("$DATA", normalizePath(data))), ctl)
+  expect_equal(normalizePath(.extract_nm_data_path(ctl)), normalizePath(data))
+  expect_true(.is_abs_path("/a/b.csv"))
+  expect_false(.is_abs_path("a/b.csv"))
+})
+
+test_that("$DATA strips a comment with no preceding space", {
+  dir  <- tmp_ctl_dir()
+  data <- file.path(dir, "d.csv"); writeLines("ID", data)
+  ctl  <- file.path(dir, "c.ctl")
+  # The earlier test used "d.csv ; comment", which the first-token split already
+  # handles -- so it could not detect the comment strip being removed.
+  writeLines(c("$PROBLEM x", "$DATA d.csv;the dataset"), ctl)
+  expect_equal(normalizePath(.extract_nm_data_path(ctl)), normalizePath(data))
+})
+
+test_that("a multi-line engine message collapses to one line", {
+  expect_equal(.one_line("a\n  b\tc "), "a b c")
+})
+
+test_that("print() reports each engine-validation outcome distinctly", {
+  ir <- new_ferx_ir(structural = list(type = "pk_macro", pk_call = "one_cpt_iv",
+                                      pk_args = list(cl = "CL", v = "V")))
+  # cli alerts go to stderr, so capture the message stream, not stdout.
+  shown <- function(res) paste(utils::capture.output(print(res), type = "message"),
+                              collapse = "\n")
+  expect_match(shown(new_ferx_translate_result("x", ir)), "not run")
+  expect_match(shown(new_ferx_translate_result("x", ir,
+    validation = list(ok = NA, data_file = NA_character_))), "skipped")
+  expect_match(shown(new_ferx_translate_result("x", ir,
+    validation = list(ok = TRUE, data_file = NA_character_))), "valid")
+  expect_match(shown(new_ferx_translate_result("x", ir,
+    validation = list(ok = FALSE, data_file = NA_character_))), "INVALID")
 })

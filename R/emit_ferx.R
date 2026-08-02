@@ -57,15 +57,21 @@ emit_ferx <- function(ir) {
   src  <- if (!is.na(ir$source_format)) ir$source_format else "unknown"
   file <- if (!is.na(ir$source_file))   ir$source_file   else "unknown"
   out  <- paste0("# Translated from ", src, ": ", file)
-  nw   <- length(ir$warnings)
-  if (nw > 0)
-    out <- paste0(out, "\n# Warnings: ", nw,
+
+  # INFO entries are notes about the translation, not defects in the artefact.
+  # Counting them makes a clean model advertise "# Warnings: 3" for renames a
+  # reader cannot act on, so the header counts only WARN and ERROR.
+  actionable <- ir$warnings[!startsWith(ir$warnings, "INFO")]
+  if (length(actionable) > 0)
+    out <- paste0(out, "\n# Warnings: ", length(actionable),
                   " -- run result$warnings for details")
-  nu <- length(ir$unsupported)
-  if (nu > 0) {
-    warn_lines <- paste0("# WARNING: ", ir$unsupported, collapse = "\n")
-    out <- paste0(out, "\n", warn_lines)
-  }
+
+  # CLAUDE.md requires every WARN/ERROR to appear as a `# WARNING:` comment in
+  # the output, not only in result$warnings. Unsupported features come first
+  # because they are the ferx-core feature-gap signal.
+  notes <- c(ir$unsupported, sub("^(WARN|ERROR)\\s*\\|\\s*", "", actionable))
+  if (length(notes) > 0)
+    out <- paste0(out, "\n", paste0("# WARNING: ", notes, collapse = "\n"))
   out
 }
 

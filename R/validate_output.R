@@ -47,20 +47,47 @@
     ),
     error = function(e) e
   )
+  # The engine could not run. That is a tooling problem, not a defect in the
+  # model, so it must not abort the translation or be reported as one -- ferx is
+  # a Suggests dependency with no version floor, and blaming the user's .ferx
+  # for a signature change would be actively misleading.
   if (inherits(res, "error"))
     return(list(
-      ok = FALSE, diagnostics = .empty_diagnostics(), data_file = data_file,
-      warnings = paste0("ERROR | ferx_model_validate() failed on the emitted ",
-                        ".ferx: ", conditionMessage(res)),
-      unsupported = paste0("emitted .ferx could not be validated: ",
-                           conditionMessage(res))
+      ok = NA, diagnostics = .empty_diagnostics(), data_file = data_file,
+      warnings = paste0("WARN  | ferx_model_validate() could not run, so the ",
+                        "emitted .ferx was NOT validated: ",
+                        .one_line(conditionMessage(res))),
+      unsupported = character()
     ))
 
   diags <- out$diagnostics
   if (!is.data.frame(diags)) diags <- .empty_diagnostics()
 
-  warn <- character()
-  if (is.na(data_file))
+  # E_DATA means the engine could not read the DATASET -- a file the translator
+  # neither produces nor controls, and whose NONMEM $DATA options (IGNORE=, and
+  # a headerless file described by $INPUT) it cannot convey. Failing the
+  # translation on it would reject models that are perfectly correct, and would
+  # make the outcome depend on whether the CSV happens to sit next to the .ctl.
+  # Drop back to model-only validation and say so.
+  if (any(grepl("^E_DATA", as.character(diags$code)))) {
+    msg <- .one_line(diags$message[grepl("^E_DATA", as.character(diags$code))][1])
+    res2 <- tryCatch(utils::capture.output(out <- ferx::ferx_model_validate(tmp)),
+                     error = function(e) e)
+    if (inherits(res2, "error"))
+      return(list(ok = NA, diagnostics = .empty_diagnostics(),
+                  data_file = NA_character_,
+                  warnings = paste0("WARN  | emitted .ferx was NOT validated: ",
+                                    .one_line(conditionMessage(res2))),
+                  unsupported = character()))
+    diags     <- if (is.data.frame(out$diagnostics)) out$diagnostics
+                 else .empty_diagnostics()
+    data_file <- NA_character_
+    data_note <- paste0("WARN  | ferx could not read the dataset, so covariate ",
+                        "references and endpoint coverage were NOT checked: ", msg)
+  } else data_note <- character()
+
+  warn <- data_note
+  if (is.na(data_file) && length(data_note) == 0L)
     warn <- c(warn, paste0(
       "INFO  | validated without data -- covariate references and endpoint ",
       "coverage were NOT checked (an unknown name is read as a covariate)"))
@@ -86,24 +113,37 @@
 
 # Emit validation findings to the console at translation time, and stop when
 # strict and the engine rejected the output.
-.report_validation <- function(val, strict = TRUE) {
+.report_validation <- function(val, strict = TRUE, result = NULL) {
   if (is.null(val)) return(invisible(NULL))
 
-  n_err <- length(val$unsupported)
+  # Engine text is DATA, never a cli format string. cli glue-interpolates its
+  # first argument, so a diagnostic or a $DATA path containing braces would be
+  # evaluated as R code -- replacing the real message with a cli parse error, or
+  # silently rewriting the path. The rest of the package already uses "{w}".
   for (w in val$warnings) {
     if (startsWith(w, "ERROR")) next          # reported together below
-    if (startsWith(w, "WARN"))  cli::cli_warn(w) else cli::cli_inform(w)
+    if (startsWith(w, "WARN"))  cli::cli_warn("{w}") else cli::cli_inform("{w}")
   }
-  if (n_err == 0L) return(invisible(NULL))
 
-  msg <- c(
-    "The emitted {.field .ferx} is not valid: {n_err} error{?s} from {.pkg ferx}.",
-    stats::setNames(val$unsupported, rep("x", n_err))
-  )
+  # Gate on the engine's own verdict as well as on error-severity rows: ferx has
+  # two independent notions of validity, and a future severity level or an
+  # unexpected return shape would otherwise let an invalid model through.
+  n_err <- length(val$unsupported)
+  if (n_err == 0L && !isFALSE(val$ok)) return(invisible(NULL))
+
+  detail <- if (n_err > 0L) val$unsupported
+            else "ferx reported the model as invalid without an error-severity diagnostic"
+  msg <- c("The emitted {.field .ferx} is not valid: {length(detail)} problem{?s} from {.pkg ferx}.",
+           stats::setNames(.cli_escape(detail), rep("x", length(detail))))
   if (isTRUE(strict))
-    cli::cli_abort(c(msg,
-      i = "Pass {.code strict = FALSE} to return the result anyway, or {.code validate = FALSE} to skip validation."),
-      call = NULL)
+    # The result rides on the condition so a caller can still reach $ferx_text
+    # and $unsupported after catching it, rather than getting an exception and
+    # nothing to act on.
+    cli::cli_abort(c(msg, i = paste0("Pass {.code strict = FALSE} to return the ",
+                                     "result anyway, or {.code validate = FALSE} ",
+                                     "to skip validation.")),
+                   class = "ferxtranslate_invalid_output", result = result,
+                   call = NULL)
   cli::cli_warn(msg)
   invisible(NULL)
 }
@@ -111,6 +151,12 @@
 .empty_diagnostics <- function() {
   data.frame(severity = character(), code = character(), message = character(),
              stringsAsFactors = FALSE)
+}
+
+# Neutralise glue braces so engine text can be used where cli expects a format
+# string. Doubling is glue's own escape: `{{` renders as a literal `{`.
+.cli_escape <- function(x) {
+  gsub("}", "}}", gsub("{", "{{", as.character(x), fixed = TRUE), fixed = TRUE)
 }
 
 # Collapse a multi-line engine message so one diagnostic stays one warning.

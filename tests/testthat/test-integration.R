@@ -6,16 +6,6 @@
 
 # -- helpers ------------------------------------------------------------------
 
-nm_path <- function(file) {
-  system.file("testmodels", "nonmem", file, package = "ferxtranslate",
-              mustWork = TRUE)
-}
-
-r2_path <- function(file) {
-  system.file("testmodels", "nlmixr2", file, package = "ferxtranslate",
-              mustWork = TRUE)
-}
-
 # Strip machine-specific installed paths from header comment so snapshots are
 # portable across machines and CI.  Reduces e.g.
 #   "# Translated from nonmem: /Library/.../1cpt_oral.ctl"
@@ -29,7 +19,7 @@ norm_snap <- function(txt) {
 
 test_that("1-cpt oral NONMEM: snapshot + no unsupported", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("1cpt_oral.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("1cpt_oral.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_length(result$unsupported, 0L)
   expect_match(result$ferx_text, "one_cpt_oral", fixed = TRUE)
@@ -37,7 +27,7 @@ test_that("1-cpt oral NONMEM: snapshot + no unsupported", {
 
 test_that("2-cpt oral with covariates: snapshot + no unsupported", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("2cpt_oral_cov.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("2cpt_oral_cov.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_length(result$unsupported, 0L)
   expect_match(result$ferx_text, "two_cpt_oral", fixed = TRUE)
@@ -45,21 +35,21 @@ test_that("2-cpt oral with covariates: snapshot + no unsupported", {
 
 test_that("2-cpt IV: infers two_cpt_iv", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("2cpt_iv.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("2cpt_iv.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "two_cpt_iv", fixed = TRUE)
 })
 
 test_that("3-cpt IV: translates to three_cpt_iv pk macro", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("3cpt_iv.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("3cpt_iv.ctl")))
   expect_length(result$unsupported, 0L)
   expect_match(result$ferx_text, "three_cpt_iv", fixed = TRUE)
 })
 
 test_that("ODE warfarin: full $DES path, [odes] section present", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("ode_warfarin.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("ode_warfarin.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "[odes]",       fixed = TRUE)
   expect_match(result$ferx_text, "d/dt(DEPOT)",  fixed = TRUE)
@@ -68,14 +58,14 @@ test_that("ODE warfarin: full $DES path, [odes] section present", {
 
 test_that("block omega: block_omega line in output", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("block_omega.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("block_omega.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "block_omega", fixed = TRUE)
 })
 
 test_that("IOV model: KAPPA_CL emitted as omega + flattening warning (nonmem2rx treats IOV as IIV)", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("iov.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("iov.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "KAPPA_CL", fixed = TRUE)
   # nonmem2rx flattens the ETA-coded IOV to IIV; the translator must warn so the
@@ -88,7 +78,7 @@ test_that("IOV model: KAPPA_CL emitted as omega + flattening warning (nonmem2rx 
 test_that("1-cpt oral nlmixr2: snapshot + one_cpt_oral", {
   skip_if_not_installed("rxode2")
   fn     <- source(r2_path("1cpt_oral_nlmixr2.R"))$value
-  result <- nlmixr2_to_ferx(fn)
+  result <- suppressWarnings(nlmixr2_to_ferx(fn))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_length(result$unsupported, 0L)
   expect_match(result$ferx_text, "one_cpt_oral", fixed = TRUE)
@@ -110,7 +100,7 @@ test_that("nlmixr2 source: a KAPPA-named IIV eta does NOT trigger the NONMEM-onl
 test_that("ODE nlmixr2: d/dt expressions produce [odes] section", {
   skip_if_not_installed("rxode2")
   fn     <- source(r2_path("ode_nlmixr2.R"))$value
-  result <- nlmixr2_to_ferx(fn)
+  result <- suppressWarnings(nlmixr2_to_ferx(fn))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "[odes]",      fixed = TRUE)
   expect_match(result$ferx_text, "d/dt(depot)", fixed = TRUE)
@@ -132,7 +122,7 @@ test_that("nm_to_ferx writes file when output path given", {
 
 test_that("amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("pk_1cmt_oral.mod")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "[odes]",        fixed = TRUE)
   expect_match(result$ferx_text, "obs_cmt=",      fixed = TRUE)
@@ -143,7 +133,7 @@ test_that("amp.sim 1-cpt oral ODE: [odes] section + obs_cmt inferred", {
 
 test_that("pk_1cmt_oral.mod: S2=V scaling emits [scaling] obs_scale = V", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("pk_1cmt_oral.mod"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("pk_1cmt_oral.mod")))
   expect_match(result$ferx_text, "[scaling]",      fixed = TRUE)
   expect_match(result$ferx_text, "obs_scale = V",  fixed = TRUE)
   expect_true(any(grepl("S2 = V", result$warnings, fixed = TRUE)))
@@ -151,7 +141,7 @@ test_that("pk_1cmt_oral.mod: S2=V scaling emits [scaling] obs_scale = V", {
 
 test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("pkpd_ir.mod"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("pkpd_ir.mod")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_match(result$ferx_text, "[odes]",   fixed = TRUE)
   expect_match(result$ferx_text, "obs_cmt=", fixed = TRUE)
@@ -164,7 +154,7 @@ test_that("amp.sim PKPD indirect response: 4-state ODE + additive error", {
 
 test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro", {
   skip_if_not_installed("nonmem2rx")
-  result <- nm_to_ferx(nm_path("pk_1cmt_oral_ampsim.ctl"))
+  result <- suppressWarnings(nm_to_ferx(nm_path("pk_1cmt_oral_ampsim.ctl")))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   # Fixed-effect V (no ETA) must appear as passthrough in [individual_parameters]
   # and be passed to the pk macro, otherwise ferx predicts zero concentration.
@@ -178,30 +168,52 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
   expect_length(result$unsupported, 0L)
 })
 
-# -- corpus-wide invariants ---------------------------------------------------
+# -- corpus-wide sweep (engine-free, runs on every PR) ------------------------
 
-# A theta that shares a name with an individual parameter shadows it in every
-# ferx block where thetas are in scope, so the individual definition is written
-# and never read -- silently, with no diagnostic from ferx_model_validate().
-# Assert the invariant over the whole bundled corpus rather than per model, so
-# a newly added test model cannot reintroduce it unnoticed.
-test_that("no bundled model emits a theta that shadows an individual parameter", {
+# Translates every bundled model once and asserts two things the engine cannot
+# check for us: that nothing crashes, and that no theta shadows an individual
+# parameter. A theta sharing a name with an individual parameter shadows it in
+# every ferx block where thetas are in scope, so the individual definition is
+# written and never read -- silently, with no diagnostic from
+# ferx_model_validate(). $unsupported is printed as a gap table, not failed.
+#
+# The engine half of this sweep (validate each emitted .ferx, fail on
+# error-severity diagnostics) lives in test-concordance.R behind the ferx gate.
+test_that("every bundled model translates, without a shadowing theta", {
   skip_if_not_installed("nonmem2rx")
-  models <- list.files(
-    system.file("testmodels", "nonmem", package = "ferxtranslate"),
-    full.names = TRUE
-  )
+
+  models <- .bundled_nm_models()
   expect_gt(length(models), 0L)
 
+  crashed   <- character()
   offenders <- character()
+  gaps      <- character()
+
   for (m in models) {
-    ir <- rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem")
+    ir <- tryCatch(suppressWarnings(
+                     rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem")),
+                   error = function(e) conditionMessage(e))
+    if (is.character(ir)) {
+      crashed <- c(crashed, paste0(basename(m), " -- ", ir))
+      next
+    }
     clash <- intersect(
       toupper(vapply(ir$thetas, function(t) t$name, "")),
       toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
     )
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
+    if (length(ir$unsupported) > 0)
+      gaps <- c(gaps, paste0(basename(m), " -- ", ir$unsupported))
   }
+
+  if (length(gaps) > 0)
+    message("\ntranslation gap report (", length(gaps), " gap(s) across ",
+            length(models), " models):\n", paste(gaps, collapse = "\n"))
+  else
+    message("translation gap report: no unsupported features across ",
+            length(models), " models")
+
+  expect_equal(crashed, character())
   expect_equal(offenders, character())
 })

@@ -47,4 +47,13 @@
   test suite without being declared.
 
 * The CI engine pin moves from `ferx-r@54f25d4` (0.1.5) to `ferx-r@731adc9`
-  (0.2.0), matching the re-baselined concordance references and datasets.
+  (0.2.0), the build the concordance suite is now verified against. No reference
+  *value* changed: the theta assertions were renamed to follow the `TV` prefix,
+  two omega assertions were added, and `ode_1cpt_oral_concordance.csv` was
+  regenerated because its source model changed. The other three datasets
+  regenerate byte-identical against this pin. The 2-cpt omega references still
+  carry their original 0.1.x provenance and were re-verified, not re-fitted.
+
+* The `engine` CI job now runs the full test suite rather than
+  `filter = "concordance"`. Four of the validation tests require `ferx`, so a
+  filtered run left the output-validation feature executed by neither job.

@@ -29,7 +29,11 @@
   if (!nzchar(path)) return(NA_character_)
 
   resolved <- if (.is_abs_path(path)) path else file.path(dirname(ctl_file), path)
-  if (file.exists(resolved)) normalizePath(resolved, mustWork = FALSE) else NA_character_
+  # file.exists() is TRUE for directories, and `$DATA dat` beside a `dat/`
+  # directory is an ordinary NONMEM layout -- pkpd_ir.mod declares exactly that.
+  if (file.exists(resolved) && !dir.exists(resolved))
+    normalizePath(resolved, mustWork = FALSE)
+  else NA_character_
 }
 
 .is_abs_path <- function(p) grepl("^(/|~|[A-Za-z]:[\\\\/])", p)

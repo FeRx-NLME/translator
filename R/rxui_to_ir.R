@@ -53,16 +53,41 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   name_map  <- .norm_map_from_ini(ini)
   sigma_names_norm <- toupper(vapply(sigma_out$sigmas, function(s) s$name, ""))
 
-  # Rename thetas that would shadow an individual parameter, before parsing, so
-  # every reference resolves to the right one. theta_orig keeps the pre-rename
-  # names for the linCmt passthrough, which keys on the PK parameter name.
+  # A theta name and the name every reference normalises to must agree, or the
+  # shadowing check below compares the wrong pair. They diverge whenever the
+  # $THETA label differs from the iniDf key -- `; CL/F` gives name `t.CL` but
+  # label `CL/F` -- so pin the map to the emitted name for every theta, not
+  # only for the ones that end up renamed.
   theta_orig <- vapply(theta_out$thetas, function(t) t$name, "")
+  for (i in seq_along(theta_orig)) name_map[[theta_out$raw_names[i]]] <- theta_orig[i]
+
+  # De-shadow against the individual-parameter names the parser ACTUALLY
+  # produces, by parsing first and parsing again with the corrected map. The
+  # alternative -- predicting the parser's output -- has to re-implement its
+  # filters by hand and drifts the moment they change; it over-predicted on
+  # every bundled model, renaming thetas that shadowed nothing. .parse_model_exprs()
+  # is pure (name_map is passed by value), so the throwaway pass is safe, and it
+  # costs ~1% of a translation against the nonmem2rx parse that precedes it.
+  probe <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  # The linCmt passthrough below invents an individual parameter for a
+  # fixed-effect PK theta that has no assignment of its own, so those names must
+  # be de-shadowed too -- otherwise the passthrough emits the self-shadowing
+  # `V = V` this function exists to prevent.
+  probe_lhs <- vapply(probe$indiv_params, function(p) p$lhs, "")
+  if (identical(probe$structural$type, "lincmt"))
+    probe_lhs <- c(probe_lhs,
+                   theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
+                              !toupper(theta_orig) %in% toupper(probe_lhs)])
   desh <- .deshadow_theta_names(
     theta_names = theta_orig,
-    indiv_names = .predict_indiv_names(lst, theta_orig, name_map),
+    indiv_names = probe_lhs,
+    # States and covariates matter too: ferx resolves theta before both, so a
+    # rename landing on either would reintroduce the shadowing on a new pair.
     reserved    = c(unlist(lapply(omega_out$omegas, function(o) o$names)),
                     vapply(kappa_out$kappas,  function(k) k$name, ""),
-                    vapply(sigma_out$sigmas,  function(s) s$name, ""))
+                    vapply(sigma_out$sigmas,  function(s) s$name, ""),
+                    vapply(probe$odes, function(o) o$state, ""),
+                    .covariate_names(lst, name_map))
   )
   if (any(!is.na(desh$map))) {
     for (i in seq_along(theta_out$thetas)) {
@@ -70,10 +95,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       theta_out$thetas[[i]]$name <- desh$map[i]
       name_map[[theta_out$raw_names[i]]] <- desh$map[i]
     }
-    warn <- c(warn, desh$warnings)
+    warn     <- c(warn, desh$warnings)
+    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  } else {
+    expr_out <- probe
   }
-
-  expr_out  <- .parse_model_exprs(lst, name_map, sigma_names_norm)
   warn      <- c(warn, expr_out$warnings)
   unsp      <- c(unsp, expr_out$unsupported)
 
@@ -157,6 +183,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (length(kappa_out$kappas) > 0)
     fit_opts$iov_column <- kappa_out$iov_column
 
+  # CLAUDE.md: every translation warning is emitted at translation time so the
+  # user sees it immediately, not only when they inspect result$warnings.
+  .emit_warnings(warn)
+
   new_ferx_ir(
     source_format = source_format,
     source_file   = source_file,
@@ -200,6 +230,17 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
             lapply(as.list(expr[-1]), .normalise_expr, map = map)))
 }
 
+# Route stored warnings to the console by their severity prefix. The text is
+# passed as a cli value, never as a format string -- a model name containing
+# braces would otherwise be evaluated as R code.
+.emit_warnings <- function(warn) {
+  for (w in warn) {
+    if (startsWith(w, "ERROR") || startsWith(w, "WARN")) cli::cli_warn("{w}")
+    else                                                 cli::cli_inform("{w}")
+  }
+  invisible(NULL)
+}
+
 # -- theta / individual-parameter de-shadowing --------------------------------
 
 # ferx resolves a bare identifier as theta first, then eta, then individual
@@ -229,42 +270,25 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # individual parameters.
 .PK_CANDIDATES <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
 
-# Resolve one symbol to the name it will carry after normalisation.
-.mapped_name <- function(sym, name_map) {
-  nm <- as.character(sym)
-  if (nm %in% names(name_map)) name_map[[nm]] else .norm(nm)
-}
-
-# Names that will end up as individual-parameter LHSs, determined before the
-# expression parser runs. Mirrors the two filters .parse_model_exprs() applies
-# in pass 3 -- internal temporaries and theta-alias self-assignments -- because
-# neither reaches [individual_parameters] and so neither can shadow a theta.
-# Skipping the alias case matters: nonmem2rx emits `tvcl <- t.TVCL`, and
-# counting that would rename a perfectly good `TVCL` to `TVTVCL`.
-# Also mirrors the linCmt passthrough, which invents an individual parameter for
-# a fixed-effect PK theta that has no assignment of its own.
-.predict_indiv_names <- function(lst, theta_names, name_map = character()) {
-  nms <- character()
-  has_lincmt <- FALSE
+# Names referenced by the model but never assigned and never declared in iniDf.
+# ferx reads every such name as a covariate (a data column), and resolves theta
+# before covariate -- so a theta renamed onto one shadows it exactly as it would
+# an individual parameter.
+.covariate_names <- function(lst, name_map) {
+  assigned <- character()
+  used     <- character()
   for (expr in lst) {
-    if (.is_lincmt_tilde(expr)) { has_lincmt <- TRUE; next }
-    if (!.is_assignment(expr)) next
-    lhs <- expr[[2]]
-    if (.is_ddt_lhs(lhs)) next
-    rhs <- expr[[3]]
-    if (is.call(rhs) && identical(rhs[[1]], as.name("linCmt"))) {
-      has_lincmt <- TRUE
+    if (!.is_assignment(expr)) {
+      if (.is_tilde(expr)) used <- c(used, .collect_symbols(expr))
       next
     }
-    if (!is.symbol(lhs)) next
-    nm <- .norm(as.character(lhs))
-    if (grepl("^SCALE\\d*$|^RXINI|^RXF_|^RXM_", nm)) next
-    if (is.symbol(rhs) && identical(.mapped_name(rhs, name_map), nm)) next
-    nms <- c(nms, nm)
+    lhs <- expr[[2]]
+    if (is.symbol(lhs)) assigned <- c(assigned, .norm(as.character(lhs)))
+    else if (.is_ddt_lhs(lhs)) assigned <- c(assigned, .norm(.ddt_state(lhs)))
+    used <- c(used, .collect_symbols(expr[[3]]))
   }
-  if (has_lincmt)
-    nms <- c(nms, theta_names[toupper(theta_names) %in% .PK_CANDIDATES])
-  unique(nms)
+  known <- unique(c(assigned, toupper(unlist(name_map, use.names = FALSE))))
+  setdiff(unique(.norm(used)), known)
 }
 
 # Pick a free replacement for a shadowed theta. `taken` is uppercase.
@@ -306,11 +330,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     new    <- .free_theta_name(theta_names[i], taken)
     taken  <- c(taken, toupper(new))
     map[i] <- new
-    warn <- c(warn, if (duped[i]) paste0(
+    # Both conditions are reported when both hold: they are different defects
+    # with different consequences, and the shadowing one is the whole point of
+    # this function.
+    if (duped[i]) warn <- c(warn, paste0(
       "WARN  | two thetas are named '", theta_names[i], "' (duplicate $THETA ",
       "label) -- renamed the later one to '", new, "'. ferx would have resolved ",
-      "every reference to the first and silently ignored the second."
-    ) else paste0(
+      "every reference to the first and silently ignored the second."))
+    if (shadowed[i]) warn <- c(warn, paste0(
       "INFO  | theta '", theta_names[i], "' shares a name with an individual ",
       "parameter -- renamed to '", new, "' (in ferx a theta silently shadows ",
       "an identically named individual parameter)"))
@@ -325,9 +352,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   thetas <- lapply(seq_len(nrow(rows)), function(i) {
     row <- rows[i, ]
     # Use label only if it is a single valid identifier (no whitespace).
+    # The label must be a legal ferx identifier, not merely whitespace-free:
+    # `; CL/F` would otherwise be emitted as `theta CL/F(...)`, which the engine
+    # cannot parse, and would diverge from the name every reference resolves to.
     lbl_raw <- if ("label" %in% names(row) && !is.na(row$label) &&
-                   nzchar(as.character(row$label)) &&
-                   !grepl("\\s", as.character(row$label)))
+                   grepl("^[A-Za-z][A-Za-z0-9_.]*$", as.character(row$label)))
       as.character(row$label)
     else
       .strip_prefix(row$name)
@@ -595,14 +624,26 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # (`cl <- cl * exp(eta.cl)`), and installing the alias first rewrote that
       # theta reference into a self-reference the engine rejects. nonmem2rx
       # prefixes thetas (`t.CL`), which is why NONMEM never hit it.
-      rhs_norm <- paste(deparse(.normalise_expr(rhs_expr, name_map),
-                                width.cutoff = 500L), collapse = " ")
+      # A name with no mapping is left untouched by .normalise_expr(), so a
+      # self-reference to a plain local (`k <- k * 2`, k not in iniDf) would
+      # emit a bare lower-case `k` that is declared nowhere. Seed the alias for
+      # that case only -- when lhs_raw IS a mapped name, the map already holds
+      # the previous binding and must win.
+      rhs_map <- name_map
+      if (!lhs_raw %in% names(rhs_map)) rhs_map[lhs_raw] <- lhs_norm
+      rhs_expr_norm <- .normalise_expr(rhs_expr, rhs_map)
+      rhs_norm <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
       # Update name_map so subsequent expressions see the alias.
       name_map[lhs_raw] <- lhs_norm
 
+      # rhs_expr_norm is kept because name_map is time-varying: de-shadowing
+      # rebinds a name mid-parse, so re-normalising the raw expression later
+      # (pass 2b) would resolve it against the FINAL map and silently inline the
+      # wrong variable into the ODEs.
       all_assigns <- c(all_assigns,
                        list(list(lhs = lhs_norm, rhs = rhs_norm,
-                                 rhs_expr = rhs_expr)))
+                                 rhs_expr = rhs_expr,
+                                 rhs_expr_norm = rhs_expr_norm)))
     }
   }
 
@@ -633,7 +674,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       if (a$lhs %in% aux_vars &&
           !a$lhs %in% state_upper &&
           !a$lhs %in% sigma_upper)
-        aux_map[[a$lhs]] <- .normalise_expr(a$rhs_expr, name_map)
+        aux_map[[a$lhs]] <- a$rhs_expr_norm
     }
     if (length(aux_map) > 0) {
       odes <- lapply(odes, function(o) {

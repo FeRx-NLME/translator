@@ -42,6 +42,18 @@ set_theta <- function(txt, nm, value) {
   sub(pat, sprintf("theta %s(%.10g, 0.0, 1e15)", actual, value), txt)
 }
 
+# Helper: substitute one line, refusing to no-op. Same reasoning as set_theta():
+# a sub() that silently fails to match would regenerate the dataset at the
+# model's own initial variances instead of the amp.sim NONMEM reference, and the
+# concordance test would then validate against the wrong variance structure and
+# still pass.
+set_line <- function(txt, pattern, replacement, what) {
+  if (!grepl(pattern, txt))
+    stop("no line matching '", what, "' in the emitted .ferx -- ",
+         "has the translator's naming changed?", call. = FALSE)
+  sub(pattern, replacement, txt)
+}
+
 # Helper: build a standard NONMEM-format dosing+observation template.
 # DV carries a numeric 0 placeholder, not ".". ferx 0.2.0 treats a "." DV as
 # missing and drops the row from the ferx_simulate() result, so a "." template
@@ -122,12 +134,13 @@ if (requireNamespace("amp.sim", quietly = TRUE)) {
   ferx3_txt  <- set_theta(ferx3_txt, "KA", ref$THETA1)
   ferx3_txt  <- set_theta(ferx3_txt, "CL", ref$THETA2)
   ferx3_txt  <- set_theta(ferx3_txt, "V",  ref$THETA3)
-  ferx3_txt  <- sub("omega ETA_KA ~ [^\n]+",
-                    sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), ferx3_txt)
-  ferx3_txt  <- sub("omega ETA_CL ~ [^\n]+",
-                    sprintf("omega ETA_CL ~ %.10g", ref$OMEGA.2.2.), ferx3_txt)
-  ferx3_txt  <- sub("sigma EPS1 ~ [^\n]+",
-                    sprintf("sigma EPS1 ~ %.10g (sd)", sqrt(ref$SIGMA.1.1.)), ferx3_txt)
+  ferx3_txt  <- set_line(ferx3_txt, "omega ETA_KA ~ [^\n]+",
+                         sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), "omega ETA_KA")
+  ferx3_txt  <- set_line(ferx3_txt, "omega ETA_CL ~ [^\n]+",
+                         sprintf("omega ETA_CL ~ %.10g", ref$OMEGA.2.2.), "omega ETA_CL")
+  ferx3_txt  <- set_line(ferx3_txt, "sigma EPS1 ~ [^\n]+",
+                         sprintf("sigma EPS1 ~ %.10g (sd)", sqrt(ref$SIGMA.1.1.)),
+                         "sigma EPS1")
   ferx3_sim  <- tempfile(fileext = ".ferx")
   writeLines(ferx3_txt, ferx3_sim)
 
