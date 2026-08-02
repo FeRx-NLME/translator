@@ -11,9 +11,23 @@
 #'   the result is returned but not written.
 #' @param overwrite If `output` is set and the file already exists, pass `TRUE`
 #'   to overwrite it. Default `FALSE`.
+#' @param validate Check the emitted `.ferx` with `ferx::ferx_model_validate()`
+#'   before returning. Default `TRUE`. Requires the `ferx` package; when it is
+#'   not installed the check is skipped and an `INFO` warning says so. For a
+#'   NONMEM source the `$DATA` file is resolved relative to the control stream
+#'   and passed to the validator when it exists - without a dataset the engine
+#'   cannot check covariate references, because every block that accepts a
+#'   covariate reads an unknown name as one.
+#' @param strict If validation reports any error-severity diagnostic, abort.
+#'   Default `TRUE`. Pass `FALSE` to downgrade to a warning and return the
+#'   result anyway. Ignored when `validate = FALSE`.
 #'
 #' @return A `ferx_translate_result` invisibly, with fields `$ferx_text`,
-#'   `$warnings`, and `$unsupported`.
+#'   `$warnings`, `$unsupported`, and `$validation` (`NULL` when
+#'   `validate = FALSE`, otherwise a list with `ok`, `diagnostics`, the
+#'   `data_file` used, and the full `warnings` including the `INFO` notes on how
+#'   validation ran). Only engine findings about the model reach `$warnings` and
+#'   the emitted file; notes about validation coverage stay in `$validation`.
 #'
 #' @seealso [write_ferx()], [rxui_to_ir()], [emit_ferx()]
 #'
@@ -38,7 +52,9 @@
 to_ferx <- function(source,
                     format    = c("nonmem", "nlmixr2", "monolix"),
                     output    = NULL,
-                    overwrite = FALSE) {
+                    overwrite = FALSE,
+                    validate  = TRUE,
+                    strict    = TRUE) {
   format <- match.arg(format)
 
   if (format == "monolix" && !requireNamespace("monolix2rx", quietly = TRUE))
@@ -67,8 +83,33 @@ to_ferx <- function(source,
     .extract_nm_scaling(source) else list()
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint)
-  text     <- emit_ferx(ir)
-  result   <- new_ferx_translate_result(text, ir)
+  text <- emit_ferx(ir)
+
+  val <- if (isTRUE(validate)) {
+    data_file <- if (format == "nonmem" && is.character(source))
+      .extract_nm_data_path(source) else NA_character_
+    .validate_ferx_text(text, data_file = data_file)
+  } else NULL
+
+  if (!is.null(val)) {
+    # Only findings ABOUT THE MODEL go into the file. The INFO notes about how
+    # validation ran (skipped, with or without data) belong to the translation
+    # session, not the artefact -- folding them in would make every clean model
+    # emit "# Warnings: 1" for a note that says nothing is wrong.
+    findings <- val$warnings[!startsWith(val$warnings, "INFO")]
+    ir$warnings <- c(ir$warnings, findings)
+    ir$unsupported <- c(ir$unsupported, val$unsupported)
+    # Re-emit only when something was added, so a clean translation stays
+    # byte-identical. The emitter is pure, so this cannot change the model.
+    if (length(findings) > 0 || length(val$unsupported) > 0)
+      text <- emit_ferx(ir)
+  }
+
+  result <- new_ferx_translate_result(text, ir, validation = val)
+
+  # Surface diagnostics before writing, so a strict failure cannot leave an
+  # invalid file on disk that the user believes was checked.
+  .report_validation(val, strict = strict)
 
   if (!is.null(output)) write_ferx(result, output, overwrite)
   invisible(result)
@@ -103,18 +144,21 @@ mlx_to_ferx <- function(mlxtran, output = NULL, ...) {
 #' @param text Character string: the complete `.ferx` file content.
 #' @param ir A `ferx_ir` object from which `warnings` and `unsupported` are
 #'   pulled.
+#' @param validation Result of `.validate_ferx_text()`, or `NULL` when
+#'   validation was not run.
 #'
 #' @return A `ferx_translate_result` list with fields `ferx_text`, `warnings`,
-#'   `unsupported`, `source_format`, and `source_file`.
+#'   `unsupported`, `validation`, `source_format`, and `source_file`.
 #'
 #' @seealso [to_ferx()], [write_ferx()]
 #' @noRd
-new_ferx_translate_result <- function(text, ir) {
+new_ferx_translate_result <- function(text, ir, validation = NULL) {
   structure(
     list(
       ferx_text     = text,
       warnings      = ir$warnings,
       unsupported   = ir$unsupported,
+      validation    = validation,
       source_format = ir$source_format,
       source_file   = ir$source_file
     ),

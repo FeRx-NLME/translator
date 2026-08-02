@@ -1,5 +1,10 @@
 # -- helpers ------------------------------------------------------------------
 
+nm_path_t <- function(file) {
+  system.file("testmodels", "nonmem", file, package = "ferxtranslate",
+              mustWork = TRUE)
+}
+
 minimal_ir <- function(...) {
   new_ferx_ir(
     source_format = "nonmem",
@@ -195,4 +200,146 @@ test_that("mlx_to_ferx errors cleanly without monolix2rx", {
   skip_if(requireNamespace("monolix2rx", quietly = TRUE),
           "monolix2rx installed")
   expect_error(mlx_to_ferx("project.mlxtran"), "monolix2rx")
+})
+
+# -- $DATA path resolution ----------------------------------------------------
+
+# Base-R scratch directory; withr is not a declared dependency of this package.
+# R clears tempdir() at session end, so no explicit cleanup is needed.
+tmp_ctl_dir <- function() {
+  d <- tempfile("ferxtr-")
+  dir.create(d)
+  d
+}
+
+test_that("$DATA path resolves relative to the control stream", {
+  dir  <- tmp_ctl_dir()
+  data <- file.path(dir, "mydata.csv")
+  writeLines("ID,TIME,DV", data)
+  ctl <- file.path(dir, "run1.ctl")
+  writeLines(c("$PROBLEM x", "$DATA mydata.csv IGNORE=@", "$PK"), ctl)
+  expect_equal(normalizePath(.extract_nm_data_path(ctl)), normalizePath(data))
+})
+
+test_that("$DATA accepts a quoted path containing spaces", {
+  dir  <- tmp_ctl_dir()
+  data <- file.path(dir, "my data.csv")
+  writeLines("ID,TIME,DV", data)
+  ctl <- file.path(dir, "run1.ctl")
+  writeLines(c("$PROBLEM x", '$DATA "my data.csv" IGNORE=@'), ctl)
+  expect_equal(normalizePath(.extract_nm_data_path(ctl)), normalizePath(data))
+})
+
+test_that("$DATA returns NA when the dataset is absent or undeclared", {
+  dir <- tmp_ctl_dir()
+  no_file <- file.path(dir, "a.ctl")
+  writeLines(c("$PROBLEM x", "$DATA notthere.csv IGNORE=@"), no_file)
+  expect_true(is.na(.extract_nm_data_path(no_file)))
+
+  no_data <- file.path(dir, "b.ctl")
+  writeLines(c("$PROBLEM x", "$PK"), no_data)
+  expect_true(is.na(.extract_nm_data_path(no_data)))
+
+  expect_true(is.na(.extract_nm_data_path("/nonexistent/path.ctl")))
+})
+
+test_that("$DATA ignores a trailing comment", {
+  dir  <- tmp_ctl_dir()
+  data <- file.path(dir, "d.csv"); writeLines("ID", data)
+  ctl  <- file.path(dir, "c.ctl")
+  writeLines(c("$PROBLEM x", "$DATA d.csv ; the dataset"), ctl)
+  expect_equal(normalizePath(.extract_nm_data_path(ctl)), normalizePath(data))
+})
+
+# -- output validation --------------------------------------------------------
+
+test_that("validate = FALSE skips validation and reports nothing", {
+  skip_if_not_installed("nonmem2rx")
+  result <- nm_to_ferx(nm_path_t("1cpt_oral.ctl"), validate = FALSE)
+  expect_null(result$validation)
+  expect_false(any(grepl("validated", result$warnings)))
+})
+
+test_that("a valid model validates clean and records the outcome", {
+  skip_if_not_installed("nonmem2rx")
+  skip_if_not_installed("ferx")
+  result <- suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+  expect_true(result$validation$ok)
+  expect_equal(nrow(result$validation$diagnostics), 0L)
+  expect_length(result$unsupported, 0L)
+})
+
+test_that("validating without a dataset says so rather than implying a clean bill", {
+  skip_if_not_installed("nonmem2rx")
+  skip_if_not_installed("ferx")
+  # The bundled .ctl files name datasets that are not shipped, so this is the
+  # no-data path. It matters because an unknown name is read as a covariate in
+  # every block that accepts one, and only data turns that into an error.
+  result <- suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+  expect_true(is.na(result$validation$data_file))
+  expect_true(any(grepl("^INFO.*without data", result$validation$warnings)))
+  # The note is about the session, not the model, so it must not leak into the
+  # emitted file and make a clean translation advertise a warning.
+  expect_false(any(grepl("without data", result$warnings)))
+  expect_false(grepl("# Warnings:", result$ferx_text))
+})
+
+test_that("invalid output aborts under strict and warns otherwise", {
+  skip_if_not_installed("ferx")
+  bad <- new_ferx_ir(
+    thetas     = list(list(name = "TVCL", init = 1, lower = 0, upper = 10)),
+    structural = list(type = "ode", obs_cmt = "c.BAD", states = "c.BAD"),
+    odes       = list(list(state = "c.BAD", rhs = "-TVCL * c.BAD"))
+  )
+  val <- .validate_ferx_text(emit_ferx(bad))
+  expect_false(val$ok)
+  expect_gt(length(val$unsupported), 0L)
+  expect_error(.report_validation(val, strict = TRUE), "not valid")
+  expect_warning(.report_validation(val, strict = FALSE), "not valid")
+})
+
+test_that("a missing ferx skips validation without failing the translation", {
+  skip_if_not_installed("nonmem2rx")
+  # This is how the fast PR job runs: ferx is a Suggests dependency and only the
+  # engine job installs it. An optional dependency must never turn a working
+  # translation into an error, so assert the degradation rather than assume it.
+  local_mocked_bindings(.has_ferx = function() FALSE)
+  result <- expect_no_error(
+    suppressMessages(nm_to_ferx(nm_path_t("1cpt_oral.ctl")))
+  )
+  expect_true(is.na(result$validation$ok))
+  expect_match(result$validation$warnings, "ferx is not installed", all = FALSE)
+  expect_length(result$unsupported, 0L)
+  # Nothing about the skipped check may leak into the emitted file.
+  expect_false(grepl("# Warnings:", result$ferx_text))
+})
+
+test_that("a strict abort leaves no output file behind", {
+  skip_if_not_installed("ferx")
+  skip_if_not_installed("nonmem2rx")
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "bad.ctl")
+  # $MODEL names a compartment that collides with an $ERROR variable, so
+  # nonmem2rx prefixes it to `c.RTOT` and the emitted state identifier carries a
+  # dot that ferx cannot parse (issue #6, defect 1).
+  writeLines(c(
+    "$PROBLEM dotted state", "$INPUT ID TIME AMT DV MDV",
+    "$DATA d.csv IGNORE=@", "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL", "  COMP=(CENT, DEFDOSE, DEFOBS)", "  COMP=(RTOT)",
+    "$PK", "  KEL = THETA(1)*EXP(ETA(1))", "  VC = THETA(2)",
+    "$DES", "  DADT(1) = -KEL*A(1)", "  DADT(2) = -KEL*A(2)",
+    "$ERROR", "  RTOT = A(2)", "  Y = A(1)/VC*(1+EPS(1))",
+    "$THETA (0,0.05) (0,3)", "$OMEGA 0.09", "$SIGMA 0.04", "$EST METHOD=1"), ctl)
+  writeLines("ID,TIME,AMT,DV,MDV\n1,0,100,0,1", file.path(dir, "d.csv"))
+  out <- file.path(dir, "out.ferx")
+
+  expect_error(suppressMessages(nm_to_ferx(ctl, output = out)), "not valid")
+  expect_false(file.exists(out))
+
+  # strict = FALSE still writes, but says what is wrong in the file itself.
+  res <- suppressWarnings(suppressMessages(
+    nm_to_ferx(ctl, output = out, strict = FALSE)))
+  expect_true(file.exists(out))
+  expect_false(res$validation$ok)
+  expect_match(res$ferx_text, "# WARNING: ferx rejected")
 })

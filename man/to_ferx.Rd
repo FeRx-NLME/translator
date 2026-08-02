@@ -11,7 +11,9 @@ to_ferx(
   source,
   format = c("nonmem", "nlmixr2", "monolix"),
   output = NULL,
-  overwrite = FALSE
+  overwrite = FALSE,
+  validate = TRUE,
+  strict = TRUE
 )
 
 nm_to_ferx(ctl_file, output = NULL, ...)
@@ -32,6 +34,18 @@ the result is returned but not written.}
 \item{overwrite}{If \code{output} is set and the file already exists, pass \code{TRUE}
 to overwrite it. Default \code{FALSE}.}
 
+\item{validate}{Check the emitted \code{.ferx} with \code{ferx::ferx_model_validate()}
+before returning. Default \code{TRUE}. Requires the \code{ferx} package; when it is
+not installed the check is skipped and an \code{INFO} warning says so. For a
+NONMEM source the \verb{$DATA} file is resolved relative to the control stream
+and passed to the validator when it exists - without a dataset the engine
+cannot check covariate references, because every block that accepts a
+covariate reads an unknown name as one.}
+
+\item{strict}{If validation reports any error-severity diagnostic, abort.
+Default \code{TRUE}. Pass \code{FALSE} to downgrade to a warning and return the
+result anyway. Ignored when \code{validate = FALSE}.}
+
 \item{ctl_file}{Path to a NONMEM control stream file.}
 
 \item{...}{Additional arguments passed to \code{\link[=to_ferx]{to_ferx()}} (e.g. \code{overwrite}).}
@@ -42,7 +56,11 @@ to overwrite it. Default \code{FALSE}.}
 }
 \value{
 A \code{ferx_translate_result} invisibly, with fields \verb{$ferx_text},
-\verb{$warnings}, and \verb{$unsupported}.
+\verb{$warnings}, \verb{$unsupported}, and \verb{$validation} (\code{NULL} when
+\code{validate = FALSE}, otherwise a list with \code{ok}, \code{diagnostics}, the
+\code{data_file} used, and the full \code{warnings} including the \code{INFO} notes on how
+validation ran). Only engine findings about the model reach \verb{$warnings} and
+the emitted file; notes about validation coverage stay in \verb{$validation}.
 }
 \description{
 Parses \code{source} via the appropriate intermediary (\code{nonmem2rx}, \code{rxode2}, or

@@ -228,41 +228,74 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
 
 # ===========================================================================
 # TRANSLATION GAP REPORT
-# Translates every bundled NONMEM test model and collects unsupported
-# features reported by the translator. The test always passes but prints
-# a gap table so the CI log is a living record of what still needs work.
-# Add a model to inst/testmodels/nonmem/ to extend coverage automatically.
+# Translates every bundled NONMEM test model, validates the emitted .ferx with
+# the ferx engine, and prints a table of what is still missing. Add a model to
+# inst/testmodels/nonmem/ to extend coverage automatically.
+#
+# Two kinds of finding, deliberately treated differently:
+#
+#   * $unsupported / engine WARNINGS are reported, not failed. They are the
+#     living record of what the translator and ferx-core cannot yet express.
+#   * Engine ERRORS fail the test. An emitted .ferx the engine rejects is a
+#     regression, not a gap, and letting it merely print is how a dotted state
+#     name and an undefined $DES intermediate reached a user (issue #6).
+#
+# Translation runs with strict = FALSE so one bad model yields a row in the
+# table instead of aborting the sweep at the first failure.
 # ===========================================================================
-test_that("translation gap report: unsupported features across all bundled models", {
+test_that("translation gap report: every bundled model translates and validates", {
   skip_if_not_installed("nonmem2rx")
 
   model_dir <- system.file("testmodels/nonmem", package = "ferxtranslate")
   models    <- list.files(model_dir, pattern = "\\.(ctl|mod)$", full.names = TRUE)
+  expect_gt(length(models), 0L)
 
-  gaps <- do.call(rbind, lapply(models, function(path) {
-    result <- tryCatch(nm_to_ferx(path),
-                       error = function(e) conditionMessage(e))
+  rows <- lapply(models, function(path) {
+    result <- tryCatch(
+      suppressWarnings(suppressMessages(nm_to_ferx(path, strict = FALSE))),
+      error = function(e) conditionMessage(e)
+    )
     # A translation crash is itself a gap worth surfacing -- record it as an
     # ERROR row instead of silently dropping the model from the report (which
     # would let a broken translator masquerade as "no gaps detected").
     if (is.character(result))
-      return(data.frame(model = basename(path),
-                        gap   = paste0("ERROR: ", result),
+      return(data.frame(model = basename(path), severity = "error",
+                        finding = paste0("translation failed: ", result),
                         stringsAsFactors = FALSE))
-    if (length(result$unsupported) == 0) return(NULL)
-    data.frame(model    = basename(path),
-               gap      = result$unsupported,
-               stringsAsFactors = FALSE)
-  }))
+
+    out <- NULL
+    if (length(result$unsupported) > 0)
+      out <- rbind(out, data.frame(model = basename(path), severity = "gap",
+                                   finding = result$unsupported,
+                                   stringsAsFactors = FALSE))
+
+    diags <- result$validation$diagnostics
+    if (!is.null(diags) && nrow(diags) > 0)
+      out <- rbind(out, data.frame(
+        model    = basename(path),
+        severity = as.character(diags$severity),
+        finding  = paste0(diags$code, ": ",
+                          gsub("\\s+", " ", trimws(as.character(diags$message)))),
+        stringsAsFactors = FALSE))
+    out
+  })
+
+  gaps <- do.call(rbind, rows)
 
   if (is.null(gaps) || nrow(gaps) == 0) {
-    message("translation gap report: no unsupported features detected across ",
+    message("translation gap report: nothing to report across ",
             length(models), " models")
   } else {
-    message("\ntranslation gap report (", nrow(gaps), " gap(s) across ",
+    message("\ntranslation gap report (", nrow(gaps), " finding(s) across ",
             length(models), " models):")
     message(paste(capture.output(print(gaps, row.names = FALSE)), collapse = "\n"))
   }
 
-  succeed()
+  # Gaps and engine warnings are reported; engine errors fail.
+  fatal <- character()
+  if (!is.null(gaps) && nrow(gaps) > 0) {
+    err   <- gaps[gaps$severity == "error", , drop = FALSE]
+    fatal <- paste0(err$model, " -- ", err$finding)
+  }
+  expect_equal(fatal, character())
 })
