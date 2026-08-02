@@ -217,10 +217,16 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   data_file  <- .conc_data("ode_1cpt_oral_concordance.csv")
   # Start ETA_CL's variance away from the truth it must recover, so that
   # "returned its initial value" and "recovered the truth" are distinguishable.
-  start_om  <- 0.005
-  txt <- sub("omega ETA_CL ~ [^\n]+", paste0("omega ETA_CL ~ ", start_om),
-             paste(readLines(ferx_file), collapse = "\n"))
-  expect_match(txt, paste0("omega ETA_CL ~ ", start_om), fixed = TRUE)
+  # BOTH etas, not just one: pk_1cmt_oral.mod declares $OMEGA .01/.02, which are
+  # also the simulation truth, so a dead parameter returning its untouched
+  # initial is indistinguishable from a live one recovering the truth.
+  start_ka <- 0.004
+  start_cl <- 0.005
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  txt <- sub("omega ETA_KA ~ [^\n]+", paste0("omega ETA_KA ~ ", start_ka), txt)
+  txt <- sub("omega ETA_CL ~ [^\n]+", paste0("omega ETA_CL ~ ", start_cl), txt)
+  expect_match(txt, paste0("omega ETA_KA ~ ", start_ka), fixed = TRUE)
+  expect_match(txt, paste0("omega ETA_CL ~ ", start_cl), fixed = TRUE)
   writeLines(txt, ferx_file)
   fit <- ferx_fit(ferx_file, data_file,
                   method     = "focei",
@@ -251,7 +257,8 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   expect_lt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.35, label = "omega ETA_KA")
   expect_lt(abs(om[["ETA_CL"]] / 0.02 - 1), 0.35, label = "omega ETA_CL")
   # A dead parameter cannot move off its start; a live one must.
-  expect_gt(abs(om[["ETA_CL"]] / start_om - 1), 0.20, label = "omega ETA_CL moved")
+  expect_gt(abs(om[["ETA_KA"]] / start_ka - 1), 0.20, label = "omega ETA_KA moved")
+  expect_gt(abs(om[["ETA_CL"]] / start_cl - 1), 0.20, label = "omega ETA_CL moved")
 })
 
 # ===========================================================================
@@ -299,4 +306,29 @@ test_that("engine accepts the emitted .ferx for every bundled model", {
     if (nrow(err) > 0) fatal <- paste0(err$model, " -- ", err$finding)
   }
   expect_equal(fatal, character())
+})
+
+test_that("the engine sweep reports non-error diagnostics without failing", {
+  # Kills the mutation removing the nrow(err) guard. paste0() recycles
+  # zero-length arguments against the length-1 separator, so a frame with only
+  # warning rows yielded " -- " instead of character(0) and failed the sweep on
+  # exactly the case it is meant to print. The live sweep cannot exercise this
+  # while the corpus is clean, so drive the expression directly.
+  fatal_for <- function(found) {
+    fatal <- character()
+    if (!is.null(found) && nrow(found) > 0) {
+      err <- found[which(found$severity == "error"), , drop = FALSE]
+      if (nrow(err) > 0) fatal <- paste0(err$model, " -- ", err$finding)
+    }
+    fatal
+  }
+  warn_only <- data.frame(model = "m.ctl", severity = "warning",
+                          finding = "W_X: something", stringsAsFactors = FALSE)
+  expect_equal(fatal_for(warn_only), character())
+  expect_equal(fatal_for(NULL), character())
+
+  mixed <- rbind(warn_only,
+                 data.frame(model = "n.ctl", severity = "error",
+                            finding = "E_PARSE: bad", stringsAsFactors = FALSE))
+  expect_equal(fatal_for(mixed), "n.ctl -- E_PARSE: bad")
 })

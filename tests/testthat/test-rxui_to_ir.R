@@ -649,3 +649,113 @@ test_that("duplicate $THETA labels do not leave a reference dangling", {
   known <- c(nms, vapply(ir$indiv_params, function(p) p$lhs, ""), "ETA1", "exp")
   expect_equal(setdiff(rhs_syms, known), character())
 })
+
+test_that("de-shadowing iterates: a rename must not create a new shadow", {
+  # Pass 3 filters a theta alias by comparing names (`V <- V` is dropped as a
+  # self-assignment), so renaming one theta can turn a filtered alias into an
+  # individual parameter that did not exist in the previous parse -- and the
+  # surviving theta then shadows it. Duplicate $THETA labels are how that
+  # happens: only one of the pair is renamed. A single pass left
+  # `theta V` beside `V = TVV`, with `CL = V * exp(ETA1)` reading the theta,
+  # and the engine reported ok = TRUE with no diagnostic.
+  ini <- rbind(theta_row("theta1", 1), theta_row("theta2", 10),
+               eta_row("eta1", 0.09, 1L))
+  ini$label <- c("V", "V", NA_character_)
+  lst <- list(quote(v <- theta2), quote(cl <- theta1 * exp(eta1)),
+              ddt("central", quote(-cl/v * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  th <- toupper(vapply(ir$thetas, function(t) t$name, ""))
+  ip <- toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(intersect(th, ip), character())
+  expect_length(unique(th), length(th))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("an unresolvable name collision is reported, never emitted silently", {
+  # The loop is bounded, so the invariant is asserted rather than assumed.
+  ir <- new_ferx_ir(
+    thetas = list(list(name = "CL", init = 1, lower = 0, upper = 10)),
+    indiv_params = list(list(lhs = "CL", rhs = "CL * 2"))
+  )
+  # Direct check of the condition the assertion guards against.
+  expect_equal(
+    intersect(toupper(vapply(ir$thetas, function(t) t$name, "")),
+              toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))),
+    "CL")
+})
+
+test_that("covariate detection does not report iniDf names as covariates", {
+  # name_map keys are raw iniDf names (`t.CL`), and .norm() does not strip the
+  # prefix, so every theta reference was being reported as a covariate.
+  ini <- rbind(theta_row("t.TVCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TVCL * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  covs <- .covariate_names(lst, .norm_map_from_ini(ini))
+  expect_false(any(grepl("^T_|^E_", covs)))
+})
+
+test_that("an ODE intermediate is inlined with the binding it had when written", {
+  # Kills the mutation that reverts pass 2b to re-normalising the raw expression
+  # with the FINAL name_map. De-shadowing makes that map time-varying, so `frac`
+  # -- written when `cl` still meant the theta -- was inlined as the individual
+  # parameter. Both forms parse; ferx cannot tell them apart.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ frac <- central/cl; cl <- cl*exp(eta.cl); v <- v; ka <- ka
+            d/dt(depot)   = -ka*depot
+            d/dt(central) =  ka*depot - cl/v*central - frac
+            central ~ prop(prop.err) })
+  }
+  ir  <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+  rhs <- vapply(ir$odes, function(o) o$rhs, "")[2]
+  expect_match(rhs, "central/TVCL", fixed = TRUE)
+  expect_false(grepl("central/CL", rhs, fixed = TRUE))
+})
+
+test_that("a self-reference to a plain local resolves to the emitted name", {
+  # Kills the mutation that stops seeding rhs_map. .normalise_expr() leaves an
+  # unmapped symbol untouched, so `k <- k * 2` emitted a bare lower-case `k`
+  # that is declared nowhere and which ferx silently reads as a covariate.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- k * 2), quote(cl <- t.CL * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_false(any(grepl("\\bk\\b", rhs)))
+})
+
+test_that("a $THETA label that is not an identifier is rejected", {
+  # Kills the mutation reverting the label check to whitespace-only. `; CL/F` is
+  # the standard NONMEM label for apparent clearance; emitting `theta CL/F(...)`
+  # gives E_PARSE, and it diverges from the name references resolve to.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL/F", NA_character_)
+  lst <- list(quote(cl <- t.CL * exp(eta1)), ddt("central", quote(-cl * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_true(all(grepl("^[A-Za-z][A-Za-z0-9_]*$", nms)))
+})
+
+test_that("a rename avoids a covariate name, not just a parameter name", {
+  # ferx resolves theta before covariate too, so renaming onto a data column
+  # reintroduces the shadowing on a new pair, with no diagnostic from the
+  # engine. Driven end to end: asserting on .deshadow_theta_names() alone would
+  # not prove rxui_to_ir() actually passes the covariates in, which is the part
+  # that can break.
+  expect_equal(unname(.deshadow_theta_names("CL", "CL", reserved = "TVCL")$map),
+               "THETA_CL")
+  expect_equal(unname(.deshadow_theta_names("CL", "CL")$map), "TVCL")
+
+  # `TVCL` here is a data column: referenced, never assigned, not in iniDf.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL", NA_character_)
+  lst <- list(quote(cl <- t.CL * (TVCL/70) * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  expect_true("TVCL" %in% .covariate_names(lst, .norm_map_from_ini(ini)))
+
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_false("TVCL" %in% toupper(nms))
+})

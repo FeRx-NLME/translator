@@ -68,28 +68,37 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # every bundled model, renaming thetas that shadowed nothing. .parse_model_exprs()
   # is pure (name_map is passed by value), so the throwaway pass is safe, and it
   # costs ~1% of a translation against the nonmem2rx parse that precedes it.
-  probe <- .parse_model_exprs(lst, name_map, sigma_names_norm)
-  # The linCmt passthrough below invents an individual parameter for a
-  # fixed-effect PK theta that has no assignment of its own, so those names must
-  # be de-shadowed too -- otherwise the passthrough emits the self-shadowing
-  # `V = V` this function exists to prevent.
-  probe_lhs <- vapply(probe$indiv_params, function(p) p$lhs, "")
-  if (identical(probe$structural$type, "lincmt"))
-    probe_lhs <- c(probe_lhs,
+  # Iterate to a fixpoint. One pass is NOT enough: pass 3 drops a theta alias by
+  # comparing names (`V <- V` is filtered as a self-assignment), so renaming a
+  # theta can turn a filtered alias into an individual parameter that did not
+  # exist in the previous parse -- and the surviving theta then shadows it. With
+  # duplicate $THETA labels only one of the pair is renamed, which is exactly
+  # how that happens. Re-parse and re-check until nothing new appears.
+  reserved_base <- c(unlist(lapply(omega_out$omegas, function(o) o$names)),
+                     vapply(kappa_out$kappas, function(k) k$name, ""),
+                     vapply(sigma_out$sigmas, function(s) s$name, ""),
+                     .covariate_names(lst, name_map))
+  expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  for (round in 1:5) {
+    # The linCmt passthrough invents an individual parameter for a fixed-effect
+    # PK theta with no assignment of its own, so those names must be
+    # de-shadowed too -- otherwise it emits the self-shadowing `V = V` this
+    # function exists to prevent.
+    cur_lhs <- vapply(expr_out$indiv_params, function(p) p$lhs, "")
+    if (identical(expr_out$structural$type, "lincmt"))
+      cur_lhs <- c(cur_lhs,
                    theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
-                              !toupper(theta_orig) %in% toupper(probe_lhs)])
-  desh <- .deshadow_theta_names(
-    theta_names = theta_orig,
-    indiv_names = probe_lhs,
-    # States and covariates matter too: ferx resolves theta before both, so a
-    # rename landing on either would reintroduce the shadowing on a new pair.
-    reserved    = c(unlist(lapply(omega_out$omegas, function(o) o$names)),
-                    vapply(kappa_out$kappas,  function(k) k$name, ""),
-                    vapply(sigma_out$sigmas,  function(s) s$name, ""),
-                    vapply(probe$odes, function(o) o$state, ""),
-                    .covariate_names(lst, name_map))
-  )
-  if (any(!is.na(desh$map))) {
+                              !toupper(theta_orig) %in% toupper(cur_lhs)])
+    cur_theta <- vapply(theta_out$thetas, function(t) t$name, "")
+    desh <- .deshadow_theta_names(
+      theta_names = cur_theta,
+      indiv_names = cur_lhs,
+      # States and covariates matter too: ferx resolves theta before both, so a
+      # rename landing on either would reintroduce the shadowing on a new pair.
+      reserved    = c(reserved_base, cur_theta,
+                      vapply(expr_out$odes, function(o) o$state, ""))
+    )
+    if (!any(!is.na(desh$map))) break
     for (i in seq_along(theta_out$thetas)) {
       if (is.na(desh$map[i])) next
       theta_out$thetas[[i]]$name <- desh$map[i]
@@ -97,8 +106,21 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     }
     warn     <- c(warn, desh$warnings)
     expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
-  } else {
-    expr_out <- probe
+  }
+
+  # The invariant this whole dance exists to establish. ferx reports nothing
+  # when it is violated, so assert it here rather than trust the loop.
+  final_clash <- intersect(
+    toupper(vapply(theta_out$thetas, function(t) t$name, "")),
+    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
+  if (length(final_clash) > 0) {
+    warn <- c(warn, paste0(
+      "ERROR | could not give theta(s) ", paste(final_clash, collapse = ", "),
+      " a name distinct from an individual parameter. In ferx a theta shadows ",
+      "an identically named individual parameter silently, so this model would ",
+      "fit with those parameters' individual definitions ignored."))
+    unsp <- c(unsp, paste0("theta/individual-parameter name collision: ",
+                           paste(final_clash, collapse = ", ")))
   }
   warn      <- c(warn, expr_out$warnings)
   unsp      <- c(unsp, expr_out$unsupported)
@@ -287,7 +309,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     else if (.is_ddt_lhs(lhs)) assigned <- c(assigned, .norm(.ddt_state(lhs)))
     used <- c(used, .collect_symbols(expr[[3]]))
   }
-  known <- unique(c(assigned, toupper(unlist(name_map, use.names = FALSE))))
+  # name_map keys are the RAW iniDf names (`t.CL`, `e.ETA1`) and .norm() does not
+  # strip those prefixes, so a reference to `t.CL` normalises to `T_CL` and would
+  # be reported as a covariate unless the keys are treated as known too.
+  known <- unique(c(assigned,
+                    toupper(unlist(name_map, use.names = FALSE)),
+                    .norm(names(name_map))))
   setdiff(unique(.norm(used)), known)
 }
 
@@ -654,7 +681,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     changed <- FALSE
     for (a in all_assigns) {
       if (a$lhs %in% aux_vars) next
-      syms <- toupper(.collect_symbols(a$rhs_expr))
+      # The normalised form, not the raw one: a dotted local (`c.2`) uppercases
+      # to `C.2` while aux_vars holds `C_2`, so the raw comparison misses it.
+      syms <- toupper(.collect_symbols(a$rhs_expr_norm))
       if (any(syms %in% aux_vars)) {
         aux_vars <- c(aux_vars, a$lhs)
         changed  <- TRUE
@@ -709,7 +738,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
     if (a$lhs %in% aux_vars) {
       # Check if this is the error model assignment (RHS contains sigma vars).
-      syms <- toupper(.collect_symbols(a$rhs_expr))
+      syms <- toupper(.collect_symbols(a$rhs_expr_norm))
       eps  <- intersect(syms, sigma_names)
       if (length(eps) > 0 && length(error_model) == 0) {
         err  <- .classify_error_assignment(a$rhs_expr, sigma_names)

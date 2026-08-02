@@ -54,7 +54,10 @@
   if (inherits(res, "error"))
     return(list(
       ok = NA, diagnostics = .empty_diagnostics(), data_file = data_file,
-      warnings = paste0("WARN  | ferx_model_validate() could not run, so the ",
+      # INFO, not WARN: this is a note about how validation ran, not a defect in
+      # the model, and a WARN would be written into the emitted file -- making
+      # the artefact depend on the machine it was translated on.
+      warnings = paste0("INFO  | ferx_model_validate() could not run, so the ",
                         "emitted .ferx was NOT validated: ",
                         .one_line(conditionMessage(res))),
       unsupported = character()
@@ -69,30 +72,42 @@
   # translation on it would reject models that are perfectly correct, and would
   # make the outcome depend on whether the CSV happens to sit next to the .ctl.
   # Drop back to model-only validation and say so.
-  if (any(grepl("^E_DATA", as.character(diags$code)))) {
-    msg <- .one_line(diags$message[grepl("^E_DATA", as.character(diags$code))][1])
+  # ...but only when the failure is genuinely about the FILE. E_DATA is
+  # ferx-core's catch-all for any read failure, including ones caused by keys
+  # the translator itself emitted -- an `iov_column` naming a column the dataset
+  # lacks aborts the read before the engine's own E_IOV_MISSING_OCC can fire.
+  # Falling back on those would return a clean bill of health for a model that
+  # cannot be fit, which is the opposite of this function's job.
+  e_data     <- grepl("^E_DATA", as.character(diags$code))
+  model_key  <- grepl("iov_column|obs_cmt|CMT\\s*=", as.character(diags$message))
+  if (any(e_data) && !any(e_data & model_key)) {
+    msg <- .one_line(diags$message[e_data][1])
     res2 <- tryCatch(utils::capture.output(out <- ferx::ferx_model_validate(tmp)),
                      error = function(e) e)
     if (inherits(res2, "error"))
       return(list(ok = NA, diagnostics = .empty_diagnostics(),
                   data_file = NA_character_,
-                  warnings = paste0("WARN  | emitted .ferx was NOT validated: ",
+                  warnings = paste0("INFO  | emitted .ferx was NOT validated: ",
                                     .one_line(conditionMessage(res2))),
                   unsupported = character()))
     diags     <- if (is.data.frame(out$diagnostics)) out$diagnostics
                  else .empty_diagnostics()
     data_file <- NA_character_
-    data_note <- paste0("WARN  | ferx could not read the dataset, so covariate ",
+    data_note <- paste0("INFO  | ferx could not read the dataset, so covariate ",
                         "references and endpoint coverage were NOT checked: ", msg)
   } else data_note <- character()
 
   warn <- data_note
-  if (is.na(data_file) && length(data_note) == 0L)
+  if (is.na(data_file) && length(data_note) == 0L) {
     warn <- c(warn, paste0(
       "INFO  | validated without data -- covariate references and endpoint ",
       "coverage were NOT checked (an unknown name is read as a covariate)"))
-  else
+  } else if (!is.na(data_file)) {
     warn <- c(warn, paste0("INFO  | validated against data: ", data_file))
+  }
+  # No third branch: after an E_DATA fallback data_file is NA and data_note
+  # already says what happened. Claiming "validated against data: NA" alongside
+  # it stated the opposite of the line above it.
 
   if (nrow(diags) > 0) {
     sev  <- as.character(diags$severity)

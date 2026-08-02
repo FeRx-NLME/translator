@@ -360,6 +360,20 @@ test_that("the resolved $DATA path actually reaches the validator", {
     nm_to_ferx(file.path(dir, "m.ctl"), strict = FALSE)))
   expect_false(is.na(res$validation$data_file))
   expect_match(res$validation$data_file, "1cpt_oral\\.csv$")
+
+  # $validation$data_file alone proves nothing: .validate_ferx_text() echoes
+  # back whatever path it was handed, so it reads the same whether or not the
+  # engine ever saw it. Assert on a diagnostic only a data-aware run can
+  # produce -- a covariate reference is invisible without a dataset.
+  ir <- suppressWarnings(rxui_to_ir(nonmem2rx::nonmem2rx(nm_path("1cpt_oral.ctl")),
+                                    source_format = "nonmem"))
+  ir$indiv_params <- c(ir$indiv_params,
+                       list(list(lhs = "ZZ", rhs = "NO_SUCH_COLUMN * 2")))
+  txt <- emit_ferx(ir)
+  with_data <- .validate_ferx_text(txt, data_file = file.path(dir, "1cpt_oral.csv"))
+  no_data   <- .validate_ferx_text(txt, data_file = NA_character_)
+  expect_true(any(grepl("NO_SUCH_COLUMN", with_data$warnings)))
+  expect_false(any(grepl("NO_SUCH_COLUMN", no_data$warnings)))
 })
 
 test_that("engine severities route to the right console channel", {
@@ -462,10 +476,34 @@ test_that("print() reports each engine-validation outcome distinctly", {
   shown <- function(res) paste(utils::capture.output(print(res), type = "message"),
                               collapse = "\n")
   expect_match(shown(new_ferx_translate_result("x", ir)), "not run")
+  # ok = NA covers two outcomes; with ferx installed it means the engine failed,
+  # not that it is absent.
   expect_match(shown(new_ferx_translate_result("x", ir,
-    validation = list(ok = NA, data_file = NA_character_))), "skipped")
+    validation = list(ok = NA, data_file = NA_character_))),
+    if (.has_ferx()) "could not run" else "not installed")
   expect_match(shown(new_ferx_translate_result("x", ir,
     validation = list(ok = TRUE, data_file = NA_character_))), "valid")
   expect_match(shown(new_ferx_translate_result("x", ir,
     validation = list(ok = FALSE, data_file = NA_character_))), "INVALID")
+})
+
+test_that("a data-read failure leaves the emitted .ferx machine-independent", {
+  skip_if_not_installed("ferx")
+  skip_if_not_installed("nonmem2rx")
+  # The note is INFO, not WARN: it describes how validation ran, not a defect in
+  # the model. A WARN would be written into the file, so the same control stream
+  # would emit different text depending on whether a CSV happened to sit beside
+  # it -- complete with an embedded absolute path.
+  dir <- tmp_ctl_dir()
+  file.copy(nm_path("1cpt_oral.ctl"), file.path(dir, "m.ctl"))
+  bare <- suppressWarnings(suppressMessages(nm_to_ferx(file.path(dir, "m.ctl"))))
+  writeLines(c("# comment NONMEM would IGNORE", "nonsense,columns"),
+             file.path(dir, "1cpt_oral.csv"))
+  with_csv <- suppressWarnings(suppressMessages(nm_to_ferx(file.path(dir, "m.ctl"))))
+
+  expect_equal(with_csv$ferx_text, bare$ferx_text)
+  expect_false(grepl("could not read the dataset", with_csv$ferx_text))
+  # ...and the note must not contradict itself by also claiming data coverage.
+  expect_true(any(grepl("could not read the dataset", with_csv$validation$warnings)))
+  expect_false(any(grepl("validated against data", with_csv$validation$warnings)))
 })

@@ -193,7 +193,9 @@ print.ferx_translate_result <- function(x, ...) {
   if (is.null(x$validation)) {
     cli::cli_alert_info("not run")
   } else if (!isTRUE(length(x$validation$ok) == 1L) || is.na(x$validation$ok)) {
-    cli::cli_alert_info("skipped -- {.pkg ferx} is not installed")
+    # ok = NA covers two different outcomes and they need different advice.
+    if (.has_ferx()) cli::cli_alert_info("not validated -- {.pkg ferx} could not run")
+    else             cli::cli_alert_info("skipped -- {.pkg ferx} is not installed")
   } else {
     scope <- if (is.na(x$validation$data_file)) "model only, no data"
              else paste0("with data: ", x$validation$data_file)
