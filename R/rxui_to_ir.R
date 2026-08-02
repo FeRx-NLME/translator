@@ -64,12 +64,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                     vapply(kappa_out$kappas,  function(k) k$name, ""),
                     vapply(sigma_out$sigmas,  function(s) s$name, ""))
   )
-  if (length(desh$map) > 0) {
+  if (any(!is.na(desh$map))) {
     for (i in seq_along(theta_out$thetas)) {
-      j <- match(theta_orig[i], names(desh$map))
-      if (is.na(j)) next
-      theta_out$thetas[[i]]$name <- unname(desh$map[j])
-      name_map[[theta_out$raw_names[i]]] <- unname(desh$map[j])
+      if (is.na(desh$map[i])) next
+      theta_out$thetas[[i]]$name <- desh$map[i]
+      name_map[[theta_out$raw_names[i]]] <- desh$map[i]
     }
     warn <- c(warn, desh$warnings)
   }
@@ -280,25 +279,38 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 }
 
-# Map each theta name that collides (case-insensitively, ferx's own rule) with
-# a predicted individual-parameter name to a free replacement. Returns a named
-# character vector old -> new, plus one INFO warning per rename.
+# Give every theta a name that is unique among thetas and does not shadow a
+# predicted individual-parameter name. Both failures are silent in ferx: a
+# shadowed individual parameter is written and never read, and a duplicate theta
+# name resolves every reference to the first while the second sits dead.
+#
+# The result is keyed by theta INDEX, not by name, precisely because names can
+# arrive duplicated -- a name-keyed map would collapse two distinct thetas onto
+# one replacement and leave the duplication in place. `rxui_to_ir()` applies it
+# to both the emitted name and `name_map`; renaming in one without the other
+# leaves references pointing at a name nothing declares.
 .deshadow_theta_names <- function(theta_names, indiv_names,
                                   reserved = character()) {
-  empty <- list(map = character(), warnings = character())
-  if (length(theta_names) == 0L || length(indiv_names) == 0L) return(empty)
+  n   <- length(theta_names)
+  map <- rep(NA_character_, n)
+  if (n == 0L) return(list(map = map, warnings = character()))
 
-  clash <- which(toupper(theta_names) %in% toupper(indiv_names))
-  if (length(clash) == 0L) return(empty)
+  shadowed <- toupper(theta_names) %in% toupper(indiv_names)
+  duped    <- duplicated(toupper(theta_names))
+  todo     <- which(shadowed | duped)
+  if (length(todo) == 0L) return(list(map = map, warnings = character()))
 
   taken <- toupper(c(theta_names, indiv_names, reserved))
-  map   <- character()
   warn  <- character()
-  for (i in clash) {
-    new   <- .free_theta_name(theta_names[i], taken)
-    taken <- c(taken, toupper(new))
-    map[[theta_names[i]]] <- new
-    warn <- c(warn, paste0(
+  for (i in todo) {
+    new    <- .free_theta_name(theta_names[i], taken)
+    taken  <- c(taken, toupper(new))
+    map[i] <- new
+    warn <- c(warn, if (duped[i]) paste0(
+      "WARN  | two thetas are named '", theta_names[i], "' (duplicate $THETA ",
+      "label) -- renamed the later one to '", new, "'. ferx would have resolved ",
+      "every reference to the first and silently ignored the second."
+    ) else paste0(
       "INFO  | theta '", theta_names[i], "' shares a name with an individual ",
       "parameter -- renamed to '", new, "' (in ferx a theta silently shadows ",
       "an identically named individual parameter)"))
@@ -323,6 +335,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     list(name = nm, init = row$est, lower = row$lower, upper = row$upper,
          fixed = isTRUE(row$fix))
   })
+
   # raw_names keeps the iniDf key for each theta so a later rename can be
   # written back into the normalisation map, not just into the emitted name.
   list(thetas = thetas, raw_names = as.character(rows$name),
@@ -576,10 +589,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         next
       }
 
-      # Update name_map so subsequent expressions see the alias.
-      name_map[lhs_raw] <- lhs_norm
+      # Normalise the RHS BEFORE installing the alias: in `x <- f(x)` the RHS
+      # refers to the previous binding of x, not the one being created. rxode2
+      # sources can name a theta and the variable it defines identically
+      # (`cl <- cl * exp(eta.cl)`), and installing the alias first rewrote that
+      # theta reference into a self-reference the engine rejects. nonmem2rx
+      # prefixes thetas (`t.CL`), which is why NONMEM never hit it.
       rhs_norm <- paste(deparse(.normalise_expr(rhs_expr, name_map),
                                 width.cutoff = 500L), collapse = " ")
+      # Update name_map so subsequent expressions see the alias.
+      name_map[lhs_raw] <- lhs_norm
 
       all_assigns <- c(all_assigns,
                        list(list(lhs = lhs_norm, rhs = rhs_norm,

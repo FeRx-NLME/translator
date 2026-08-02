@@ -184,6 +184,18 @@ print.ferx_translate_result <- function(x, ...) {
     for (u in x$unsupported) cli::cli_alert_danger("{u}")
   }
 
+  cli::cli_h2("Engine validation")
+  if (is.null(x$validation)) {
+    cli::cli_alert_info("not run ({.code validate = FALSE})")
+  } else if (is.na(x$validation$ok)) {
+    cli::cli_alert_info("skipped -- {.pkg ferx} is not installed")
+  } else {
+    scope <- if (is.na(x$validation$data_file)) "model only, no data"
+             else paste0("with data: ", x$validation$data_file)
+    if (isTRUE(x$validation$ok)) cli::cli_alert_success("valid ({scope})")
+    else                         cli::cli_alert_danger("INVALID ({scope})")
+  }
+
   invisible(x)
 }
 

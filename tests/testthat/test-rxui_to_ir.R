@@ -512,44 +512,60 @@ test_that("ODE nlmixr2 model sets structural type ode", {
 
 test_that("no rename when theta and individual parameter names are disjoint", {
   out <- .deshadow_theta_names(c("TVCL", "TVV"), c("CL", "V"))
-  expect_length(out$map, 0L)
+  expect_true(all(is.na(out$map)))
   expect_length(out$warnings, 0L)
 })
 
 test_that("a theta colliding with an individual parameter is renamed to TV<name>", {
   out <- .deshadow_theta_names(c("CL", "TVV"), c("CL", "V"))
-  expect_equal(out$map[["CL"]], "TVCL")
-  expect_length(out$map, 1L)
+  expect_equal(out$map, c("TVCL", NA_character_))
   expect_match(out$warnings, "^INFO", all = TRUE)
   expect_match(out$warnings, "renamed to 'TVCL'")
 })
 
 test_that("collision detection is case-insensitive, as in ferx", {
   out <- .deshadow_theta_names("cl", "CL")
-  expect_equal(out$map[["cl"]], "TVcl")
+  expect_equal(out$map, "TVcl")
 })
 
 test_that("rename falls back when TV<name> is already taken", {
   out <- .deshadow_theta_names(c("CL", "TVCL"), "CL")
-  expect_equal(out$map[["CL"]], "THETA_CL")
+  expect_equal(out$map[1], "THETA_CL")
+  expect_true(is.na(out$map[2]))
 })
 
 test_that("rename falls back to a numeric suffix when both prefixes are taken", {
   out <- .deshadow_theta_names(c("CL", "TVCL", "THETA_CL"), "CL")
-  expect_equal(out$map[["CL"]], "CL_1")
+  expect_equal(out$map[1], "CL_1")
 })
 
 test_that("rename avoids omega, kappa and sigma names", {
   out <- .deshadow_theta_names("CL", "CL", reserved = c("TVCL", "THETA_CL"))
-  expect_equal(out$map[["CL"]], "CL_1")
+  expect_equal(out$map, "CL_1")
 })
 
 test_that("two colliding thetas do not rename onto each other", {
   out <- .deshadow_theta_names(c("CL", "TVCL"), c("CL", "TVCL"))
   # CL cannot take TVCL (already a theta), so it falls through to THETA_CL;
   # TVCL takes TVTVCL. Ugly, but the names stay distinct, which is the point.
-  expect_equal(sort(unname(out$map)), c("THETA_CL", "TVTVCL"))
-  expect_length(unique(unname(out$map)), 2L)
+  expect_equal(sort(out$map), c("THETA_CL", "TVTVCL"))
+  expect_length(unique(out$map), 2L)
+})
+
+test_that("duplicate theta names are made unique even without any shadowing", {
+  # ferx accepts duplicate theta names and silently resolves every reference to
+  # the first, leaving the second dead -- so this must be fixed, not just warned
+  # about. Nothing here shadows an individual parameter.
+  out <- .deshadow_theta_names(c("CL", "CL"), "NOTHING")
+  expect_true(is.na(out$map[1]))
+  expect_equal(out$map[2], "TVCL")
+  expect_match(out$warnings, "^WARN.*duplicate")
+})
+
+test_that("a duplicated AND shadowing theta gets two distinct names", {
+  out <- .deshadow_theta_names(c("CL", "CL"), "CL")
+  expect_length(unique(out$map), 2L)
+  expect_false(anyNA(out$map))
 })
 
 test_that("predicted individual names cover assignments but not d/dt or temporaries", {
@@ -624,4 +640,38 @@ test_that("every shadowed theta is renamed when all PK params carry an ETA", {
                   vapply(ir$indiv_params, function(p) p$lhs, ""))
   expect_equal(rhs[["V"]], "TVV * exp(ETA2)")
   expect_equal(rhs[["K20"]], "CL/V")
+})
+
+test_that("a self-referential assignment resolves its RHS to the theta", {
+  skip_if_not_installed("rxode2")
+  # rxode2 lets a theta and the variable it defines share a name. The RHS `cl`
+  # means the theta; installing the LHS alias before normalising the RHS turned
+  # it into a self-reference that ferx rejects as a forward reference.
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; eta.cl ~ 0.09; prop.err <- 0.1 })
+    model({ cl <- cl * exp(eta.cl); v <- v; linCmt() ~ prop(prop.err) })
+  }
+  ir  <- rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2")
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["CL"]], "TVCL * exp(ETA_CL)")
+  expect_false(any(vapply(ir$thetas, function(t) t$name, "") == "CL"))
+})
+
+test_that("duplicate $THETA labels do not leave a reference dangling", {
+  ini <- rbind(theta_row("theta1", 1), theta_row("theta2", 10),
+               eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL", "CL", NA_character_)
+  lst <- list(quote(cl <- theta1 * exp(eta1)), quote(v <- theta2),
+              ddt("central", quote(-cl/v * central)))
+  ir <- rxui_to_ir(mock_ui(ini, lst))
+
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_length(unique(nms), 2L)
+  # Every symbol on an individual-parameter RHS must be a declared name, not a
+  # stale reference that ferx would silently read as a covariate.
+  rhs_syms <- unlist(lapply(ir$indiv_params, function(p)
+    regmatches(p$rhs, gregexpr("[A-Za-z_][A-Za-z0-9_]*", p$rhs))[[1]]))
+  known <- c(nms, vapply(ir$indiv_params, function(p) p$lhs, ""), "ETA1", "exp")
+  expect_equal(setdiff(rhs_syms, known), character())
 })
