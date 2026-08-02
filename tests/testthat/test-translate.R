@@ -507,3 +507,24 @@ test_that("a data-read failure leaves the emitted .ferx machine-independent", {
   expect_true(any(grepl("could not read the dataset", with_csv$validation$warnings)))
   expect_false(any(grepl("validated against data", with_csv$validation$warnings)))
 })
+
+test_that("a data error caused by the model is not absorbed as a file problem", {
+  skip_if_not_installed("ferx")
+  skip_if_not_installed("nonmem2rx")
+  # E_DATA is ferx-core's catch-all for any read failure, including ones the
+  # translator causes: an emitted iov_column naming a column the dataset lacks
+  # aborts the read before the engine's own E_IOV_MISSING_OCC can fire. Absorbing
+  # that would return a clean bill of health for a model that cannot be fit.
+  ir <- suppressWarnings(rxui_to_ir(nonmem2rx::nonmem2rx(nm_path("1cpt_oral.ctl")),
+                                    source_format = "nonmem"))
+  ir$fit_options$iov_column <- "OCC"     # no OCC column in the dataset
+  data <- system.file("testdata", "1cpt_oral_concordance.csv",
+                      package = "ferxtranslate", mustWork = TRUE)
+  val <- .validate_ferx_text(emit_ferx(ir), data_file = data)
+
+  expect_false(isTRUE(val$ok))
+  expect_gt(length(val$unsupported), 0L)
+  expect_match(val$unsupported, "iov_column", all = FALSE)
+  # ...and it must not simultaneously claim the run was data-backed.
+  expect_false(any(grepl("validated against data", val$warnings)))
+})

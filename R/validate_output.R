@@ -79,7 +79,10 @@
   # Falling back on those would return a clean bill of health for a model that
   # cannot be fit, which is the opposite of this function's job.
   e_data     <- grepl("^E_DATA", as.character(diags$code))
-  model_key  <- grepl("iov_column|obs_cmt|CMT\\s*=", as.character(diags$message))
+  # Keys the translator itself emits into the model. `obs_cmt` is deliberately
+  # absent: no E_DATA message in ferx-core carries it, so listing it would be a
+  # dead alternation implying coverage that does not exist.
+  model_key  <- grepl("iov_column|\\[data\\]", as.character(diags$message))
   if (any(e_data) && !any(e_data & model_key)) {
     msg <- .one_line(diags$message[e_data][1])
     res2 <- tryCatch(utils::capture.output(out <- ferx::ferx_model_validate(tmp)),
@@ -102,8 +105,14 @@
     warn <- c(warn, paste0(
       "INFO  | validated without data -- covariate references and endpoint ",
       "coverage were NOT checked (an unknown name is read as a covariate)"))
-  } else if (!is.na(data_file)) {
+  } else if (!is.na(data_file) && !any(e_data)) {
     warn <- c(warn, paste0("INFO  | validated against data: ", data_file))
+  } else if (!is.na(data_file)) {
+    # An E_DATA the fallback deliberately did NOT absorb: the read still failed,
+    # so every data-dependent check was skipped. Saying "validated against data"
+    # here would contradict the error reported alongside it.
+    warn <- c(warn, paste0("INFO  | dataset ", data_file, " could not be read, ",
+                           "so no data-dependent check ran"))
   }
   # No third branch: after an E_DATA fallback data_file is NA and data_note
   # already says what happened. Claiming "validated against data: NA" alongside

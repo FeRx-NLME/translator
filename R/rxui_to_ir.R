@@ -78,7 +78,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                      vapply(kappa_out$kappas, function(k) k$name, ""),
                      vapply(sigma_out$sigmas, function(s) s$name, ""),
                      .covariate_names(lst, name_map))
-  expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  rename_why <- vector("list", length(theta_orig))
   for (round in 1:5) {
     # The linCmt passthrough invents an individual parameter for a fixed-effect
     # PK theta with no assignment of its own, so those names must be
@@ -89,13 +90,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       cur_lhs <- c(cur_lhs,
                    theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
                               !toupper(theta_orig) %in% toupper(cur_lhs)])
-    cur_theta <- vapply(theta_out$thetas, function(t) t$name, "")
     desh <- .deshadow_theta_names(
-      theta_names = cur_theta,
+      theta_names = vapply(theta_out$thetas, function(t) t$name, ""),
       indiv_names = cur_lhs,
       # States and covariates matter too: ferx resolves theta before both, so a
       # rename landing on either would reintroduce the shadowing on a new pair.
-      reserved    = c(reserved_base, cur_theta,
+      # (The current theta names need not be listed -- .deshadow_theta_names()
+      # already folds them into `taken`.)
+      reserved    = c(reserved_base,
                       vapply(expr_out$odes, function(o) o$state, ""))
     )
     if (!any(!is.na(desh$map))) break
@@ -103,27 +105,28 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       if (is.na(desh$map[i])) next
       theta_out$thetas[[i]]$name <- desh$map[i]
       name_map[[theta_out$raw_names[i]]] <- desh$map[i]
+      # Reasons accumulate; the message is written once, after the loop. A theta
+      # can be renamed in more than one round (renaming one can reveal another
+      # individual parameter), and reporting each hop would name intermediate
+      # values that appear nowhere in the output -- or worse, name something
+      # that ends up an individual parameter.
+      rename_why[[i]] <- unique(c(rename_why[[i]], desh$reasons[[i]]))
     }
-    warn     <- c(warn, desh$warnings)
     expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
   }
 
-  # The invariant this whole dance exists to establish. ferx reports nothing
-  # when it is violated, so assert it here rather than trust the loop.
-  final_clash <- intersect(
-    toupper(vapply(theta_out$thetas, function(t) t$name, "")),
-    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
-  if (length(final_clash) > 0) {
-    warn <- c(warn, paste0(
-      "ERROR | could not give theta(s) ", paste(final_clash, collapse = ", "),
-      " a name distinct from an individual parameter. In ferx a theta shadows ",
-      "an identically named individual parameter silently, so this model would ",
-      "fit with those parameters' individual definitions ignored."))
-    unsp <- c(unsp, paste0("theta/individual-parameter name collision: ",
-                           paste(final_clash, collapse = ", ")))
+  for (i in seq_along(rename_why)) {
+    if (length(rename_why[[i]]) == 0L) next
+    final <- theta_out$thetas[[i]]$name
+    if (any(rename_why[[i]] == "duplicate")) warn <- c(warn, paste0(
+      "WARN  | two thetas are named '", theta_orig[i], "' (duplicate $THETA ",
+      "label) -- renamed the later one to '", final, "'. ferx would have ",
+      "resolved every reference to the first and silently ignored the second."))
+    if (any(rename_why[[i]] == "shadow")) warn <- c(warn, paste0(
+      "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
+      "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
+      "an identically named individual parameter)"))
   }
-  warn      <- c(warn, expr_out$warnings)
-  unsp      <- c(unsp, expr_out$unsupported)
 
   structural <- expr_out$structural
   if (identical(structural$type, "ode")) {
@@ -195,6 +198,25 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                          pk_args = pk_out$pk_args)
     }
   }
+
+  # The invariant this whole dance exists to establish. ferx reports nothing
+  # when it is violated, so assert it rather than trust the loop -- and do it
+  # AFTER the linCmt passthrough, which appends to indiv_params and can add
+  # the very `V = V` self-shadow the passthrough comment says it prevents.
+  final_clash <- intersect(
+    toupper(vapply(theta_out$thetas, function(t) t$name, "")),
+    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
+  if (length(final_clash) > 0) {
+    warn <- c(warn, paste0(
+      "ERROR | could not give theta(s) ", paste(final_clash, collapse = ", "),
+      " a name distinct from an individual parameter. In ferx a theta shadows ",
+      "an identically named individual parameter silently, so this model would ",
+      "fit with those parameters' individual definitions ignored."))
+    unsp <- c(unsp, paste0("theta/individual-parameter name collision: ",
+                           paste(final_clash, collapse = ", ")))
+  }
+  warn      <- c(warn, expr_out$warnings)
+  unsp      <- c(unsp, expr_out$unsupported)
 
   if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
     warn <- c(warn, "ERROR | No structural model detected -- [structural_model] section omitted")
@@ -344,32 +366,28 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                                   reserved = character()) {
   n   <- length(theta_names)
   map <- rep(NA_character_, n)
-  if (n == 0L) return(list(map = map, warnings = character()))
+  if (n == 0L) return(list(map = map, reasons = list(), warnings = character()))
 
   shadowed <- toupper(theta_names) %in% toupper(indiv_names)
   duped    <- duplicated(toupper(theta_names))
   todo     <- which(shadowed | duped)
-  if (length(todo) == 0L) return(list(map = map, warnings = character()))
+  if (length(todo) == 0L)
+    return(list(map = map, reasons = vector("list", n), warnings = character()))
 
-  taken <- toupper(c(theta_names, indiv_names, reserved))
-  warn  <- character()
+  taken   <- toupper(c(theta_names, indiv_names, reserved))
+  reasons <- vector("list", n)
   for (i in todo) {
     new    <- .free_theta_name(theta_names[i], taken)
     taken  <- c(taken, toupper(new))
     map[i] <- new
-    # Both conditions are reported when both hold: they are different defects
+    # Both conditions are recorded when both hold: they are different defects
     # with different consequences, and the shadowing one is the whole point of
-    # this function.
-    if (duped[i]) warn <- c(warn, paste0(
-      "WARN  | two thetas are named '", theta_names[i], "' (duplicate $THETA ",
-      "label) -- renamed the later one to '", new, "'. ferx would have resolved ",
-      "every reference to the first and silently ignored the second."))
-    if (shadowed[i]) warn <- c(warn, paste0(
-      "INFO  | theta '", theta_names[i], "' shares a name with an individual ",
-      "parameter -- renamed to '", new, "' (in ferx a theta silently shadows ",
-      "an identically named individual parameter)"))
+    # this function. The caller turns these into prose once the final name is
+    # known, since a theta may be renamed again in a later round.
+    if (duped[i])    reasons[[i]] <- c(reasons[[i]], "duplicate")
+    if (shadowed[i]) reasons[[i]] <- c(reasons[[i]], "shadow")
   }
-  list(map = map, warnings = warn)
+  list(map = map, reasons = reasons, warnings = character())
 }
 
 # -- iniDf extractors ---------------------------------------------------------
@@ -741,7 +759,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       syms <- toupper(.collect_symbols(a$rhs_expr_norm))
       eps  <- intersect(syms, sigma_names)
       if (length(eps) > 0 && length(error_model) == 0) {
-        err  <- .classify_error_assignment(a$rhs_expr, sigma_names)
+        # The normalised form, same as the detection above. Handing the raw
+        # expression here made detection succeed and classification find no
+        # sigma, emitting `DV ~ proportional()`.
+        err  <- .classify_error_assignment(a$rhs_expr_norm, sigma_names)
         error_model <- c(error_model,
                          list(list(dv = "DV", type = err$type, params = err$params)))
       }
