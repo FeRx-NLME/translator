@@ -375,7 +375,7 @@ test_that("rxui_to_ir produces ferx_ir from mock 1-cpt oral", {
     quote(ka <- tvka),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst), source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst), source_format = "nlmixr2"))
 
   expect_s3_class(ir, "ferx_ir")
   expect_equal(ir$source_format, "nlmixr2")
@@ -406,7 +406,7 @@ test_that("rxui_to_ir ODE model sets structural type ode with states and obs_cmt
     ddt("central", quote(ka * depot / v - cl / v * central)),
     quote(DV ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_equal(ir$structural$type,   "ode")
   expect_equal(ir$structural$states, c("depot", "central"))
   expect_equal(ir$structural$obs_cmt, "central")
@@ -427,7 +427,7 @@ test_that("rxui_to_ir 3-cpt oral: translates to three_cpt_oral pk macro", {
     quote(ka <- tvka),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_equal(ir$structural$type,    "pk_macro")
   expect_equal(ir$structural$pk_call, "three_cpt_oral")
   expect_length(ir$unsupported, 0L)
@@ -444,7 +444,7 @@ test_that("rxui_to_ir IOV model sets iov_column in fit_options", {
     quote(cl <- tvcl * exp(eta.cl + kappa.cl)),
     quote(linCmt() ~ prop(err.prop))
   )
-  ir <- rxui_to_ir(mock_ui(ini, lst))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
   expect_length(ir$kappas, 1L)
   expect_equal(ir$fit_options$iov_column, "OCC")
 })
@@ -467,7 +467,7 @@ test_that("1-cpt oral nlmixr2 function converts correctly", {
     })
   }
   ui <- rxode2::rxode2(f_1cpt)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$pk_call, "one_cpt_oral")
   expect_length(ir$thetas, 3L)
 })
@@ -486,7 +486,7 @@ test_that("2-cpt oral nlmixr2 function with q infers two_cpt_oral", {
     })
   }
   ui <- rxode2::rxode2(f_2cpt)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$pk_call, "two_cpt_oral")
 })
 
@@ -503,7 +503,347 @@ test_that("ODE nlmixr2 model sets structural type ode", {
     })
   }
   ui <- rxode2::rxode2(f_ode)
-  ir <- rxui_to_ir(ui, source_format = "nlmixr2")
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nlmixr2"))
   expect_equal(ir$structural$type, "ode")
   expect_length(ir$odes, 2L)
+})
+
+# -- theta / individual-parameter de-shadowing --------------------------------
+
+test_that("no rename when theta and individual parameter names are disjoint", {
+  out <- .deshadow_theta_names(c("TVCL", "TVV"), c("CL", "V"))
+  expect_true(all(is.na(out$map)))
+  expect_length(out$warnings, 0L)
+})
+
+test_that("a theta colliding with an individual parameter is renamed to TV<name>", {
+  out <- .deshadow_theta_names(c("CL", "TVV"), c("CL", "V"))
+  expect_equal(out$map, c("TVCL", NA_character_))
+  expect_equal(out$reasons[[1]], "shadow")
+  expect_length(out$warnings, 0L)   # prose is written by the caller
+})
+
+test_that("collision detection is case-insensitive, as in ferx", {
+  out <- .deshadow_theta_names("cl", "CL")
+  expect_equal(out$map, "TVcl")
+})
+
+test_that("rename falls back when TV<name> is already taken", {
+  out <- .deshadow_theta_names(c("CL", "TVCL"), "CL")
+  expect_equal(out$map[1], "THETA_CL")
+  expect_true(is.na(out$map[2]))
+})
+
+test_that("rename falls back to a numeric suffix when both prefixes are taken", {
+  out <- .deshadow_theta_names(c("CL", "TVCL", "THETA_CL"), "CL")
+  expect_equal(out$map[1], "CL_1")
+})
+
+test_that("rename avoids omega, kappa and sigma names", {
+  out <- .deshadow_theta_names("CL", "CL", reserved = c("TVCL", "THETA_CL"))
+  expect_equal(out$map, "CL_1")
+})
+
+test_that("two colliding thetas do not rename onto each other", {
+  out <- .deshadow_theta_names(c("CL", "TVCL"), c("CL", "TVCL"))
+  # CL cannot take TVCL (already a theta), so it falls through to THETA_CL;
+  # TVCL takes TVTVCL. Ugly, but the names stay distinct, which is the point.
+  expect_equal(sort(out$map), c("THETA_CL", "TVTVCL"))
+  expect_length(unique(out$map), 2L)
+})
+
+test_that("duplicate theta names are made unique even without any shadowing", {
+  # ferx accepts duplicate theta names and silently resolves every reference to
+  # the first, leaving the second dead -- so this must be fixed, not just warned
+  # about. Nothing here shadows an individual parameter.
+  out <- .deshadow_theta_names(c("CL", "CL"), "NOTHING")
+  expect_true(is.na(out$map[1]))
+  expect_equal(out$map[2], "TVCL")
+  expect_equal(out$reasons[[2]], "duplicate")
+})
+
+test_that("a duplicated AND shadowing theta gets two distinct names", {
+  out <- .deshadow_theta_names(c("CL", "CL"), "CL")
+  expect_length(unique(out$map), 2L)
+  expect_false(anyNA(out$map))
+})
+
+test_that("rxui_to_ir de-shadows so downstream references reach the individual parameter", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              quote(v <- t.V),
+              quote(k20 <- cl/v),
+              ddt("central", quote(-k20 * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # Only CL is renamed: `v <- t.V` is a bare theta alias, so V never becomes an
+  # individual parameter and there is nothing for the theta V to shadow.
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "V"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["CL"]], "TVCL * exp(ETA1)")
+  # The reference that means the individual CL must stay bare, or ferx would
+  # resolve it to the theta and the IIV would be silently dropped.
+  expect_equal(rhs[["K20"]], "CL/V")
+})
+
+test_that("emitted theta names never collide with individual parameter names", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)), quote(v <- t.V),
+              ddt("central", quote(-cl/v * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  expect_length(
+    intersect(toupper(vapply(ir$thetas, function(t) t$name, "")),
+              toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))),
+    0L
+  )
+})
+
+test_that("every shadowed theta is renamed when all PK params carry an ETA", {
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L), eta_row("eta2", 0.02, 2L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              quote(v <- t.V * exp(eta2)),
+              quote(k20 <- cl/v),
+              ddt("central", quote(-k20 * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "TVV"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["V"]], "TVV * exp(ETA2)")
+  expect_equal(rhs[["K20"]], "CL/V")
+})
+
+test_that("a self-referential assignment resolves its RHS to the theta", {
+  skip_if_not_installed("rxode2")
+  # rxode2 lets a theta and the variable it defines share a name. The RHS `cl`
+  # means the theta; installing the LHS alias before normalising the RHS turned
+  # it into a self-reference that ferx rejects as a forward reference.
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; eta.cl ~ 0.09; prop.err <- 0.1 })
+    model({ cl <- cl * exp(eta.cl); v <- v; linCmt() ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(rhs[["CL"]], "TVCL * exp(ETA_CL)")
+  expect_false(any(vapply(ir$thetas, function(t) t$name, "") == "CL"))
+})
+
+test_that("duplicate $THETA labels do not leave a reference dangling", {
+  ini <- rbind(theta_row("theta1", 1), theta_row("theta2", 10),
+               eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL", "CL", NA_character_)
+  lst <- list(quote(cl <- theta1 * exp(eta1)), quote(v <- theta2),
+              ddt("central", quote(-cl/v * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_length(unique(nms), 2L)
+  # Every symbol on an individual-parameter RHS must be a declared name, not a
+  # stale reference that ferx would silently read as a covariate.
+  rhs_syms <- unlist(lapply(ir$indiv_params, function(p)
+    regmatches(p$rhs, gregexpr("[A-Za-z_][A-Za-z0-9_]*", p$rhs))[[1]]))
+  known <- c(nms, vapply(ir$indiv_params, function(p) p$lhs, ""), "ETA1", "exp")
+  expect_equal(setdiff(rhs_syms, known), character())
+})
+
+test_that("de-shadowing iterates: a rename must not create a new shadow", {
+  # Pass 3 filters a theta alias by comparing names (`V <- V` is dropped as a
+  # self-assignment), so renaming one theta can turn a filtered alias into an
+  # individual parameter that did not exist in the previous parse -- and the
+  # surviving theta then shadows it. Duplicate $THETA labels are how that
+  # happens: only one of the pair is renamed. A single pass left
+  # `theta V` beside `V = TVV`, with `CL = V * exp(ETA1)` reading the theta,
+  # and the engine reported ok = TRUE with no diagnostic.
+  ini <- rbind(theta_row("theta1", 1), theta_row("theta2", 10),
+               eta_row("eta1", 0.09, 1L))
+  ini$label <- c("V", "V", NA_character_)
+  lst <- list(quote(v <- theta2), quote(cl <- theta1 * exp(eta1)),
+              ddt("central", quote(-cl/v * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  th <- toupper(vapply(ir$thetas, function(t) t$name, ""))
+  ip <- toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_equal(intersect(th, ip), character())
+  expect_length(unique(th), length(th))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("an unresolvable name collision is reported, never emitted silently", {
+  # The fixpoint is bounded, so the invariant is asserted rather than assumed.
+  # Drive the real code path: with de-shadowing suppressed, pk_1cmt_oral.mod
+  # emits `theta CL` beside `CL = ...`, and the assertion must catch it.
+  # (The previous version of this test re-computed an intersection on a
+  # hand-built IR and asserted nothing about the package at all.)
+  skip_if_not_installed("nonmem2rx")
+  local_mocked_bindings(
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+      list(map = rep(NA_character_, length(theta_names)), warnings = character())
+  )
+  ir <- suppressWarnings(rxui_to_ir(nonmem2rx::nonmem2rx(nm_path("pk_1cmt_oral.mod")),
+                                    source_format = "nonmem"))
+  expect_match(ir$unsupported, "theta/individual-parameter name collision", all = FALSE)
+  expect_match(ir$warnings, "^ERROR \\| could not give theta", all = FALSE)
+  # ...and it must reach the artefact, not only the result object.
+  expect_match(emit_ferx(ir), "# WARNING: could not give theta")
+})
+
+test_that("covariate detection does not report iniDf names as covariates", {
+  # name_map keys are raw iniDf names (`t.CL`), and .norm() does not strip the
+  # prefix, so every theta reference was being reported as a covariate.
+  ini <- rbind(theta_row("t.TVCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TVCL * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  covs <- .covariate_names(lst, .norm_map_from_ini(ini))
+  expect_false(any(grepl("^T_|^E_", covs)))
+})
+
+test_that("an ODE intermediate is inlined with the binding it had when written", {
+  # Kills the mutation that reverts pass 2b to re-normalising the raw expression
+  # with the FINAL name_map. De-shadowing makes that map time-varying, so `frac`
+  # -- written when `cl` still meant the theta -- was inlined as the individual
+  # parameter. Both forms parse; ferx cannot tell them apart.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ frac <- central/cl; cl <- cl*exp(eta.cl); v <- v; ka <- ka
+            d/dt(depot)   = -ka*depot
+            d/dt(central) =  ka*depot - cl/v*central - frac
+            central ~ prop(prop.err) })
+  }
+  ir  <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+  rhs <- vapply(ir$odes, function(o) o$rhs, "")[2]
+  expect_match(rhs, "central/TVCL", fixed = TRUE)
+  expect_false(grepl("central/CL", rhs, fixed = TRUE))
+})
+
+test_that("a self-reference to a plain local resolves to the emitted name", {
+  # Kills the mutation that stops seeding rhs_map. .normalise_expr() leaves an
+  # unmapped symbol untouched, so `k <- k * 2` emitted a bare lower-case `k`
+  # that is declared nowhere and which ferx silently reads as a covariate.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- k * 2), quote(cl <- t.CL * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_false(any(grepl("\\bk\\b", rhs)))
+})
+
+test_that("a $THETA label that is not an identifier is rejected", {
+  # Kills the mutation reverting the label check to whitespace-only. `; CL/F` is
+  # the standard NONMEM label for apparent clearance; emitting `theta CL/F(...)`
+  # gives E_PARSE, and it diverges from the name references resolve to.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL/F", NA_character_)
+  lst <- list(quote(cl <- t.CL * exp(eta1)), ddt("central", quote(-cl * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_true(all(grepl("^[A-Za-z][A-Za-z0-9_]*$", nms)))
+})
+
+test_that("a rename avoids a covariate name, not just a parameter name", {
+  # ferx resolves theta before covariate too, so renaming onto a data column
+  # reintroduces the shadowing on a new pair, with no diagnostic from the
+  # engine. Driven end to end: asserting on .deshadow_theta_names() alone would
+  # not prove rxui_to_ir() actually passes the covariates in, which is the part
+  # that can break.
+  expect_equal(unname(.deshadow_theta_names("CL", "CL", reserved = "TVCL")$map),
+               "THETA_CL")
+  expect_equal(unname(.deshadow_theta_names("CL", "CL")$map), "TVCL")
+
+  # `TVCL` here is a data column: referenced, never assigned, not in iniDf.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CL", NA_character_)
+  lst <- list(quote(cl <- t.CL * (TVCL/70) * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  expect_true("TVCL" %in% .covariate_names(lst, .norm_map_from_ini(ini)))
+
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  nms <- vapply(ir$thetas, function(t) t$name, "")
+  expect_false("TVCL" %in% toupper(nms))
+})
+
+test_that("an aux var is inlined with the name it was normalised under", {
+  # Kills the pass-2 mutation. A dotted local uppercases to `C.2` while aux_vars
+  # holds `C_2`, so comparing raw symbols missed it: the var was not marked
+  # auxiliary and got emitted referencing a name the block never declares.
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.V", 10),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)), quote(v <- t.V),
+              quote(c.2 <- central/v), quote(eff <- c.2 * 3),
+              ddt("central", quote(-cl * central)),
+              ddt("resp",    quote(eff - resp)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false("EFF" %in% lhs)            # state-dependent: an ODE intermediate
+  rhs <- paste(vapply(ir$odes, function(o) o$rhs, ""), collapse = " ")
+  expect_false(grepl("C_2", rhs, fixed = TRUE))   # never referenced undeclared
+})
+
+test_that("an error model whose sigma arrives via a dotted name is classified", {
+  # Kills the pass-3 mutation. Detection and classification must both see the
+  # normalised expression; handing the raw one to the classifier made detection
+  # succeed and classification find no sigma, emitting `DV ~ proportional()`.
+  # The sigma must be one whose raw and normalised forms DIFFER, or the test
+  # cannot tell the two apart: `eps.1` uppercases to EPS.1 but normalises to
+  # EPS_1, which is the name the sigma is declared under.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps.1", 0.04))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              ddt("central", quote(-cl * central)),
+              quote(y <- central * (1 + eps.1)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  expect_length(ir$error_model, 1L)
+  expect_equal(ir$error_model[[1]]$type, "proportional")
+  expect_equal(ir$error_model[[1]]$params, "EPS_1")
+})
+
+test_that("a theta renamed more than once is reported by its final name only", {
+  # Renaming one theta can reveal another individual parameter, so a theta may
+  # be renamed again in a later round. Reporting each hop named intermediate
+  # values that appear nowhere in the output -- and in the aux-var-flip case the
+  # intermediate ends up as an individual PARAMETER, so the message pointed at
+  # the wrong kind of thing entirely.
+  ini <- rbind(theta_row("th1", 1), theta_row("th2", 2), theta_row("th3", 3),
+               eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CENTRAL", "CENTRAL", "CL", NA_character_)
+  lst <- list(quote(tvcl <- th2 * 2), quote(cl <- th3 * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  nms  <- vapply(ir$thetas, function(t) t$name, "")
+  lhs  <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  renames <- grep("renamed to", ir$warnings, value = TRUE)
+  # One line per theta, and every name it points at must be a theta in the
+  # output -- never an individual parameter, never a value that vanished.
+  expect_length(renames, length(unique(renames)))
+  for (w in renames) {
+    to <- sub(".*renamed to '([^']+)'.*", "\\1", w)
+    expect_true(to %in% nms)
+    expect_false(to %in% setdiff(lhs, nms))
+  }
+  expect_equal(intersect(toupper(nms), toupper(lhs)), character())
+})
+
+test_that("the invariant covers individual parameters the linCmt passthrough adds", {
+  # The passthrough appends to indiv_params AFTER the de-shadow loop, so an
+  # assertion placed before it could not see the `V = V` self-shadow the
+  # passthrough comment says it exists to prevent.
+  skip_if_not_installed("nonmem2rx")
+  local_mocked_bindings(
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+      list(map = rep(NA_character_, length(theta_names)),
+           reasons = vector("list", length(theta_names)), warnings = character())
+  )
+  ir <- suppressWarnings(rxui_to_ir(
+    nonmem2rx::nonmem2rx(nm_path("pk_1cmt_oral_ampsim.ctl")), source_format = "nonmem"))
+  clash <- intersect(toupper(vapply(ir$thetas, function(t) t$name, "")),
+                     toupper(vapply(ir$indiv_params, function(p) p$lhs, "")))
+  expect_gt(length(clash), 0L)                       # the corpus really does clash
+  expect_match(ir$unsupported, "name collision", all = FALSE)
+  for (nm in clash) expect_match(ir$unsupported, nm, all = FALSE)
 })

@@ -43,13 +43,28 @@ library(ferx)
 .translate_to_tmp <- function(model_name) {
   ctl <- system.file(file.path("testmodels/nonmem", model_name),
                      package = "ferxtranslate")
-  result <- nm_to_ferx(ctl)
+  result <- suppressWarnings(nm_to_ferx(ctl))
   ferx_file <- tempfile(fileext = ".ferx")
   writeLines(result$ferx_text, ferx_file)
   ferx_file
 }
 
 # Helper: bundled concordance dataset path
+# Named diagonal of the fitted omega. unlist() on a matrix is a no-op, so
+# positional indexing into it silently means "first and last cell", not the two
+# etas -- and drops ETA_CL entirely the moment a third eta is added.
+.omega_diag <- function(fit) {
+  om <- fit$omega
+  if (is.matrix(om)) {
+    d <- diag(om)
+    nm <- rownames(om) %||% colnames(om)
+    if (!is.null(nm)) names(d) <- nm
+    return(d)
+  }
+  unlist(om)
+}
+`%||%` <- function(a, b) if (is.null(a)) b else a
+
 .conc_data <- function(name) {
   system.file(file.path("testdata", name), package = "ferxtranslate")
 }
@@ -76,7 +91,7 @@ library(ferx)
 }
 
 # ---------------------------------------------------------------------------
-# 1-cpt oral (linCmt → one_cpt_oral pk macro)
+# 1-cpt oral (linCmt -> one_cpt_oral pk macro)
 #   True thetas: TVCL=0.134, TVV=8.1, TVKA=1.0
 #   Simulated with 100 subjects; large omega_KA (0.4) means KA needs wider
 #   tolerance -- TVCL and TVV are the more sensitive translation targets.
@@ -180,11 +195,14 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  ref_nm <- c(KA = ref$THETA1, CL = ref$THETA2, V = ref$THETA3)
+  # Theta names carry the TV prefix: the source names them KA/CL/V, which would
+  # shadow the identically named individual parameters, so the translator
+  # renames the thetas (see .deshadow_theta_names()).
+  ref_nm <- c(TVKA = ref$THETA1, TVCL = ref$THETA2, TVV = ref$THETA3)
   .report_deviations(fit$theta, ref_nm, "amp.sim 1-cpt oral thetas vs NONMEM reference")
-  expect_lt(abs(fit$theta["KA"] / ref_nm["KA"] - 1), 0.10, label = "KA vs amp.sim ref")
-  expect_lt(abs(fit$theta["CL"] / ref_nm["CL"] - 1), 0.10, label = "CL vs amp.sim ref")
-  expect_lt(abs(fit$theta["V"]  / ref_nm["V"]  - 1), 0.10, label = "V vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVKA"] / ref_nm["TVKA"] - 1), 0.10, label = "KA vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVCL"] / ref_nm["TVCL"] - 1), 0.10, label = "CL vs amp.sim ref")
+  expect_lt(abs(fit$theta["TVV"]  / ref_nm["TVV"]  - 1), 0.10, label = "V vs amp.sim ref")
 })
 
 # ---------------------------------------------------------------------------
@@ -197,55 +215,120 @@ test_that("amp.sim: 1-cpt oral thetas recover within 10% of NONMEM reference", {
 test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of truth", {
   ferx_file <- .translate_to_tmp("pk_1cmt_oral.mod")
   data_file  <- .conc_data("ode_1cpt_oral_concordance.csv")
+  # Start ETA_CL's variance away from the truth it must recover, so that
+  # "returned its initial value" and "recovered the truth" are distinguishable.
+  # BOTH etas, not just one: pk_1cmt_oral.mod declares $OMEGA .01/.02, which are
+  # also the simulation truth, so a dead parameter returning its untouched
+  # initial is indistinguishable from a live one recovering the truth.
+  start_ka <- 0.004
+  start_cl <- 0.005
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  txt <- sub("omega ETA_KA ~ [^\n]+", paste0("omega ETA_KA ~ ", start_ka), txt)
+  txt <- sub("omega ETA_CL ~ [^\n]+", paste0("omega ETA_CL ~ ", start_cl), txt)
+  expect_match(txt, paste0("omega ETA_KA ~ ", start_ka), fixed = TRUE)
+  expect_match(txt, paste0("omega ETA_CL ~ ", start_cl), fixed = TRUE)
+  writeLines(txt, ferx_file)
   fit <- ferx_fit(ferx_file, data_file,
                   method     = "focei",
                   covariance = FALSE,
                   verbose    = FALSE)
 
-  ref <- c(KA = 0.1, CL = 2.0, V = 1.0)
+  # KA and CL are renamed away from the individual parameters that would shadow
+  # them; V has no ETA, so it stays a plain theta. Before that fix, ETA_CL had
+  # no effect on this model at all -- K20 = CL/V read the theta.
+  ref <- c(TVKA = 0.1, TVCL = 2.0, V = 1.0)
   .report_deviations(fit$theta, ref, "ODE 1-cpt oral thetas")
-  expect_lt(abs(fit$theta["KA"] / ref["KA"] - 1), 0.15, label = "KA")
-  expect_lt(abs(fit$theta["CL"] / ref["CL"] - 1), 0.15, label = "CL")
-  expect_lt(abs(fit$theta["V"]  / ref["V"]  - 1), 0.15, label = "V")
+  expect_lt(abs(fit$theta["TVKA"] / ref["TVKA"] - 1), 0.15, label = "KA")
+  expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta["V"]    / ref["V"]    - 1), 0.15, label = "V")
+
+  # Regression guard for the theta-shadowing defect. CL reaches the ODEs only
+  # through the derived K20 = CL/V, which lives in [individual_parameters] --
+  # the one block where a theta named CL would shadow the individual CL. When it
+  # did, ETA_CL had no gradient and its omega came back untouched at its initial
+  # value.
+  #
+  # Asserting recovery of the truth is NOT enough on its own: the model's $OMEGA
+  # initials ARE the simulation truth (0.01, 0.02), so the broken case returns
+  # exactly the asserted value and passes with a deviation of ~1e-15. The fit is
+  # therefore started away from the truth, so only a live gradient can reach it.
+  om <- .omega_diag(fit)
+  expect_named(om, c("ETA_KA", "ETA_CL"))
+  expect_lt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.35, label = "omega ETA_KA")
+  expect_lt(abs(om[["ETA_CL"]] / 0.02 - 1), 0.35, label = "omega ETA_CL")
+  # A dead parameter cannot move off its start; a live one must.
+  expect_gt(abs(om[["ETA_KA"]] / start_ka - 1), 0.20, label = "omega ETA_KA moved")
+  expect_gt(abs(om[["ETA_CL"]] / start_cl - 1), 0.20, label = "omega ETA_CL moved")
 })
 
 # ===========================================================================
-# TRANSLATION GAP REPORT
-# Translates every bundled NONMEM test model and collects unsupported
-# features reported by the translator. The test always passes but prints
-# a gap table so the CI log is a living record of what still needs work.
-# Add a model to inst/testmodels/nonmem/ to extend coverage automatically.
+# ENGINE VALIDATION SWEEP (Tier 4)
+# Validates every bundled model's emitted .ferx with the engine and fails on
+# error-severity diagnostics. The engine-free half of this sweep -- translate
+# every model, fail on a crash, report $unsupported -- lives in
+# test-integration.R so it runs on every PR without a Rust build.
 # ===========================================================================
-test_that("translation gap report: unsupported features across all bundled models", {
+test_that("engine accepts the emitted .ferx for every bundled model", {
   skip_if_not_installed("nonmem2rx")
 
-  model_dir <- system.file("testmodels/nonmem", package = "ferxtranslate")
-  models    <- list.files(model_dir, pattern = "\\.(ctl|mod)$", full.names = TRUE)
+  models <- .bundled_nm_models()
+  expect_gt(length(models), 0L)
 
-  gaps <- do.call(rbind, lapply(models, function(path) {
-    result <- tryCatch(nm_to_ferx(path),
-                       error = function(e) conditionMessage(e))
-    # A translation crash is itself a gap worth surfacing -- record it as an
-    # ERROR row instead of silently dropping the model from the report (which
-    # would let a broken translator masquerade as "no gaps detected").
-    if (is.character(result))
-      return(data.frame(model = basename(path),
-                        gap   = paste0("ERROR: ", result),
-                        stringsAsFactors = FALSE))
-    if (length(result$unsupported) == 0) return(NULL)
+  rows <- lapply(models, function(path) {
+    result <- tryCatch(
+      suppressWarnings(suppressMessages(nm_to_ferx(path, strict = FALSE))),
+      error = function(e) NULL
+    )
+    if (is.null(result)) return(NULL)   # crashes are the integration test's job
+    diags <- result$validation$diagnostics
+    if (is.null(diags) || nrow(diags) == 0) return(NULL)
     data.frame(model    = basename(path),
-               gap      = result$unsupported,
+               severity = as.character(diags$severity),
+               finding  = paste0(diags$code, ": ", .one_line(diags$message)),
                stringsAsFactors = FALSE)
-  }))
+  })
+  found <- do.call(rbind, rows)
 
-  if (is.null(gaps) || nrow(gaps) == 0) {
-    message("translation gap report: no unsupported features detected across ",
-            length(models), " models")
+  if (is.null(found) || nrow(found) == 0) {
+    message("engine validation sweep: no diagnostics across ", length(models),
+            " models")
   } else {
-    message("\ntranslation gap report (", nrow(gaps), " gap(s) across ",
+    message("\nengine validation sweep (", nrow(found), " diagnostic(s) across ",
             length(models), " models):")
-    message(paste(capture.output(print(gaps, row.names = FALSE)), collapse = "\n"))
+    message(paste(capture.output(print(found, row.names = FALSE)), collapse = "\n"))
   }
 
-  succeed()
+  # Engine warnings are reported; engine errors fail. paste0() recycles
+  # zero-length arguments against the length-1 separator, so guard on nrow().
+  fatal <- character()
+  if (!is.null(found) && nrow(found) > 0) {
+    err <- found[which(found$severity == "error"), , drop = FALSE]
+    if (nrow(err) > 0) fatal <- paste0(err$model, " -- ", err$finding)
+  }
+  expect_equal(fatal, character())
+})
+
+test_that("the engine sweep reports non-error diagnostics without failing", {
+  # Kills the mutation removing the nrow(err) guard. paste0() recycles
+  # zero-length arguments against the length-1 separator, so a frame with only
+  # warning rows yielded " -- " instead of character(0) and failed the sweep on
+  # exactly the case it is meant to print. The live sweep cannot exercise this
+  # while the corpus is clean, so drive the expression directly.
+  fatal_for <- function(found) {
+    fatal <- character()
+    if (!is.null(found) && nrow(found) > 0) {
+      err <- found[which(found$severity == "error"), , drop = FALSE]
+      if (nrow(err) > 0) fatal <- paste0(err$model, " -- ", err$finding)
+    }
+    fatal
+  }
+  warn_only <- data.frame(model = "m.ctl", severity = "warning",
+                          finding = "W_X: something", stringsAsFactors = FALSE)
+  expect_equal(fatal_for(warn_only), character())
+  expect_equal(fatal_for(NULL), character())
+
+  mixed <- rbind(warn_only,
+                 data.frame(model = "n.ctl", severity = "error",
+                            finding = "E_PARSE: bad", stringsAsFactors = FALSE))
+  expect_equal(fatal_for(mixed), "n.ctl -- E_PARSE: bad")
 })

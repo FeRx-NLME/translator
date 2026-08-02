@@ -21,13 +21,22 @@ jobs:
       - uses: r-lib/actions/setup-r@v2
         with:
           use-public-rspm: true
-      # All declared deps are on CRAN/RSPM (cli, nonmem2rx, rxode2, knitr,
-      # monolix2rx, rmarkdown, testthat). ferx / amp.sim are NOT declared in
-      # DESCRIPTION and are installed only in the engine job, so this job needs
-      # no Rust toolchain or engine build. Concordance self-skips (ferx absent).
+      # ferx and amp.sim ARE declared in Suggests -- the package genuinely uses
+      # them optionally -- but neither is on CRAN/RSPM, so resolving soft deps
+      # here fails with "Can't find package called ferx". Install hard deps only
+      # and name the CRAN-available soft deps this job actually needs. This job
+      # therefore has no Rust toolchain and no engine build; the concordance
+      # tests and the emitted-output validation both self-skip with ferx absent
+      # (_R_CHECK_FORCE_SUGGESTS_ is false above, so the check tolerates it).
       - uses: r-lib/actions/setup-r-dependencies@v2
         with:
-          extra-packages: any::rcmdcheck
+          dependencies: '"hard"'
+          extra-packages: |
+            any::rcmdcheck
+            any::testthat
+            any::knitr
+            any::rmarkdown
+            any::monolix2rx
       - uses: r-lib/actions/check-r-package@v2
         with:
           args: 'c("--no-manual", "--ignore-vignettes")'
@@ -36,8 +45,9 @@ jobs:
 
   # Engine tier: build a PINNED ferx (Rust) and run the Tier-4 concordance tests
   # so a green check actually proves the engine accepts and fits the emitted
-  # .ferx. The pin (ferx-r@54f25d4 = ferx 0.1.5) must match the reference omegas
-  # asserted in tests/testthat/test-concordance.R -- bump both together.
+  # .ferx. The pin (ferx-r@731adc9 = ferx 0.2.0) must match the reference omegas
+  # asserted in tests/testthat/test-concordance.R and the bundled datasets in
+  # inst/testdata/ (regenerated with this engine) -- bump them together.
   engine:
     runs-on: ubuntu-latest
     env:
@@ -50,7 +60,7 @@ jobs:
           use-public-rspm: true
       - uses: dtolnay/rust-toolchain@stable
       # Install the translator's hard deps plus, EXPLICITLY, the pinned engine
-      # (ferx-r@54f25d4 = ferx 0.1.5) and the amp.sim benchmark. Installing them
+      # (ferx-r@731adc9 = ferx 0.2.0) and the amp.sim benchmark. Installing them
       # as explicit extra-packages (rather than via a DESCRIPTION Remote) lets
       # pak read each repo's own Package name, avoiding the repo-name vs
       # package-name mismatch (ferx-r -> ferx). The first run compiles the ferx
@@ -61,7 +71,12 @@ jobs:
           extra-packages: |
             any::devtools
             any::testthat
-            FeRx-NLME/ferx-r@54f25d4
+            FeRx-NLME/ferx-r@731adc9
             LeidenAdvancedPKPD/amp.sim
-      - name: Tier-4 concordance (pinned ferx)
-        run: Rscript -e 'devtools::test(filter = "concordance", stop_on_failure = TRUE)'
+      # The FULL suite, not filter="concordance". Four of the validation tests are
+      # skip_if_not_installed("ferx"), so a filtered run left the entire feature
+      # this package validates with -- strict abort, diagnostics mapping,
+      # $unsupported population -- executed by neither job. A filter also passes
+      # green on zero matched tests, so a file rename would silently disable this.
+      - name: Full suite incl. Tier-4 concordance (pinned ferx)
+        run: Rscript -e 'devtools::test(stop_on_failure = TRUE)'

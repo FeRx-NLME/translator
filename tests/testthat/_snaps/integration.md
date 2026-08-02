@@ -117,7 +117,8 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: ode_warfarin.ctl
-      # Warnings: 2 -- run result$warnings for details
+      # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -193,6 +194,7 @@
     Output
       # Translated from nonmem: iov.ctl
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: ETA 'KAPPA_CL' looks like inter-occasion variability but was emitted as IIV (nonmem2rx reads ETA-coded IOV as IIV). If this is IOV, declare it as 'kappa KAPPA_CL ~ ...' and set 'iov_column' in [fit_options].
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -263,6 +265,7 @@
     Output
       # Translated from nlmixr2: unknown
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'central', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -301,11 +304,12 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 2 -- run result$warnings for details
+      # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
-        theta KA(0.1, 0.0, 1e15)
-        theta CL(2.0, 0.0, 1e15)
+        theta TVKA(0.1, 0.0, 1e15)
+        theta TVCL(2.0, 0.0, 1e15)
         theta V(1.0, 0.0, 1e15)
       
         omega ETA_KA ~ 0.01
@@ -314,8 +318,8 @@
         sigma EPS1 ~ 0.316227766016838 (sd)
       
       [individual_parameters]
-        KA = KA * exp(ETA_KA)
-        CL = CL * exp(ETA_CL)
+        KA = TVKA * exp(ETA_KA)
+        CL = TVCL * exp(ETA_CL)
         K20 = CL/V
       
       [structural_model]
@@ -343,6 +347,7 @@
     Output
       # Translated from nonmem: pkpd_ir.mod
       # Warnings: 1 -- run result$warnings for details
+      # WARNING: obs_cmt could not be inferred -- guessed 'EFFECT', verify in [structural_model]
       
       [parameters]
         theta TH1(1.95, -1e15, 1e15)
@@ -399,9 +404,9 @@
       # Translated from nonmem: pk_1cmt_oral_ampsim.ctl
       
       [parameters]
-        theta KA(0.1, 0.0, 1e15)
-        theta CL(2.0, 0.0, 1e15)
-        theta V(1.0, 0.0, 1e15)
+        theta TVKA(0.1, 0.0, 1e15)
+        theta TVCL(2.0, 0.0, 1e15)
+        theta TVV(1.0, 0.0, 1e15)
       
         omega ETA_KA ~ 0.01
         omega ETA_CL ~ 0.02
@@ -409,9 +414,9 @@
         sigma EPS1 ~ 0.316227766016838 (sd)
       
       [individual_parameters]
-        KA = KA * exp(ETA_KA)
-        CL = CL * exp(ETA_CL)
-        V = V
+        KA = TVKA * exp(ETA_KA)
+        CL = TVCL * exp(ETA_CL)
+        V = TVV
       
       [structural_model]
         pk one_cpt_oral(cl=CL, v=V, ka=KA)

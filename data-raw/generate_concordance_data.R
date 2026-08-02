@@ -26,16 +26,49 @@ translate_tmp <- function(model_name) {
   ferx_file
 }
 
-# Helper: build a standard NONMEM-format dosing+observation template
+# Helper: overwrite one theta's initial value in emitted .ferx text.
+# The translator renames a theta that would shadow an identically named
+# individual parameter (KA -> TVKA and so on), so match either spelling and keep
+# whichever it actually emitted. Stops rather than silently leaving the value
+# untouched if neither matches -- a no-op sub() here would quietly simulate from
+# the wrong parameters.
+set_theta <- function(txt, nm, value) {
+  pat <- sprintf("theta (TV)?%s\\([^)]+\\)", nm)
+  hit <- regmatches(txt, regexpr(pat, txt))
+  if (length(hit) == 0L)
+    stop("no theta matching '", nm, "' in the emitted .ferx -- ",
+         "has the translator's theta naming changed?", call. = FALSE)
+  actual <- sub(sprintf("theta ((TV)?%s)\\(.*", nm), "\\1", hit)
+  sub(pat, sprintf("theta %s(%.10g, 0.0, 1e15)", actual, value), txt)
+}
+
+# Helper: substitute one line, refusing to no-op. Same reasoning as set_theta():
+# a sub() that silently fails to match would regenerate the dataset at the
+# model's own initial variances instead of the amp.sim NONMEM reference, and the
+# concordance test would then validate against the wrong variance structure and
+# still pass.
+set_line <- function(txt, pattern, replacement, what) {
+  if (!grepl(pattern, txt))
+    stop("no line matching '", what, "' in the emitted .ferx -- ",
+         "has the translator's naming changed?", call. = FALSE)
+  sub(pattern, replacement, txt)
+}
+
+# Helper: build a standard NONMEM-format dosing+observation template.
+# DV carries a numeric 0 placeholder, not ".". ferx 0.2.0 treats a "." DV as
+# missing and drops the row from the ferx_simulate() result, so a "." template
+# yields zero simulated rows. The placeholder does not reach the output: DV is
+# overwritten with the simulated value on observation rows and restored to "."
+# on dose rows by simulate_dataset() below.
 nm_template <- function(n_subj, dose, cmt, obs_times) {
   rows <- vector("list", n_subj * (length(obs_times) + 1))
   i <- 1L
   for (id in seq_len(n_subj)) {
-    rows[[i]] <- data.frame(ID=id, TIME=0, DV=".", EVID=1L, AMT=dose,
+    rows[[i]] <- data.frame(ID=id, TIME=0, DV=0, EVID=1L, AMT=dose,
                             CMT=cmt, MDV=1L)
     i <- i + 1L
     for (t in obs_times) {
-      rows[[i]] <- data.frame(ID=id, TIME=t, DV=".", EVID=0L, AMT=".",
+      rows[[i]] <- data.frame(ID=id, TIME=t, DV=0, EVID=0L, AMT=".",
                               CMT=cmt, MDV=0L)
       i <- i + 1L
     }
@@ -43,41 +76,46 @@ nm_template <- function(n_subj, dose, cmt, obs_times) {
   do.call(rbind, rows)
 }
 
-# ---- 1-cpt oral (100 subjects, proportional error) -------------------------
-ferx1 <- translate_tmp("1cpt_oral.ctl")
-tmpl1 <- nm_template(100, dose=1.0, cmt=1L,
-                     obs_times=c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24))
-tf1 <- tempfile(fileext = ".csv")
-write.csv(tmpl1, tf1, row.names=FALSE, quote=FALSE)
-sim1 <- ferx_simulate(ferx1, tf1, n_sim=1L, seed=123L)
+# Helper: simulate observations for one template and write the dataset.
+# Asserts that ferx returned one simulated value per observation row -- the
+# silent failure mode this replaces was ferx_simulate() returning zero rows,
+# which surfaced only as an obscure recycling error further down.
+simulate_dataset <- function(ferx_file, tmpl, seed, out_path) {
+  tf <- tempfile(fileext = ".csv")
+  write.csv(tmpl, tf, row.names = FALSE, quote = FALSE)
+  sim <- ferx_simulate(ferx_file, tf, n_sim = 1L, seed = seed)
 
-obs1 <- tmpl1[tmpl1$EVID == 0, ]
-obs1$DV <- round(sim1$DV_SIM, 6)
-final1 <- rbind(tmpl1[tmpl1$EVID == 1, ], obs1)
-final1 <- final1[order(final1$ID, final1$TIME), ]
-rownames(final1) <- NULL
-write.csv(final1, "inst/testdata/1cpt_oral_concordance.csv",
-          row.names=FALSE, quote=FALSE)
-message("Written inst/testdata/1cpt_oral_concordance.csv (",
-        nrow(final1), " rows, ", length(unique(final1$ID)), " subjects)")
+  obs <- tmpl[tmpl$EVID == 0, ]
+  if (nrow(sim) != nrow(obs))
+    stop("ferx_simulate() returned ", nrow(sim), " rows for ", nrow(obs),
+         " observation rows (", basename(out_path), ") -- the simulation did ",
+         "not run over the template as expected", call. = FALSE)
+
+  obs$DV <- round(sim$DV_SIM, 6)
+  final <- rbind(tmpl[tmpl$EVID == 1, ], obs)
+  final <- final[order(final$ID, final$TIME), ]
+  # Dose rows carry no observation; NONMEM convention writes them as ".".
+  final$DV[final$EVID == 1] <- "."
+  rownames(final) <- NULL
+  write.csv(final, out_path, row.names = FALSE, quote = FALSE)
+  message("Written ", out_path, " (", nrow(final), " rows, ",
+          length(unique(final$ID)), " subjects)")
+  invisible(final)
+}
+
+# ---- 1-cpt oral (100 subjects, proportional error) -------------------------
+simulate_dataset(
+  translate_tmp("1cpt_oral.ctl"),
+  nm_template(100, dose = 1.0, cmt = 1L,
+              obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24)),
+  seed = 123L, out_path = "inst/testdata/1cpt_oral_concordance.csv")
 
 # ---- 2-cpt IV bolus (50 subjects, proportional error) ----------------------
-ferx2 <- translate_tmp("2cpt_iv.ctl")
-tmpl2 <- nm_template(50, dose=100.0, cmt=1L,
-                     obs_times=c(0.1, 0.25, 0.5, 1, 2, 4, 6, 8, 12, 24, 36, 48))
-tf2 <- tempfile(fileext = ".csv")
-write.csv(tmpl2, tf2, row.names=FALSE, quote=FALSE)
-sim2 <- ferx_simulate(ferx2, tf2, n_sim=1L, seed=456L)
-
-obs2 <- tmpl2[tmpl2$EVID == 0, ]
-obs2$DV <- round(sim2$DV_SIM, 6)
-final2 <- rbind(tmpl2[tmpl2$EVID == 1, ], obs2)
-final2 <- final2[order(final2$ID, final2$TIME), ]
-rownames(final2) <- NULL
-write.csv(final2, "inst/testdata/2cpt_iv_concordance.csv",
-          row.names=FALSE, quote=FALSE)
-message("Written inst/testdata/2cpt_iv_concordance.csv (",
-        nrow(final2), " rows, ", length(unique(final2$ID)), " subjects)")
+simulate_dataset(
+  translate_tmp("2cpt_iv.ctl"),
+  nm_template(50, dose = 100.0, cmt = 1L,
+              obs_times = c(0.1, 0.25, 0.5, 1, 2, 4, 6, 8, 12, 24, 36, 48)),
+  seed = 456L, out_path = "inst/testdata/2cpt_iv_concordance.csv")
 
 # ---- amp.sim 1-cpt oral (50 subjects, reference params from NONMEM .ext) ---
 # Requires amp.sim (GitHub: LeidenAdvancedPKPD/amp.sim).
@@ -93,36 +131,24 @@ if (requireNamespace("amp.sim", quietly = TRUE)) {
   ferx3_base <- translate_tmp("pk_1cmt_oral_ampsim.ctl")
   ferx3_txt  <- readLines(ferx3_base)
   ferx3_txt  <- paste(ferx3_txt, collapse = "\n")
-  ferx3_txt  <- sub("theta KA[(][^)]+[)]",
-                    sprintf("theta KA(%.10g, 0.0, 1e15)", ref$THETA1), ferx3_txt)
-  ferx3_txt  <- sub("theta CL[(][^)]+[)]",
-                    sprintf("theta CL(%.10g, 0.0, 1e15)", ref$THETA2), ferx3_txt)
-  ferx3_txt  <- sub("theta V[(][^)]+[)]",
-                    sprintf("theta V(%.10g, 0.0, 1e15)",  ref$THETA3), ferx3_txt)
-  ferx3_txt  <- sub("omega ETA_KA ~ [^\n]+",
-                    sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), ferx3_txt)
-  ferx3_txt  <- sub("omega ETA_CL ~ [^\n]+",
-                    sprintf("omega ETA_CL ~ %.10g", ref$OMEGA.2.2.), ferx3_txt)
-  ferx3_txt  <- sub("sigma EPS1 ~ [^\n]+",
-                    sprintf("sigma EPS1 ~ %.10g (sd)", sqrt(ref$SIGMA.1.1.)), ferx3_txt)
+  ferx3_txt  <- set_theta(ferx3_txt, "KA", ref$THETA1)
+  ferx3_txt  <- set_theta(ferx3_txt, "CL", ref$THETA2)
+  ferx3_txt  <- set_theta(ferx3_txt, "V",  ref$THETA3)
+  ferx3_txt  <- set_line(ferx3_txt, "omega ETA_KA ~ [^\n]+",
+                         sprintf("omega ETA_KA ~ %.10g", ref$OMEGA.1.1.), "omega ETA_KA")
+  ferx3_txt  <- set_line(ferx3_txt, "omega ETA_CL ~ [^\n]+",
+                         sprintf("omega ETA_CL ~ %.10g", ref$OMEGA.2.2.), "omega ETA_CL")
+  ferx3_txt  <- set_line(ferx3_txt, "sigma EPS1 ~ [^\n]+",
+                         sprintf("sigma EPS1 ~ %.10g (sd)", sqrt(ref$SIGMA.1.1.)),
+                         "sigma EPS1")
   ferx3_sim  <- tempfile(fileext = ".ferx")
   writeLines(ferx3_txt, ferx3_sim)
 
-  tmpl3 <- nm_template(50, dose = 4.0, cmt = 1L,
-                       obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24))
-  tf3   <- tempfile(fileext = ".csv")
-  write.csv(tmpl3, tf3, row.names = FALSE, quote = FALSE)
-  sim3  <- ferx_simulate(ferx3_sim, tf3, n_sim = 1L, seed = 789L)
-
-  obs3   <- tmpl3[tmpl3$EVID == 0, ]
-  obs3$DV <- round(sim3$DV_SIM, 6)
-  final3 <- rbind(tmpl3[tmpl3$EVID == 1, ], obs3)
-  final3 <- final3[order(final3$ID, final3$TIME), ]
-  rownames(final3) <- NULL
-  write.csv(final3, "inst/testdata/ampsim_1cpt_oral_concordance.csv",
-            row.names = FALSE, quote = FALSE)
-  message("Written inst/testdata/ampsim_1cpt_oral_concordance.csv (",
-          nrow(final3), " rows, ", length(unique(final3$ID)), " subjects)")
+  simulate_dataset(
+    ferx3_sim,
+    nm_template(50, dose = 4.0, cmt = 1L,
+                obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24)),
+    seed = 789L, out_path = "inst/testdata/ampsim_1cpt_oral_concordance.csv")
 } else {
   message("amp.sim not installed -- skipping ampsim_1cpt_oral_concordance.csv")
 }
@@ -130,19 +156,8 @@ if (requireNamespace("amp.sim", quietly = TRUE)) {
 # ---- ODE 1-cpt oral with S2=V scaling (50 subjects, proportional error) ----
 # Tests that [scaling] obs_scale=V is correctly applied: data are concentrations,
 # ODE predicts amounts, ferx divides by V before comparing to DV.
-ferx_ode <- translate_tmp("pk_1cmt_oral.mod")
-tmpl_ode <- nm_template(50, dose=4.0, cmt=1L,
-                        obs_times=c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24))
-tf_ode <- tempfile(fileext=".csv")
-write.csv(tmpl_ode, tf_ode, row.names=FALSE, quote=FALSE)
-sim_ode <- ferx_simulate(ferx_ode, tf_ode, n_sim=1L, seed=321L)
-
-obs_ode <- tmpl_ode[tmpl_ode$EVID == 0, ]
-obs_ode$DV <- round(sim_ode$DV_SIM, 6)
-final_ode <- rbind(tmpl_ode[tmpl_ode$EVID == 1, ], obs_ode)
-final_ode <- final_ode[order(final_ode$ID, final_ode$TIME), ]
-rownames(final_ode) <- NULL
-write.csv(final_ode, "inst/testdata/ode_1cpt_oral_concordance.csv",
-          row.names=FALSE, quote=FALSE)
-message("Written inst/testdata/ode_1cpt_oral_concordance.csv (",
-        nrow(final_ode), " rows, ", length(unique(final_ode$ID)), " subjects)")
+simulate_dataset(
+  translate_tmp("pk_1cmt_oral.mod"),
+  nm_template(50, dose = 4.0, cmt = 1L,
+              obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24)),
+  seed = 321L, out_path = "inst/testdata/ode_1cpt_oral_concordance.csv")
