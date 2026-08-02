@@ -213,6 +213,17 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   expect_lt(abs(fit$theta["TVKA"] / ref["TVKA"] - 1), 0.15, label = "KA")
   expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.15, label = "CL")
   expect_lt(abs(fit$theta["V"]    / ref["V"]    - 1), 0.15, label = "V")
+
+  # Regression guard for the theta-shadowing defect. CL reaches the ODEs only
+  # through the derived K20 = CL/V, which lives in [individual_parameters] --
+  # the one block where a theta named CL would shadow the individual CL. When it
+  # did, ETA_CL had no gradient and its omega came back as exactly its 0.02
+  # initial value. Assert recovery of the simulation truth (0.01, 0.02) instead,
+  # which is only possible if the individual CL is what the ODE actually sees.
+  omega <- unlist(fit$omega)
+  omega <- omega[c(1L, length(omega))]   # diagonal of the 2x2: ETA_KA, ETA_CL
+  expect_lt(abs(omega[1] / 0.01 - 1), 0.30, label = "omega ETA_KA")
+  expect_lt(abs(omega[2] / 0.02 - 1), 0.30, label = "omega ETA_CL")
 })
 
 # ===========================================================================
