@@ -847,3 +847,183 @@ test_that("the invariant covers individual parameters the linCmt passthrough add
   expect_match(ir$unsupported, "name collision", all = FALSE)
   for (nm in clash) expect_match(ir$unsupported, nm, all = FALSE)
 })
+
+# -- identifier sanitisation --------------------------------------------------
+
+test_that(".ferx_ident maps any name onto the ferx grammar", {
+  # Illegal characters become underscores.
+  expect_equal(.ferx_ident("c.RTOT"), "c_RTOT")
+  expect_equal(.ferx_ident("A-B+C"), "A_B_C")
+  expect_equal(.ferx_ident("has space"), "has_space")
+  # Case is preserved -- .norm() is where uppercasing happens.
+  expect_equal(.ferx_ident("central"), "central")
+  # A leading digit cannot be substituted away, and an empty name has nothing
+  # to substitute; both need a prefix instead.
+  expect_equal(.ferx_ident("2CPT"), "X_2CPT")
+  expect_equal(.ferx_ident(""), "X")
+  # Whatever goes in, a legal identifier comes out.
+  for (nm in c("c.RTOT", "A-B+C", "2CPT", "", "_x", "9", "..", "a b c"))
+    expect_true(.is_ferx_ident(.ferx_ident(nm)), info = nm)
+})
+
+test_that(".is_ferx_ident matches the ferx grammar", {
+  expect_true(all(.is_ferx_ident(c("A", "_a", "A1", "a_B_9"))))
+  expect_false(any(.is_ferx_ident(c("c.RTOT", "1A", "", "a-b", "a b"))))
+})
+
+test_that(".norm is .ferx_ident plus the uppercase convention", {
+  # The old .norm() substituted only the dot. Anything it used to do it must
+  # still do, or every emitted name changes at once.
+  expect_equal(.norm("t.CL"), "T_CL")
+  expect_equal(.norm("central"), "CENTRAL")
+  expect_equal(.norm("c.RTOT"), "C_RTOT")
+  # ...and it now also covers the characters the dot rule missed.
+  expect_equal(.norm("2CPT"), "X_2CPT")
+})
+
+test_that("a dotted state name is renamed at every reference site", {
+  # nonmem2rx prefixes `c.` onto a compartment whose name collides with a
+  # variable, and the result appeared in four places: obs_cmt=, states=[...],
+  # the d/dt target, and inlined into other ODE right-hand sides. Renaming the
+  # declaration alone leaves the references pointing at nothing.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("CENT", quote(-kel * CENT - `c.RTOT`)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$structural$states, c("CENT", "c_RTOT"))
+  states <- vapply(ir$odes, function(o) o$state, "")
+  expect_equal(states, c("CENT", "c_RTOT"))
+  # The reference inlined into the OTHER state's RHS is the whole point.
+  expect_match(ir$odes[[1]]$rhs, "c_RTOT", fixed = TRUE)
+  # Nothing anywhere in the emitted text may still carry the dot.
+  expect_false(grepl("c.RTOT", emit_ferx(ir), fixed = TRUE))
+  expect_match(ir$warnings, "^INFO  \\| state 'c\\.RTOT' is not a legal ferx",
+               all = FALSE)
+})
+
+test_that("obs_cmt taken from ui$central is renamed with the state", {
+  # `ui$central` is a separate, RAW channel for the observed compartment -- it
+  # bypasses the odes entirely, so it needs its own translation. Every other
+  # test reaches obs_cmt through the tail(state_names) guess, which is already
+  # sanitised, leaving this branch unexercised: a mutation that dropped the
+  # lookup emitted `obs_cmt=c.RTOT` beside `states=[c_RTOT]` and the whole suite
+  # still passed.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  ui  <- c(mock_ui(ini, lst), list(central = "c.RTOT"))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(ir$structural$obs_cmt, "c_RTOT")
+  # And no guess was needed, so the guess warning must be absent -- otherwise
+  # this could pass by falling through to the fallback path.
+  expect_length(grep("obs_cmt could not be inferred", ir$warnings), 0L)
+  expect_false(grepl("c.RTOT", emit_ferx(ir), fixed = TRUE))
+})
+
+test_that("a state that is already legal is left alone", {
+  # A rename is a user-visible change to a name they index by. Only names that
+  # must change may change -- `depot`/`central` are legal ferx identifiers and
+  # uppercasing them buys nothing.
+  ini <- rbind(theta_row("t.KA", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(ka <- t.KA * exp(eta1)),
+              ddt("depot", quote(-ka * depot)),
+              ddt("central", quote(ka * depot)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), c("depot", "central"))
+  expect_length(grep("state '", ir$warnings), 0L)
+})
+
+test_that("two states that sanitise to the same name are disambiguated", {
+  # `.ferx_ident()` is not injective: distinct illegal names can collapse onto
+  # one legal one, which would silently merge two compartments.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)),
+              ddt("A.B", quote(-k * `A.B`)),
+              ddt("A-B", quote(-k * `A-B`)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  states <- vapply(ir$odes, function(o) o$state, "")
+  expect_length(unique(states), 2L)
+  expect_true(all(.is_ferx_ident(states)))
+  # Each RHS must reference its OWN state, not the one it collided with.
+  for (o in ir$odes) expect_match(o$rhs, o$state, fixed = TRUE)
+})
+
+test_that("a state colliding with an eta name is renamed, not the eta", {
+  ini <- rbind(theta_row("t.K", 1), eta_row("ETA1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(ETA1)), ddt("eta1", quote(-k * eta1)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # The eta keeps its name; the state gives way. Critically, the eta reference
+  # in [individual_parameters] must NOT have been rewritten along with it.
+  expect_equal(vapply(ir$omegas, function(o) o$names, ""), "ETA1")
+  expect_match(ir$indiv_params[[1]]$rhs, "exp(ETA1)", fixed = TRUE)
+  expect_false(toupper(ir$odes[[1]]$state) == "ETA1")
+})
+
+test_that("state renaming does not rename thetas -- one owner per collision", {
+  # `.deshadow_theta_names()` is the single owner of theta naming (CLAUDE.md).
+  # Reserving theta names in the state sanitiser too made two owners for one
+  # collision: a state `central` beside a theta labelled CENTRAL got renamed to
+  # `central_1` while the theta was independently renamed, churning both names.
+  ini <- rbind(theta_row("th1", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CENTRAL", NA_character_)
+  lst <- list(quote(cl <- th1 * exp(eta1)), ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), "central")
+  expect_length(grep("state 'central'", ir$warnings), 0L)
+})
+
+test_that("a covariate whose name is illegal is reported, never renamed", {
+  # ferx matches covariates to data columns by exact name, case included, so a
+  # rename cannot fix an illegal covariate -- it only moves the failure from
+  # E_PARSE to E_MISSING_COVARIATE. It has to be said out loud instead.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * `WT.BASE` * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| covariate reference", all = FALSE)
+  expect_match(ir$unsupported, "covariate name is not a legal ferx identifier",
+               all = FALSE)
+  expect_match(ir$unsupported, "WT.BASE", all = FALSE, fixed = TRUE)
+  # It must reach the artefact, not only the result object.
+  expect_match(emit_ferx(ir), "# WARNING: covariate reference")
+})
+
+test_that("covariate case is preserved exactly as written", {
+  # ferx matches data columns case-SENSITIVELY (ferx-core datareader.rs uses
+  # case-insensitive matching only for the standard columns). nonmem2rx keeps
+  # the $INPUT case for data items while lowercasing assigned variables, and a
+  # covariate is absent from name_map so .normalise_expr() leaves it alone --
+  # which is how this works today. Nothing tested it, so a blanket uppercase
+  # pass over emitted symbols would have broken every covariate silently.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * (Wt/70) * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$indiv_params[[1]]$rhs, "Wt/70", fixed = TRUE)
+  expect_false(grepl("WT/70", ir$indiv_params[[1]]$rhs, fixed = TRUE))
+  # A legal covariate is not reported as a problem.
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+})
+
+test_that("a state whose source name is also a parameter key is refused loudly", {
+  # Writing that rename into name_map would rewrite the PARAMETER's references
+  # along with the state's, because both deparse to the same symbol. Refusing
+  # is the only safe answer, and it must be loud.
+  ini <- rbind(theta_row("t.K", 1), eta_row("ETA_X", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(ETA_X)), ddt("ETA_X", quote(-k * ETA_X)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| state 'ETA_X' has the same source name",
+               all = FALSE)
+  expect_match(ir$unsupported, "state/parameter source-name collision",
+               all = FALSE)
+})

@@ -30,6 +30,28 @@
 
 ## Bug fixes
 
+* Emitted identifiers are now sanitised to the ferx grammar
+  (`[A-Za-z_][A-Za-z0-9_]*`). ODE state names never went through normalisation,
+  so a compartment that `nonmem2rx` had renamed to `c.RTOT` -- which it does
+  whenever a `$MODEL` compartment collides with a variable name -- made the whole
+  file unparseable (issue #6, defect 1). The rename is applied to the
+  declaration and to every reference at once (`obs_cmt=`, `states=[...]`, the
+  `d/dt` target, and the state inlined into other ODE right-hand sides), because
+  renaming the declaration alone leaves the references pointing at nothing.
+  Only names that must change do change: an already-legal state keeps its name
+  and its case.
+
+* Covariate references are deliberately left alone, and an illegal one is now
+  reported as an `ERROR` rather than renamed. ferx matches covariates to data
+  columns by exact name, case included, so sanitising one would move the failure
+  from `E_PARSE` to `E_MISSING_COVARIATE` at fit time instead of fixing it. The
+  dataset column has to be renamed. A regression test pins the existing
+  case-preserving behaviour, which nothing previously covered.
+
+* `inst/testmodels/nonmem/dotted_state.ctl` joins the corpus, and the sweep in
+  `test-integration.R` now asserts that every emitted identifier is legal.
+  Without such a model in the corpus that assertion would hold vacuously.
+
 * The concordance data generator (`data-raw/generate_concordance_data.R`)
   produced empty datasets against `ferx` 0.2.0: its templates wrote `DV = "."`,
   which the engine reads as "no observation" and skips. It now uses a numeric
