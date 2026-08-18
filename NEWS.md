@@ -48,9 +48,41 @@
   dataset column has to be renamed. A regression test pins the existing
   case-preserving behaviour, which nothing previously covered.
 
+* The ODE state rename is resolved through a dedicated state map rather than the
+  general name map. The name map holds every parameter alias and grows as the
+  model block is walked, which made the emitted state name something nobody
+  decided: a state was renamed to a *parameter's* name whenever its raw spelling
+  happened to be an `iniDf` key (`d/dt(CENT)` became `d/dt(VC)`), and an
+  unrelated assignment written above rather than below a `d/dt` line changed
+  whether the state was renamed at all. `obs_cmt` is resolved the same way; it
+  previously read a different map from the `d/dt` target, so the two could
+  disagree and emit an `obs_cmt` naming no declared state.
+
+* The state sanitiser reserves every assignment target, covariate and reserved
+  ODE name, not just the random-effect names. A sanitised state landing on an
+  assignment target was absorbed into the auxiliary-variable set, dropped from
+  `[individual_parameters]`, and its references re-resolved to the state --
+  turning `d/dt(A.B) = -A_B * A.B` into `d/dt(A_B) = -A_B * A_B`, the amount
+  squared, with the rate constant and its IIV gone. ferx validates that output
+  clean, so nothing downstream would have caught it.
+
+* The identifier-legality check runs on every symbol emitted verbatim, not on
+  the covariate set. Covariates are classified by *normalised* name, so an
+  illegal raw symbol whose normalised form matched a known name was filtered out
+  before the check saw it, while still being emitted verbatim.
+
+* Smaller fixes from the same review: `ui$central` is length-guarded (a
+  zero-length or multi-element value aborted the translation); `.ferx_ident()`
+  maps `NA` to a legal identifier rather than passing it through; `.ddt_state()`
+  takes the first element, so a non-symbol `d/dt()` argument cannot invent a
+  second state; and the two hand-inlined copies of the old normalisation rule
+  (in `[scaling]` matching and in `.extract_sigmas()`) now call `.norm()`.
+
 * `inst/testmodels/nonmem/dotted_state.ctl` joins the corpus, and the sweep in
-  `test-integration.R` now asserts that every emitted identifier is legal.
-  Without such a model in the corpus that assertion would hold vacuously.
+  `test-integration.R` now tokenises the *emitted text* rather than listing IR
+  declaration fields. An illegal name parses where it is declared and fails only
+  where it is referenced, so a declaration-only check inspected the half that
+  works -- it passed cleanly on a file the engine rejects.
 
 * The concordance data generator (`data-raw/generate_concordance_data.R`)
   produced empty datasets against `ferx` 0.2.0: its templates wrote `DV = "."`,

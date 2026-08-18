@@ -68,19 +68,56 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # names so no theta is renamed onto one, and it must reserve the FINAL name;
   # and the odes it inspects are parsed from `name_map`, so the rename has to be
   # in the map by then or the two disagree about what the states are called.
-  # Deliberately NOT the theta names. `.deshadow_theta_names()` is the single
-  # owner of theta naming (CLAUDE.md), and it already reserves state names when
-  # it picks a replacement -- so a theta/state clash is resolved by renaming the
-  # theta. Reserving thetas here as well makes two owners for one collision and
-  # they rename against each other: a state `central` beside a theta labelled
-  # CENTRAL became `central_1` AND the theta became TVCENTRAL, churning a name
-  # for nothing. Individual-parameter clashes are likewise out of scope here --
-  # those names are not known until the model block is parsed, and the `$DES`
-  # reassigns-a-`$PK`-name case belongs with the ordered-statement work.
-  state_taken <- c(toupper(unlist(lapply(omega_out$omegas, function(o) o$names))),
-                   toupper(vapply(kappa_out$kappas, function(k) k$name, "")),
-                   toupper(vapply(sigma_out$sigmas, function(s) s$name, "")))
-  state_out <- .sanitise_state_names(lst, taken = state_taken)
+  # Deliberately NOT the theta names, and the reason is narrower than it looks.
+  # `.deshadow_theta_names()` does NOT resolve a theta/state clash -- it renames
+  # only a theta that shadows an individual parameter or duplicates another
+  # theta, and its `reserved` argument merely stops a replacement landing on a
+  # state. Nothing renames a theta that simply shares a state's name.
+  #
+  # That is tolerable because ferx accepts the collision: a model with
+  # `theta CENT` beside `states=[CENT]` validates clean, exact match or
+  # case-differing (measured against ferx 0.2.0). Thetas are out of scope in
+  # `[odes]`, so the state is what a d/dt right-hand side resolves to. Reserving
+  # thetas here would rename states for no gain.
+  #
+  # It stops being tolerable at phase 4. `init()` and `[scaling]` DO have thetas
+  # in scope, so once initial conditions are emitted a state sharing a theta's
+  # name is silently shadowed there -- the defect-14 failure mode on a new pair.
+  # Whoever adds init() owns that check.
+  #
+  # Shared with `reserved_base` below: the state sanitiser and the theta
+  # de-shadower must agree about which random-effect names are spoken for, and
+  # two hand-maintained copies of this list would silently drift apart the first
+  # time a fourth kind of random effect is added.
+  random_names <- c(unlist(lapply(omega_out$omegas, function(o) o$names)),
+                    vapply(kappa_out$kappas, function(k) k$name, ""),
+                    vapply(sigma_out$sigmas, function(s) s$name, ""))
+  # Everything a state must not land on. Reserving too little here is not a
+  # cosmetic problem: when a sanitised state collides with an assignment target,
+  # that assignment is absorbed into `aux_vars`, dropped from
+  # [individual_parameters], and its references resolve to the state instead --
+  # `A_B = K * exp(ETA1)` beside `d/dt(A.B) = -A_B * A.B` emitted
+  # `d/dt(A_B) = -A_B * A_B`, the amount squared, with the rate constant and its
+  # IIV gone. ferx validates that clean (only W_UNUSED_PARAM), so nothing
+  # downstream catches it.
+  #
+  # Assignment targets are taken raw from `lst` rather than from a parse, so they
+  # are available before the model block is parsed. It over-approximates -- some
+  # of those names are intermediates that get inlined away -- which only ever
+  # costs a suffix on a state that would have collided with one.
+  assigned_lhs <- character()
+  for (e in lst) {
+    if (!.is_assignment(e)) next
+    if (is.symbol(e[[2]])) assigned_lhs <- c(assigned_lhs, .norm(as.character(e[[2]])))
+  }
+  state_out <- .sanitise_state_names(
+    lst,
+    taken = c(random_names,
+              .covariate_names(lst, name_map),
+              assigned_lhs,
+              # ferx-core reserves these inside [odes] (RESERVED_ODE_NAMES); a
+              # state named TIME would be shadowed by the integrator's own.
+              c("TIME", "T", "TAFD", "TAD", "MACHEPS")))
 
   # A state whose RAW name is also an iniDf key is ambiguous in the source --
   # both deparse to the same symbol -- and writing the rename into name_map
@@ -94,6 +131,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     unsp <- c(unsp, paste0("state/parameter source-name collision: ", k))
   }
   applied <- setdiff(names(state_out$map), ambiguous)
+  # Two consumers, deliberately different. `state_map` is the exact set of
+  # renames that were decided, and only the d/dt declaration reads it, so the
+  # emitted state name cannot drift. `name_map` additionally carries them so
+  # .normalise_expr() rewrites the references -- but it carries much else, which
+  # is why the declaration must not be resolved through it.
+  state_map <- vapply(applied, function(k) state_out$map[[k]], "")
   for (k in applied) name_map[[k]] <- state_out$map[[k]]
   warn <- c(warn, unname(state_out$warnings[applied]))
 
@@ -110,11 +153,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # exist in the previous parse -- and the surviving theta then shadows it. With
   # duplicate $THETA labels only one of the pair is renamed, which is exactly
   # how that happens. Re-parse and re-check until nothing new appears.
-  reserved_base <- c(unlist(lapply(omega_out$omegas, function(o) o$names)),
-                     vapply(kappa_out$kappas, function(k) k$name, ""),
-                     vapply(sigma_out$sigmas, function(s) s$name, ""),
-                     .covariate_names(lst, name_map))
-  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+  reserved_base <- c(random_names, .covariate_names(lst, name_map))
+  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
   rename_why <- vector("list", length(theta_orig))
   for (round in 1:5) {
     # The linCmt passthrough invents an individual parameter for a fixed-effect
@@ -148,7 +188,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # that ends up an individual parameter.
       rename_why[[i]] <- unique(c(rename_why[[i]], desh$reasons[[i]]))
     }
-    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm)
+    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
   }
 
   for (i in seq_along(rename_why)) {
@@ -168,14 +208,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (identical(structural$type, "ode")) {
     state_names <- vapply(expr_out$odes, function(o) o$state, "")
     obs_cmt     <- tryCatch(ui$central, error = function(e) NULL)
-    if (is.null(obs_cmt) || !is.character(obs_cmt)) {
+    # length must be checked, not just type: is.character() is TRUE for
+    # character(0) and for a length-2 vector, and both then reached an `if`
+    # that aborts ("argument is of length zero" / "the condition has length > 1")
+    # on a model that previously translated.
+    if (is.null(obs_cmt) || !is.character(obs_cmt) || length(obs_cmt) != 1L) {
       # state_names already carries the sanitised names, so the guess needs no
       # translation -- but ui$central is raw and does.
       obs_cmt <- tail(state_names, 1)
       warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
                              obs_cmt, "', verify in [structural_model]"))
-    } else if (obs_cmt %in% names(name_map)) {
-      obs_cmt <- name_map[[obs_cmt]]
+    } else if (obs_cmt %in% names(state_map)) {
+      # Through state_map for the same reason the d/dt target is: name_map would
+      # resolve a state name that happens to be a parameter key to the parameter.
+      obs_cmt <- state_map[[obs_cmt]]
     }
     structural$states  <- state_names
     structural$obs_cmt <- obs_cmt
@@ -190,7 +236,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (!is.na(obs_idx)) {
       svar <- scaling_hint[[as.character(obs_idx)]]
       if (!is.null(svar)) {
-        norm_svar      <- toupper(gsub(".", "_", svar, fixed = TRUE))
+        # .norm(), not a hand-inlined copy of it. This line used to spell out the
+        # old dot-only rule; once .norm() gained the rest of the grammar the two
+        # disagreed for any other illegal character, and a mismatch here does not
+        # error -- `matched` comes back NULL and [scaling] is silently dropped,
+        # which is precisely the S2=V failure CLAUDE.md warns about.
+        norm_svar      <- .norm(svar)
         theta_names_uc <- toupper(vapply(theta_out$thetas, function(t) t$name, ""))
         indiv_lhs_uc   <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
         matched <- if (norm_svar %in% theta_names_uc) {
@@ -256,14 +307,33 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                            paste(final_clash, collapse = ", ")))
   }
 
+  # A state and an individual parameter sharing a name is an E_PARSE in ferx,
+  # but the translator never gets that far: the assignment is absorbed into
+  # `aux_vars` (its RHS now "references a state"), dropped from
+  # [individual_parameters], and inlined into itself until the depth cap. The
+  # result is an ODE referencing a name nothing declares, with no diagnostic --
+  # a loud dot-parse error turned into a silently deleted parameter. The state
+  # sanitiser cannot prevent it (individual-parameter names are not known until
+  # the model block is parsed), so assert it here, where they are.
+  state_clash <- intersect(
+    toupper(vapply(expr_out$odes, function(o) o$state, "")),
+    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
+  if (length(state_clash) > 0) {
+    warn <- c(warn, paste0(
+      "ERROR | ", paste(state_clash, collapse = ", "), " names both an ODE state ",
+      "and an individual parameter. ferx requires them to be distinct, and the ",
+      "individual parameter is dropped from the output rather than emitted."))
+    unsp <- c(unsp, paste0("state/individual-parameter name collision: ",
+                           paste(state_clash, collapse = ", ")))
+  }
+
   # A covariate is the one name we must NOT sanitise: ferx resolves it against a
   # data column, case-sensitively, so any rewrite -- of case or of an illegal
   # character -- turns a working reference into E_MISSING_COVARIATE at fit time.
   # An illegal covariate name is therefore untranslatable rather than fixable,
   # and has to be said out loud. Computed after the de-shadow loop because a
   # rename can move a name into name_map and out of the covariate set.
-  bad_covs <- Filter(Negate(.is_ferx_ident),
-                     .covariate_names(lst, name_map, raw = TRUE))
+  bad_covs <- Filter(Negate(.is_ferx_ident), .unmapped_symbols(lst, name_map))
   if (length(bad_covs) > 0) {
     warn <- c(warn, paste0(
       "ERROR | covariate reference(s) ", paste(bad_covs, collapse = ", "),
@@ -322,11 +392,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # because ferx matches data columns case-sensitively (see .covariate_names).
 .ferx_ident <- function(nm) {
   x <- gsub("[^A-Za-z0-9_]", "_", as.character(nm))
+  # NA has to go first: nzchar(NA) is TRUE and gsub/sub leave NA alone, so an NA
+  # would slip past both guards below and out of a function documented to return
+  # a legal identifier for any input.
+  x[is.na(x)]   <- "X"
   # A leading digit cannot be fixed by substitution, and an empty name has
   # nothing to substitute. Both need a prefix rather than a replacement.
-  x[!nzchar(x)]        <- "X"
-  x[grepl("^[0-9]", x)] <- paste0("X_", x[grepl("^[0-9]", x)])
-  x
+  x[!nzchar(x)] <- "X"
+  sub("^([0-9])", "X_\\1", x)
 }
 
 # Strip the nonmem2rx t. prefix (theta) and e. prefix (effect eta) before normalising.
@@ -400,7 +473,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # ferx reads every such name as a covariate (a data column), and resolves theta
 # before covariate -- so a theta renamed onto one shadows it exactly as it would
 # an individual parameter.
-.covariate_names <- function(lst, name_map, raw = FALSE) {
+.covariate_names <- function(lst, name_map) {
   assigned <- character()
   used     <- character()
   for (expr in lst) {
@@ -419,15 +492,38 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   known <- unique(c(assigned,
                     toupper(unlist(name_map, use.names = FALSE)),
                     .norm(names(name_map))))
-  covs <- setdiff(unique(.norm(used)), known)
-  if (!isTRUE(raw)) return(covs)
-  # The spelling as WRITTEN, which is what actually gets emitted: a covariate is
-  # by definition absent from name_map, so .normalise_expr() leaves the symbol
-  # alone and the source case survives into the output. That is deliberate --
-  # ferx matches data columns case-sensitively, so an emitted `FLAG` against a
-  # column `Flag` is an E_MISSING_COVARIATE at fit time. Callers need the raw
-  # form to ask whether the name ferx will actually see is a legal identifier.
-  unique(used[.norm(used) %in% covs])
+  setdiff(unique(.norm(used)), known)
+}
+
+# Symbols that reach the output EXACTLY as the source spelled them.
+#
+# `.normalise_expr()` rewrites a symbol only if it is a key of `name_map`;
+# everything else is emitted verbatim. That set is mostly covariates -- which is
+# deliberate, since ferx matches data columns case-sensitively and rewriting one
+# turns a working reference into E_MISSING_COVARIATE -- but it also contains any
+# name the model simply never defines.
+#
+# Framing the legality check on THIS set rather than on the covariate set
+# matters: `.covariate_names()` classifies by normalised name, so a raw `c.RTOT`
+# alongside an eta named `c_RTOT` normalises to a known `C_RTOT` and is filtered
+# out as "not a covariate" -- while `.normalise_expr()`, which matches raw keys,
+# still emits `c.RTOT` verbatim into an unparseable file.
+.unmapped_symbols <- function(lst, name_map) {
+  used <- character()
+  for (expr in lst) {
+    if (.is_tilde(expr))          used <- c(used, .collect_symbols(expr))
+    else if (.is_assignment(expr)) used <- c(used, .collect_symbols(expr[[3]]))
+  }
+  # Assignment targets are emitted through .norm(), so they are legal by
+  # construction and are not free symbols.
+  assigned <- character()
+  for (expr in lst) {
+    if (!.is_assignment(expr)) next
+    lhs <- expr[[2]]
+    if (is.symbol(lhs))               assigned <- c(assigned, as.character(lhs))
+    else if (.is_ddt_lhs(lhs))        assigned <- c(assigned, .ddt_state(lhs))
+  }
+  setdiff(unique(used), c(names(name_map), assigned))
 }
 
 # Give every ODE state a name that is a legal ferx identifier and collides with
@@ -460,20 +556,18 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # A state may legally keep its own name, so it must not be treated as taken by
   # itself -- seed `used` with everything EXCEPT the states, and add each state
   # as it is resolved.
-  used <- toupper(taken)
+  used <- taken
 
-  for (r in raw) {
-    cand <- .ferx_ident(r)
-    if (toupper(cand) %in% used) {
-      i <- 1L
-      repeat {
-        alt <- paste0(cand, "_", i)
-        if (!toupper(alt) %in% used) break
-        i <- i + 1L
-      }
-      cand <- alt
-    }
-    used <- c(used, toupper(cand))
+  # Two passes, already-legal names first. A state whose source name needs no
+  # change has first claim on it; otherwise an illegal name that sanitises onto
+  # the same spelling can take it first and displace a name that never needed to
+  # move -- `A.B` becoming `A_B` renamed an existing `A_B` to `A_B_1`, churning
+  # the one name in the pair that was fine.
+  legal <- vapply(raw, .is_ferx_ident, logical(1))
+
+  for (r in raw[c(which(legal), which(!legal))]) {
+    cand <- .free_name(.ferx_ident(r), used)
+    used <- c(used, cand)
     if (identical(cand, r)) next
 
     map[[r]] <- cand
@@ -492,16 +586,30 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(map = map, warnings = warn)
 }
 
-# Pick a free replacement for a shadowed theta. `taken` is uppercase.
-.free_theta_name <- function(old, taken) {
-  for (cand in c(paste0("TV", old), paste0("THETA_", old)))
+# Pick a name that is free in `taken`, comparing case-insensitively because
+# that is how ferx compares them. `prefer` is tried first, in order; failing
+# that, `base` is suffixed _1, _2, ... until something is free.
+#
+# `taken` is folded here rather than by the caller. The two users of this used
+# to carry separate copies of the suffix search with OPPOSITE conventions --
+# .free_theta_name() required an already-uppercased `taken`, .sanitise_state_names()
+# uppercased its own -- which is exactly the sort of difference that survives a
+# refactor and silently stops matching.
+.free_name <- function(base, taken, prefer = character()) {
+  taken <- toupper(taken)
+  for (cand in c(prefer, base))
     if (!toupper(cand) %in% taken) return(cand)
   i <- 1L
   repeat {
-    cand <- paste0(old, "_", i)
+    cand <- paste0(base, "_", i)
     if (!toupper(cand) %in% taken) return(cand)
     i <- i + 1L
   }
+}
+
+# Pick a free replacement for a shadowed theta.
+.free_theta_name <- function(old, taken) {
+  .free_name(old, taken, prefer = c(paste0("TV", old), paste0("THETA_", old)))
 }
 
 # Give every theta a name that is unique among thetas and does not shadow a
@@ -683,7 +791,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (!is.null(ui_sigma) && is.matrix(ui_sigma) && nrow(ui_sigma) > 0) {
     nms    <- rownames(ui_sigma)
     sigmas <- lapply(seq_along(nms), function(i)
-      list(name  = toupper(nms[i]),
+      # .norm(), matching the nlmixr2 branch above. This was the last emitted-name
+      # channel that only uppercased: the name comes from rownames(ui$sigma),
+      # which is upstream-controlled, and it flows into both [parameters] and
+      # [error_model].
+      list(name  = .norm(nms[i]),
            value = sqrt(ui_sigma[i, i]),
            scale = "sd")
     )
@@ -719,7 +831,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     identical(lhs[[3]][[1]], as.name("dt"))
 }
 
-.ddt_state <- function(lhs) as.character(lhs[[3]][[2]])
+# [[1L]] because as.character() on a call returns one element per part --
+# `d/dt(f(x))` would otherwise yield c("f", "x"), which turns the state lookup's
+# `if` into "the condition has length > 1" and invents a second state.
+.ddt_state <- function(lhs) as.character(lhs[[3]][[2]])[[1L]]
 
 # Collect all symbol names (leaves) from an expression tree.
 .collect_symbols <- function(expr) {
@@ -748,7 +863,18 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
 # -- expression parser --------------------------------------------------------
 
-.parse_model_exprs <- function(lst, name_map, sigma_names = character()) {
+#' @param state_map Named character vector of ODE state renames, raw name ->
+#'   emitted name, from `.sanitise_state_names()`. Kept SEPARATE from
+#'   `name_map`: this function mutates its own copy of `name_map` as it walks the
+#'   statements (every ordinary assignment installs an alias), so resolving the
+#'   `d/dt` target against it made the emitted state name depend on the order of
+#'   surrounding statements -- `central <- 0` written above `d/dt(central)`
+#'   renamed the state to CENTRAL, the same model with that line below it did
+#'   not. The state renames are decided once, before parsing, and must not
+#'   change during it.
+#' @noRd
+.parse_model_exprs <- function(lst, name_map, sigma_names = character(),
+                               state_map = character()) {
   # Pass 1: collect assignments; handle d/dt, linCmt, tilde directly.
   all_assigns  <- list()   # list(lhs_norm, rhs_norm, rhs_expr)
   odes         <- list()
@@ -790,13 +916,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
       # d/dt(STATE) <- rhs  or  d/dt(STATE) = rhs
       if (.is_ddt_lhs(lhs_expr)) {
-        # The declaration has to be renamed with the references. .normalise_expr()
-        # only rewrites symbols inside an expression, so the d/dt target is read
-        # through the same map by hand -- otherwise the RHS says `c_RTOT` while
-        # the left says `c.RTOT` and nothing declares what the ODEs reference.
+        # The declaration has to be renamed with the references, so the d/dt
+        # target is read through the rename map by hand -- .normalise_expr()
+        # only rewrites symbols inside an expression.
+        #
+        # Through `state_map`, NOT `name_map`. name_map holds every parameter
+        # alias as well, and this function keeps adding to it as it walks; both
+        # made the emitted state name something nobody decided. A state whose raw
+        # name merely happened to be an iniDf key was renamed to that PARAMETER's
+        # name (`d/dt(CENT)` became `d/dt(VC)` when a theta keyed CENT was
+        # labelled VC), and a state was renamed or not depending on whether an
+        # unrelated assignment appeared above or below it.
         state_raw     <- .ddt_state(lhs_expr)
-        state         <- if (state_raw %in% names(name_map)) name_map[[state_raw]]
-                         else                                state_raw
+        state         <- if (state_raw %in% names(state_map)) state_map[[state_raw]]
+                         else                                 state_raw
         rhs_expr_norm <- .normalise_expr(expr[[3]], name_map)
         rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
         odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))

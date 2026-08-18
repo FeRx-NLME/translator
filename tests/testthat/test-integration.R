@@ -215,18 +215,23 @@ test_that("every bundled model translates, without a shadowing theta", {
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
 
-    # Built without `%||%`: base R gained it in 4.4 and DESCRIPTION sets no
-    # minimum, so a helper-free NULL guard keeps this runnable on older R.
-    nm_of <- function(x, f) if (length(x) == 0L) character() else vapply(x, f, "")
-    emitted <- c(nm_of(ir$thetas,       function(t) t$name),
-                 unlist(lapply(ir$omegas, function(o) o$names)),
-                 nm_of(ir$kappas,       function(k) k$name),
-                 nm_of(ir$sigmas,       function(s) s$name),
-                 nm_of(ir$indiv_params, function(p) p$lhs),
-                 nm_of(ir$odes,         function(o) o$state),
-                 as.character(ir$structural$states),
-                 as.character(ir$structural$obs_cmt))
-    bad <- unique(emitted[!.is_ferx_ident(emitted)])
+    # Tokenise the EMITTED TEXT, not the IR's declaration fields. An illegal
+    # name is accepted where it is declared -- `ode(states=[c.RTOT])` parses --
+    # and rejected at every reference, so a declaration-only check inspects the
+    # half that works. Enumerating IR fields also silently misses whichever
+    # channel is added next: reading the artefact cannot.
+    txt   <- emit_ferx(ir)
+    lines <- strsplit(txt, "\n")[[1]]
+    lines <- lines[!grepl("^\\s*#", lines)]        # comments carry source names
+    toks  <- unique(unlist(regmatches(
+      lines, gregexpr("[A-Za-z_][A-Za-z0-9_.]*", lines))))
+    bad <- setdiff(unique(toks[!.is_ferx_ident(toks)]), c("true", "false"))
+    # A name the translator already reported as untranslatable is not a silent
+    # leak -- covariates in particular must keep the data column's exact
+    # spelling, so an illegal one is declared unsupported rather than renamed.
+    bad <- bad[!vapply(bad,
+                       function(b) any(grepl(b, ir$unsupported, fixed = TRUE)),
+                       logical(1))]
     if (length(bad) > 0)
       illegal <- c(illegal, paste0(basename(m), ": ", paste(bad, collapse = ", ")))
 

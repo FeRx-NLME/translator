@@ -923,6 +923,24 @@ test_that("obs_cmt taken from ui$central is renamed with the state", {
   expect_false(grepl("c.RTOT", emit_ferx(ir), fixed = TRUE))
 })
 
+test_that("obs_cmt is resolved through the state renames, not the parameter map", {
+  # The previous test cannot separate the two maps: `c.RTOT` is a key in both
+  # and they agree on it. Here they disagree. `ui$central` names a state whose
+  # raw spelling is also an iniDf key, so resolving through `name_map` rewrites
+  # obs_cmt to the THETA's emitted name -- producing an obs_cmt that names no
+  # state at all, which ferx rejects with
+  # `E_PARSE: Observable compartment 'VC' not in states [...]`.
+  ini <- rbind(theta_row("CENT", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("VC", NA_character_)
+  lst <- list(quote(k <- CENT * exp(eta1)), ddt("CENT", quote(-k * CENT)))
+  ui  <- c(mock_ui(ini, lst), list(central = "CENT"))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(ir$structural$obs_cmt, "CENT")
+  # The invariant that actually matters: obs_cmt must name a declared state.
+  expect_true(ir$structural$obs_cmt %in% ir$structural$states)
+})
+
 test_that("a state that is already legal is left alone", {
   # A rename is a user-visible change to a name they index by. Only names that
   # must change may change -- `depot`/`central` are legal ferx identifiers and
@@ -950,6 +968,25 @@ test_that("two states that sanitise to the same name are disambiguated", {
   expect_length(unique(states), 2L)
   expect_true(all(.is_ferx_ident(states)))
   # Each RHS must reference its OWN state, not the one it collided with.
+  for (o in ir$odes) expect_match(o$rhs, o$state, fixed = TRUE)
+})
+
+test_that("an already-legal state keeps its name against a sanitised collider", {
+  # Processing in source order let an ILLEGAL name claim the spelling of a
+  # legal one that appeared later: `A.B` sanitised to `A_B` and displaced the
+  # existing `A_B` to `A_B_1`, renaming the one name in the pair that was
+  # already fine. The legal name has first claim.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)),
+              ddt("A.B", quote(-k * `A.B`)),
+              ddt("A_B", quote(-k * A_B)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  states <- vapply(ir$odes, function(o) o$state, "")
+  # Source order is preserved in the odes; the legal name is untouched.
+  expect_equal(states, c("A_B_1", "A_B"))
+  expect_length(grep("state 'A_B' renamed", ir$warnings), 0L)
+  # Each RHS still references its own state.
   for (o in ir$odes) expect_match(o$rhs, o$state, fixed = TRUE)
 })
 
@@ -1012,6 +1049,100 @@ test_that("covariate case is preserved exactly as written", {
   expect_false(grepl("WT/70", ir$indiv_params[[1]]$rhs, fixed = TRUE))
   # A legal covariate is not reported as a problem.
   expect_length(grep("covariate reference", ir$warnings), 0L)
+})
+
+test_that("the emitted state name does not depend on statement order", {
+  # The d/dt target used to be resolved through `name_map`, which
+  # .parse_model_exprs() keeps extending as it walks -- every ordinary
+  # assignment installs an alias. So an unrelated `central <- 0` written ABOVE
+  # d/dt(central) renamed the state to CENTRAL, and the same model with that
+  # line BELOW did not. The renames are decided once, before parsing, and the
+  # declaration reads only those.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  st  <- function(l) vapply(suppressWarnings(rxui_to_ir(mock_ui(ini, l)))$odes,
+                            function(o) o$state, "")
+  above <- st(list(quote(k <- t.K * exp(eta1)), quote(central <- 0),
+                   ddt("central", quote(-k * central))))
+  below <- st(list(quote(k <- t.K * exp(eta1)),
+                   ddt("central", quote(-k * central)), quote(central <- 0)))
+  expect_equal(above, below)
+})
+
+test_that("a state whose raw name is a parameter key keeps its own name", {
+  # Same root cause, different symptom: `name_map` holds every iniDf key, so a
+  # state that merely happened to share one was renamed to that PARAMETER's
+  # emitted name -- a theta keyed CENT and labelled VC turned d/dt(CENT) into
+  # d/dt(VC), silently making the compartment the theta. The sanitiser had
+  # decided no such rename.
+  ini <- rbind(theta_row("CENT", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("VC", NA_character_)
+  lst <- list(quote(k <- CENT * exp(eta1)), ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), "CENT")
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), "VC")
+})
+
+test_that("a sanitised state never swallows an individual parameter", {
+  # The worst failure this review found, because ferx accepts the result. When a
+  # sanitised state lands on an assignment target, that assignment is absorbed
+  # into aux_vars, dropped from [individual_parameters], and its references
+  # resolve to the state: `A_B = K * exp(ETA1)` beside `d/dt(A.B) = -A_B * A.B`
+  # emitted `d/dt(A_B) = -A_B * A_B` -- the amount squared, rate constant and
+  # IIV gone -- and validated clean.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(A_B <- t.K * exp(eta1)), ddt("A.B", quote(-A_B * `A.B`)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("A_B" %in% lhs)                       # the parameter survives
+  expect_false(identical(ir$odes[[1]]$state, "A_B")) # the state gave way
+  # and the IIV is still wired to something
+  expect_match(paste(vapply(ir$indiv_params, function(p) p$rhs, ""), collapse = " "),
+               "ETA1", fixed = TRUE)
+})
+
+# NOTE: the state/individual-parameter invariant in rxui_to_ir() has no test
+# because I could not construct an input that reaches it. Once the sanitiser
+# reserves every assignment target in `lst`, a state can no longer be renamed
+# onto an individual parameter, and the parameters that appear later (the linCmt
+# passthrough) only exist for models with no ODEs. It is kept as defence in
+# depth -- ferx is silent about this collision and the symptom is a deleted
+# parameter -- but it is unasserted, and a test that merely built the colliding
+# IR by hand would assert the constructor, not the guard.
+
+test_that("a non-scalar ui$central does not abort the translation", {
+  # is.character() is TRUE for character(0) and for length 2, so both reached an
+  # `if` that errors ("argument is of length zero" / "the condition has length
+  # > 1") on a model that previously translated.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)), ddt("cent", quote(-k * cent)))
+  for (v in list(character(0), c("a", "b"))) {
+    ui <- c(mock_ui(ini, lst), list(central = v))
+    expect_no_error(suppressWarnings(rxui_to_ir(ui)))
+  }
+})
+
+test_that(".ferx_ident maps NA to a legal identifier", {
+  # nzchar(NA) is TRUE and gsub/sub pass NA through, so NA slipped past both
+  # guards and out of a function documented to return a legal identifier for
+  # any input.
+  expect_true(.is_ferx_ident(.ferx_ident(NA_character_)))
+  expect_false(is.na(.ferx_ident(NA_character_)))
+})
+
+test_that("an illegal free symbol is reported even when it normalises to a known name", {
+  # The check used to run on the covariate set, which is classified by
+  # NORMALISED name: a raw `c.RTOT` beside an eta named `c_RTOT` normalises to
+  # a known `C_RTOT` and was filtered out as "not a covariate" -- while
+  # .normalise_expr(), which matches raw keys, still emitted `c.RTOT` verbatim.
+  ini <- rbind(theta_row("t.K", 1), eta_row("c_RTOT", 0.09, 1L))
+  lst <- list(quote(k <- t.K * `c.RTOT` * exp(c_RTOT)),
+              ddt("central", quote(-k * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$unsupported, "not a legal ferx identifier", all = FALSE)
+  expect_match(ir$unsupported, "c.RTOT", all = FALSE, fixed = TRUE)
 })
 
 test_that("a state whose source name is also a parameter key is refused loudly", {
