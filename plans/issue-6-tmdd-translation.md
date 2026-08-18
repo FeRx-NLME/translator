@@ -591,7 +591,7 @@ Original design notes follow.
 - Be explicit in the PR that this does not catch defect 14 (no diagnostic
   exists) -- phase 0 is the only guard there.
 
-### Phase 2 -- Identifier sanitisation (defect 1, RC-B)
+### Phase 2 -- Identifier sanitisation (defect 1, RC-B) -- DONE
 
 - One `.ferx_ident()` helper mapping any name to `[A-Za-z_][A-Za-z0-9_]*`,
   applied at a single choke point covering state names, `obs_cmt`,
@@ -603,6 +603,31 @@ Original design notes follow.
 - Covariate references are the exception: preserve source case (5.4).
 - Note the asymmetry -- a dotted name is *accepted* inside `states=[...]` but
   rejected at every reference site. "It parsed" is not evidence.
+
+### Phase 2 design notes
+
+Two things the plan above got wrong, found while building it.
+
+- **Covariate case was already correct, and the plan's framing risked breaking
+  it.** `nonmem2rx` preserves the `$INPUT` case for data items while lowercasing
+  assigned variables, and a covariate is by definition absent from `name_map`, so
+  `.normalise_expr()` leaves the symbol alone and the source spelling survives.
+  A "single choke point" applied to every emitted symbol -- which is how phase 2
+  was written -- would have uppercased them and turned every covariate into an
+  `E_MISSING_COVARIATE` at fit time. Nothing tested it. The correct action was a
+  regression test plus an `ERROR` for an illegal covariate name, which cannot be
+  renamed at all.
+- **Do not reserve theta names when choosing a state name.**
+  `.deshadow_theta_names()` is the single owner of theta naming; reserving thetas
+  in the state sanitiser too gives one collision two owners, and they rename
+  against each other (a state `central` beside a theta labelled `CENTRAL` became
+  `central_1` *and* the theta became `TVCENTRAL`). The de-shadow loop already
+  reserves state names, so the theta side is where the clash is resolved.
+
+Also worth recording for later phases: renaming only what must be renamed
+matters. Sending states through `.norm()` rather than `.ferx_ident()` would
+uppercase `depot`/`central` in every ODE model in the corpus -- names users read
+and index by -- for no gain.
 
 ### Phase 3 -- Theta pass-through, generalised (defect 2)
 
