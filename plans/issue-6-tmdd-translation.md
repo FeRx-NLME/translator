@@ -774,6 +774,88 @@ resolve -- match on the `RXF_` / `RXALAG_` prefix rather than a fixed name list.
 
 Regression target: `pkpd_ir.mod` must emit `init(EFFECT) = BL`. Verified valid.
 
+#### Phase 4 measurement pass (done before implementation)
+
+Measured against ferx 0.3.0 and nonmem2rx, because the phase 3 text was wrong
+about `[scaling]` and the phase 3 implementation was then wrong twice about what
+`[odes]` accepts. Nothing below is inferred from the plan or from ferx-core source
+alone.
+
+**The two init paths have DIFFERENT scope.** The table above treats them as
+interchangeable ("in `[odes]`, or `[initial_conditions]` for a pk macro"). They are
+not, and the difference decides whether phase 3's carrier machinery is needed:
+
+| reference | `init()` in `[odes]` | `[initial_conditions]` (pk macro) |
+|---|---|---|
+| constant | yes | yes |
+| individual parameter | yes | yes |
+| expression of individual parameters | yes | yes |
+| another state | yes | n/a |
+| `TIME` | yes | not measured |
+| **theta** | **no** | **yes** |
+| **eta** | **no** | **yes** |
+| **covariate** | **no** | **yes** (re-checked with the column present in data) |
+
+So `init()` in `[odes]` has exactly the closed set of a `d/dt` right-hand side, and
+the phase 3 carrier + declaredness machinery extends to it with **no rule change**
+-- `.emitted_ode_symbols()`, `.scope_odes_to_params()` and the `[odes]` check just
+need init expressions folded in, which the code comment there already anticipates.
+`[initial_conditions]` needs none of it.
+
+The covariate row was taken twice on purpose: without a dataset an unknown name is
+read as a covariate and reported valid, so the first reading proved nothing. With
+the column present in the data, `[initial_conditions] init(central) = WT` is
+genuinely accepted and `[odes] init(CENT) = WT` is genuinely rejected.
+
+**`[initial_conditions]` compartment names are not the model's state names.** It
+takes `central`, `depot` (oral models only) or a 1-based number; `init(CENT)` is
+rejected with "unknown compartment". The translator has to map, not pass through.
+
+**pk macro parameter names**, from the engine's own error text:
+`cl, v/v1, q/q2, v2, ka, f, q3, v3, lagtime/alag`. So `alag=` and `lagtime=` are
+aliases -- the plan's `alag=` is valid, and the bundled ferx examples use
+`lagtime=`. `dur=` and `rate=` are genuinely absent, as the plan says. `f=` also
+scales IV bolus/infusion doses (ferx-core #327), so it is not oral-only.
+
+**A pk macro argument must be a single declared individual parameter.** `f=TVB` (a
+theta) and `f=BL*2` (an expression) are both rejected. The plan does not mention
+this: it makes phase 3's carriers a prerequisite on the pk path too, not only for
+`[odes]`.
+
+**nonmem2rx always emits these as a PAIR** -- a helper assignment with a dotted
+name, plus the non-symbol-LHS statement that reads it:
+
+```
+A_0(4)=BL     ->  rxini.rxddta4. <- bl        +  EFFECT(0) <- rxini.rxddta4.
+F1 = THETA(3) ->  rxf.central.   <- theta3    +  f(central) <- rxf.central.
+ALAG1 = ...   ->  rxalag.central. <- theta4   +  alag(central) <- rxalag.central.
+D1 = ...      ->  rxdur.central.  <- theta5   +  dur(central)  <- rxdur.central.
+R1 = ...      ->  rxrate.central. <- theta6   +  rate(central) <- rxrate.central.
+```
+
+The regression target is reachable, but not directly: `EFFECT(0)` reads
+`rxini.rxddta4.`, not `BL`, so emitting `init(EFFECT) = BL` means resolving that
+alias chain. The plan says "Verified valid" without mentioning it. The dotted
+helper names are a third instance of the `rxmissingvars` shape already handled in
+phase 3 -- they normalise to `RXINI_RXDDTA4_`, `RXF_CENTRAL_` and so on, and must
+be consumed rather than emitted.
+
+**What ships today, both silently.** Confirmed by translating:
+
+- `pkpd_ir.mod`: no `init(...)` at all, so the effect compartment starts at 0
+  instead of `BL`. `$unsupported` is EMPTY. (The consequence for the fit was not
+  measured -- what is measured is that the initial condition is absent from the
+  emitted model and nothing reports it.)
+- A model with `F1`/`ALAG1`/`D1`/`R1`: the pk macro emits `one_cpt_iv(cl=CL, v=V)`
+  with no `f=` and no `lagtime=` **although ferx supports both**;
+  `RXALAG_CENTRAL_`, `RXDUR_CENTRAL_` and `RXRATE_CENTRAL_` are emitted as
+  meaningless individual parameters; `RXF_CENTRAL_` disappears entirely.
+  `$unsupported` is EMPTY.
+
+Note that phase 3's `[odes]` declaredness check does **not** catch either of these.
+It reports dangling references; these are silent *omissions*, which leave nothing
+dangling. Only the loud default arm catches them, which is the point of this phase.
+
 ### Phase 5 -- Ordered statements and `if` support (defects 4, 6, 8, 13, RC-A)
 
 The largest phase. Two coupled changes.
