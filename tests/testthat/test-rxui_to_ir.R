@@ -2343,3 +2343,77 @@ test_that("another individual parameter reading the renamed one follows it", {
   # Every name a right-hand side references must still be declared somewhere.
   expect_false(any(grepl("\\bR1\\b", rhs)))
 })
+
+test_that(".is_dose_attr_name answers for NA rather than aborting", {
+  # `startsWith(NA, p)` is NA, which made `any(hit)` NA and the guard an abort --
+  # a translation dying mid-run instead of reporting anything.
+  expect_false(.is_dose_attr_name(NA_character_))
+  expect_equal(.is_dose_attr_name(c("F1", NA, "CL")), c(TRUE, FALSE, FALSE))
+})
+
+test_that(".dose_attr_kind names what ferx would do for every prefix", {
+  # The switch() falls through to the lag default for any prefix it does not
+  # name, so a typo in the D or R case would describe a modelled-infusion
+  # parameter as a lag time -- telling the user the wrong reason their model
+  # was changed. Only the F{n} branch was covered before.
+  expect_match(.dose_attr_kind("F1"),  "bioavailability for doses into compartment 1")
+  expect_match(.dose_attr_kind("D1"),  "duration for compartment 1")
+  expect_match(.dose_attr_kind("R1"),  "rate for compartment 1")
+  expect_match(.dose_attr_kind("ALAG2"),    "lag time for compartment 2")
+  expect_match(.dose_attr_kind("LAGTIME3"), "lag time for compartment 3")
+  expect_match(.dose_attr_kind("F"),        "bioavailability applied to every dose")
+  expect_match(.dose_attr_kind("ALAG"),     "lag time applied to every dose")
+  expect_match(.dose_attr_kind("LAGTIME"),  "lag time applied to every dose")
+  # ferx parses the suffix as an integer, so F01 is compartment 1. Echoing "01"
+  # points the reader at a numbering that appears nowhere in their model.
+  expect_match(.dose_attr_kind("F01"), "compartment 1$")
+})
+
+test_that("a bare F individual parameter is renamed too", {
+  # The highest-consequence name in the class: ferx applies a bare `F` as
+  # bioavailability to every dose, with no compartment index and no RATE column
+  # needed. Every other end-to-end fixture here uses an indexed name.
+  ini <- rbind(theta_row("F", 0.1), theta_row("K", 0.5), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F <- F * exp(eta1)), ddt("CENT", quote(-K * CENT * F)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_true("F_PAR" %in% ip)
+  expect_match(ir$odes[[1]]$rhs, "F_PAR", fixed = TRUE)
+  expect_match(ir$warnings, "bioavailability applied to every dose", all = FALSE)
+})
+
+test_that("an init() expression follows the rename", {
+  # phase 4 added init() to [odes], and its expressions name individual
+  # parameters. An unrewritten one is an init referencing a name nothing
+  # declares -- the undefined-name failure this whole change exists to prevent,
+  # in the newest block.
+  ini <- rbind(theta_row("F1", 5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F1 <- F1 * exp(eta1)),
+              as.call(list(as.name("<-"), as.call(list(as.name("CENT"), 0)),
+                           as.name("F1"))),
+              ddt("CENT", quote(-K * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_length(ir$initial_conditions, 1L)
+  expect_equal(ir$initial_conditions[[1]]$rhs, "F1_PAR")
+  expect_true("F1_PAR" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+})
+
+test_that("a rename does not land on a covariate name", {
+  # This is the third naming authority in the file; the other two reserve
+  # foreign names. A rename onto a data column is silent -- the declared
+  # parameter wins and the covariate becomes unreferenceable.
+  ini <- rbind(theta_row("F1", 0.1), theta_row("K", 0.5), eta_row("eta1", 0.09, 1L))
+  # F1_PAR is bound by nothing, so .covariate_names() classifies it as a covariate.
+  lst <- list(quote(F1 <- F1 * exp(eta1)),
+              ddt("CENT", quote(-K * CENT * F1 * F1_PAR)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_false("F1_PAR" %in% ip)
+  # The covariate reference must survive untouched.
+  expect_match(ir$odes[[1]]$rhs, "F1_PAR", fixed = TRUE)
+})

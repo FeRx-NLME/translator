@@ -932,9 +932,17 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # the user is not warned about a parameter they will not see.
   dose_out <- .deconflict_dose_attr_names(
     vapply(expr_out$indiv_params, function(p) p$lhs, ""),
+    # `reserved_base` rather than a fresh `random_names` list: it is what the
+    # carrier path already reserves (random effects AND covariate names), and
+    # this is the third naming authority in the file. The other two are passed
+    # foreign names for a reason the comment at the top of this function records
+    # -- an authority that reserves only its own channel fixes collisions inside
+    # it while creating them across channels. Without the covariates a rename
+    # could land on a data column, where the declared parameter wins and the
+    # covariate silently becomes unreferenceable.
     taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
               vapply(expr_out$odes, function(o) o$state, ""),
-              random_names, .RESERVED_ODE_NAMES))
+              reserved_base, .RESERVED_ODE_NAMES))
 
   if (length(dose_out$map) > 0L) {
     warn <- c(warn, dose_out$warnings)
@@ -1781,8 +1789,14 @@ bound_name <- function(entries, raw) {
 .is_dose_attr_name <- function(nm) {
   x   <- toupper(as.character(nm))
   out <- x %in% .DOSE_ATTR_BARE
+  # NA is excluded from `hit` rather than left to propagate. `startsWith(NA, p)`
+  # is NA, which makes `any(hit)` NA and `if (!any(hit))` an abort -- a
+  # translation that dies mid-run instead of reporting anything. No current
+  # caller supplies NA (`.norm()` maps it to "X"), but nothing enforces that and
+  # a predicate documented as vectorised should answer for every input.
+  ok <- !is.na(x)
   for (p in .DOSE_ATTR_PREFIXES) {
-    hit <- startsWith(x, p)
+    hit <- ok & startsWith(x, p)
     if (!any(hit)) next
     suf <- substring(x[hit], nchar(p) + 1L)
     out[hit] <- out[hit] |
@@ -1801,7 +1815,10 @@ bound_name <- function(entries, raw) {
     return(if (identical(x, "F")) "bioavailability applied to every dose"
            else "a lag time applied to every dose")
   }
-  n <- sub("^[A-Z]+", "", x)
+  # Leading zeros are stripped: ferx parses the suffix as an integer, so `F01`
+  # is compartment 1, and echoing "01" points the reader at a compartment
+  # numbering that appears nowhere in their model.
+  n <- sub("^0+(?=[0-9])", "", sub("^[A-Z]+", "", x), perl = TRUE)
   switch(sub("[0-9]+$", "", x),
     F        = paste0("bioavailability for doses into compartment ", n),
     D        = paste0("modelled infusion duration for compartment ", n,
