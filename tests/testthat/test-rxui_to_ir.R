@@ -1450,7 +1450,7 @@ test_that("a state whose source name is also a parameter name is scope-resolved"
 # -- $MODEL DEFOBS ------------------------------------------------------------
 
 test_that(".extract_nm_defobs reads DEFOBS wherever it is declared", {
-  f <- withr::local_tempfile(fileext = ".ctl")
+  f <- file.path(tmp_ctl_dir(), "defobs.ctl")
   writeLines(c("$PROBLEM x", "$MODEL",
                "  COMP=(CENT, DEFDOSE, DEFOBS)", "  COMP=(PERIPH)", "$PK"), f)
   out <- .extract_nm_defobs(f)
@@ -1460,8 +1460,10 @@ test_that(".extract_nm_defobs reads DEFOBS wherever it is declared", {
 })
 
 test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
+  n  <- 0L
   mk <- function(...) {
-    f <- withr::local_tempfile(fileext = ".ctl", .local_envir = parent.frame())
+    n <<- n + 1L
+    f <- file.path(tmp_ctl_dir(), paste0("model", n, ".ctl"))
     writeLines(c("$PROBLEM x", "$MODEL", ..., "$PK"), f); f
   }
   # `COMP (...)` without `=`, space-separated attributes.
@@ -1476,17 +1478,49 @@ test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
   expect_null(.extract_nm_defobs(mk("  COMP=(A) ; DEFOBS goes here one day",
                                     "  COMP=(B)")))
   # No $MODEL at all.
-  f <- withr::local_tempfile(fileext = ".ctl")
+  f <- file.path(tmp_ctl_dir(), "nomodel.ctl")
   writeLines(c("$PROBLEM x", "$PK"), f)
   expect_null(.extract_nm_defobs(f))
 })
 
+test_that("the observation expression outranks DEFOBS when they disagree", {
+  skip_if_not_installed("nonmem2rx")
+  # NONMEM's DEFOBS is the default observation compartment for records with no
+  # CMT -- it is not a statement about what $ERROR reads. When $ERROR names a
+  # compartment outright (`Y = A(2)/S2`), that is the model saying it, and
+  # preferring DEFOBS there regressed models that were previously correct.
+  p  <- nm_path("defobs_expression_wins.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    scaling_hint = .extract_nm_scaling(p),
+                                    obs_hint     = .extract_nm_defobs(p)))
+  expect_equal(.extract_nm_defobs(p)$name, "DEPOT")   # $MODEL says DEPOT
+  expect_equal(ir$structural$obs_cmt, "CENT")         # $ERROR says A(2)
+  expect_equal(ir$scaling$obs_scale, "V")             # and S2 = V follows it
+  expect_match(ir$warnings, "\\$MODEL declares 'DEPOT' as DEFOBS", all = FALSE)
+})
+
+test_that("DEFOBS decides when the DV expression goes through F", {
+  skip_if_not_installed("nonmem2rx")
+  # `$ERROR IPRE = F` carries no compartment of its own -- in NONMEM `F` IS the
+  # DEFOBS compartment. nonmem2rx nonetheless resolves `f <- CENTRAL` ignoring
+  # DEFOBS, so following `f` would launder its guess into an "explicit" answer.
+  # pkpd_ir.mod declares COMP=(EFFECT,DEFOBS) and is observed on EFFECT.
+  p  <- nm_path("pkpd_ir.mod")
+  ui <- nonmem2rx::nonmem2rx(p)
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    scaling_hint = .extract_nm_scaling(p),
+                                    obs_hint     = .extract_nm_defobs(p)))
+  expect_equal(ir$structural$obs_cmt, "EFFECT")
+  expect_length(grep("could not be inferred", ir$warnings), 0L)
+})
+
 test_that("DEFOBS decides obs_cmt AND the scaling compartment", {
   skip_if_not_installed("nonmem2rx")
-  # The regression this exists for: with DEFOBS declared first, the old
-  # tail(state_names, 1) guess picked PERIPH, and because the scaling lookup
-  # derives its compartment number from the same guess, the correctly parsed
-  # `S1 = V` was discarded with no diagnostic.
+  # The regression this exists for: with DEFOBS declared first and no explicit
+  # compartment in $ERROR, the old tail(state_names, 1) guess picked PERIPH,
+  # and because the scaling lookup derives its compartment number from the same
+  # guess, the correctly parsed `S1 = V` was discarded with no diagnostic.
   p  <- nm_path("defobs_not_last.ctl")
   ui <- nonmem2rx::nonmem2rx(p)
   sc <- .extract_nm_scaling(p)
@@ -1498,26 +1532,34 @@ test_that("DEFOBS decides obs_cmt AND the scaling compartment", {
   expect_equal(fixed$structural$obs_cmt, "CENT")
   expect_equal(fixed$scaling$obs_scale, "V")
   expect_length(grep("obs_cmt could not be inferred", fixed$warnings), 0L)
-
-  # Without the hint -- the pre-fix behaviour -- both go wrong together.
-  guessed <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
-                                         scaling_hint = sc, obs_hint = NULL))
-  expect_equal(guessed$structural$obs_cmt, "PERIPH")
-  expect_null(guessed$scaling$obs_scale)
 })
 
 test_that("a DEFOBS that disagrees with d/dt order is refused, not trusted", {
   skip_if_not_installed("nonmem2rx")
-  p  <- nm_path("defobs_not_last.ctl")
-  ui <- nonmem2rx::nonmem2rx(p)
   # $MODEL says compartment 1 is NOPE; the first d/dt is for CENT. Believing the
-  # index anyway would silently observe the wrong compartment, which is the
-  # failure the whole fix exists to remove.
+  # index anyway would silently observe the wrong compartment. Uses a model
+  # whose DV expression names no compartment, so the hint is what is on trial.
+  p  <- nm_path("pkpd_ir.mod")
+  ui <- nonmem2rx::nonmem2rx(p)
   ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
                                     obs_hint = list(index = 1L, name = "NOPE",
-                                                    n_comp = 2L)))
+                                                    n_comp = 4L)))
   expect_match(ir$warnings, "orderings disagree", all = FALSE)
-  expect_equal(ir$structural$obs_cmt, "PERIPH")   # fell back to the guess
+  expect_equal(ir$structural$obs_cmt, "EFFECT")   # fell back to the guess
+})
+
+test_that("a malformed obs_hint index is refused, not evaluated", {
+  skip_if_not_installed("nonmem2rx")
+  # rxui_to_ir() is exported and obs_hint is a documented @param, so a length-0,
+  # NA or length-2 index must not reach `&&` and abort with a base-R condition
+  # error naming neither field.
+  ui <- nonmem2rx::nonmem2rx(nm_path("pkpd_ir.mod"))
+  for (idx in list(NA_integer_, integer(0), c(1L, 2L), "1")) {
+    ir <- expect_no_error(suppressWarnings(
+      rxui_to_ir(ui, source_format = "nonmem",
+                 obs_hint = list(index = idx, name = "EFFECT", n_comp = 4L))))
+    expect_true(nzchar(ir$structural$obs_cmt))
+  }
 })
 
 test_that(".same_cmt_name sees through nonmem2rx's c. prefix and case", {
@@ -1538,9 +1580,101 @@ test_that("a dropped f()/alag() statement is reported, not silently discarded", 
               quote(d/dt(central) <- cl * depot - cl/v * central))
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
-  expect_true("bioavailability (f)" %in% ir$unsupported)
-  expect_true("dose lag time (alag)" %in% ir$unsupported)
   expect_match(ir$warnings, "bioavailability for compartment 'depot'", all = FALSE)
+  expect_match(ir$warnings, "dose lag time for compartment 'depot'",   all = FALSE)
+})
+
+test_that("a feature ferx supports is NOT filed as a ferx-core gap", {
+  # ferx-core maps F{cmt} -> `f=`, ALAG{cmt} -> `lagtime=` and D/R -> duration
+  # and rate, and ferx-r ships bioavailability.ferx and warfarin_ode_lagtime.ferx
+  # as worked examples. So the translator not emitting these is a ferxtranslate
+  # limitation, and $unsupported -- which CLAUDE.md defines as the ferx-core
+  # prioritisation signal -- must stay empty for them. Filing them there asked
+  # the engine team to build what they had already shipped.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- 0.7),
+              quote(alag(depot) <- 0.5), quote(dur(depot) <- 2),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$unsupported, 0L)
+  # ... but the user is still told, at ERROR level, that it was dropped.
+  expect_match(ir$warnings, "supported by ferx but is not yet emitted", all = FALSE)
+})
+
+test_that("a state initial condition is translated, not reported as a gap", {
+  # ferx parses `init(STATE) = <expr>` inside [odes]. The expression may
+  # reference individual parameters, other states and literals.
+  ini <- rbind(theta_row("t.TBL", 3), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(bl <- t.TBL * exp(eta1)),
+              quote(EFFECT(0) <- bl),
+              quote(d/dt(EFFECT) <- -bl * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 1L)
+  expect_equal(ir$initial_conditions[[1]]$state, "EFFECT")
+  expect_equal(ir$initial_conditions[[1]]$rhs, "BL")
+  expect_match(emit_ferx(ir), "init(EFFECT) = BL", fixed = TRUE)
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("an init referencing a theta is dropped with a scope explanation", {
+  # Measured against the engine: `init(X) = TVBL` is an E_PARSE naming TVBL
+  # undefined, because a theta is not in scope inside an init expression. Emit
+  # it and the file does not parse, so it is dropped and said out loud.
+  ini <- rbind(theta_row("t.TBL", 3), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TBL * exp(eta1)),
+              quote(EFFECT(0) <- t.TBL),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 0L)
+  expect_match(ir$warnings, "does not resolve inside an init expression",
+               all = FALSE)
+})
+
+test_that("an initial condition of 0 is a no-op, not a dropped feature", {
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)), quote(EFFECT(0) <- 0),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 0L)
+  expect_length(ir$unsupported, 0L)
+  expect_match(ir$warnings, "already every compartment's initial value",
+               all = FALSE)
+})
+
+test_that("an alias bound twice is not read as a constant", {
+  # The relative-bioavailability idiom `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)`.
+  # Taking the FIRST binding made const(1) true, so the translator said "sets
+  # the value ferx already uses, so dropping it does not change the model" --
+  # asserting nothing was lost while the formulation-dependent F disappeared.
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.T4", 0.7), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)),
+              quote(rxf.rxddta1. <- 1),
+              quote(f(depot) <- rxf.rxddta1.),
+              quote(if (FORM == 2) { rxf.rxddta1. <- t.T4; f(depot) <- rxf.rxddta1. }),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(grep("does not change the model", ir$warnings), 0L)
+  expect_match(ir$warnings, "binds it more than once", all = FALSE)
+})
+
+test_that("a nonmem2rx alias temporary never reaches [individual_parameters]", {
+  # `.resolve_alias()` knew rxdur/rxrate/rxalag and pass 3's skip list did not,
+  # so the companion binding of a dropped statement was emitted as a model
+  # parameter named after a nonmem2rx internal.
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)),
+              quote(rxdur.rxddta1. <- 2), quote(dur(depot) <- rxdur.rxddta1.),
+              quote(rxalag.rxddta2. <- 0.5), quote(alag(depot) <- rxalag.rxddta2.),
+              quote(d/dt(depot) <- -k * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_length(grep("^RX", lhs), 0L)
 })
 
 test_that("a name only reachable through a dropped statement is not a covariate", {

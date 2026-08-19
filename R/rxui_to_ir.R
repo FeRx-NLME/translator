@@ -45,10 +45,6 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, theta_out$warnings)
 
   omega_out <- .extract_omegas(ini)
-  # The flattening (ETA-coded IOV read as IIV) is a nonmem2rx behaviour, so the
-  # warning -- which names nonmem2rx -- is only emitted for NONMEM sources.
-  if (identical(source_format, "nonmem"))
-    warn <- c(warn, .iov_flattening_warnings(omega_out$omegas))
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
 
@@ -59,44 +55,103 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # spelling collide in exactly the same way as two omegas, and ferx has a
   # single namespace for them. Order is omega, kappa, sigma -- the order they
   # are emitted in -- so the name a reader sees first is the one that keeps it.
+  #
+  # Built per channel with its raw names already paired, rather than flattened
+  # and patched: the earlier form seeded sigma `raw` with NA and filled it in a
+  # second loop indexed `n_om + n_ka + i`, so the concatenation order was
+  # restated in four places and a fourth channel inserted anywhere but last
+  # would have silently given sigmas another channel's names.
+  re_of <- function(kind, names_list, raws_list)
+    lapply(seq_along(names_list), function(i)
+      list(kind = kind, name = names_list[[i]], raw = raws_list[[i]]))
   re_entries <- c(
-    lapply(omega_out$omegas, function(o) list(name = o$names, raw = o$raw)),
-    lapply(kappa_out$kappas, function(k) list(name = k$name,  raw = k$raw)),
-    lapply(sigma_out$sigmas, function(x) list(name = x$name,  raw = NA_character_)))
-  # Sigmas carry their raw spelling in a parallel vector, not per entry.
-  for (i in seq_along(sigma_out$sigmas))
-    re_entries[[length(omega_out$omegas) + length(kappa_out$kappas) + i]]$raw <-
-      sigma_out$raw_names[i]
+    re_of("omega", lapply(omega_out$omegas, function(o) o$names),
+                   lapply(omega_out$omegas, function(o) o$raw)),
+    re_of("kappa", lapply(kappa_out$kappas, function(k) k$name),
+                   lapply(kappa_out$kappas, function(k) k$raw)),
+    re_of("sigma", lapply(sigma_out$sigmas, function(x) x$name),
+                   as.list(sigma_out$raw_names)))
 
-  re_out <- .uniquify_random_names(re_entries)
+  # `taken` is the whole point. ferx resolves an identifier as theta, then eta,
+  # then individual parameter, so a random effect sharing a name with EITHER of
+  # the other two is written and never read -- silently, with the engine
+  # reporting nothing. Seeding only with other random effects made the
+  # uniquifier fix collisions inside its own channel while creating them across
+  # channels: two etas normalising onto `CL_IIV` became `CL_IIV`/`CL_IIV_1`, and
+  # if a theta or an individual parameter was already called `CL_IIV_1` then
+  # `V = TV * exp(CL_IIV_1) * CL_IIV_1` read the eta for both tokens and the
+  # individual parameter went dead. The two sibling naming authorities already
+  # reserve foreign names -- .sanitise_state_names() is passed `assigned_lhs`,
+  # .deshadow_theta_names() is passed `indiv_names` -- and this one must too.
+  #
+  # Theta names here are the RAW ones, before .deshadow_theta_names() runs. That
+  # is deliberate and safe in the only direction that matters: de-shadowing can
+  # move a theta onto TV<name>/THETA_<name>/<name>_n, and it reserves
+  # `random_names` when it does, so it will not land on a name this pass has
+  # already claimed. Reserving the pre-rename spelling can only over-reserve.
+  assigned_lhs_raw <- character()
+  for (e in lst)
+    if (.is_assignment(e) && is.symbol(e[[2]]))
+      assigned_lhs_raw <- c(assigned_lhs_raw, .norm(as.character(e[[2]])))
+  re_out <- .uniquify_random_names(
+    re_entries,
+    taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
+              assigned_lhs_raw, .RESERVED_ODE_NAMES))
   warn   <- c(warn, re_out$warnings)
-  n_om   <- length(omega_out$omegas); n_ka <- length(kappa_out$kappas)
-  for (i in seq_along(omega_out$omegas))
-    omega_out$omegas[[i]]$names <- re_out$entries[[i]]$name
-  for (i in seq_along(kappa_out$kappas))
-    kappa_out$kappas[[i]]$name  <- re_out$entries[[n_om + i]]$name
-  for (i in seq_along(sigma_out$sigmas))
-    sigma_out$sigmas[[i]]$name  <- re_out$entries[[n_om + n_ka + i]]$name
+
+  # Write back by channel tag, not by computed offset.
+  pick <- function(kind) Filter(function(e) identical(e$kind, kind), re_out$entries)
+  om <- pick("omega"); ka <- pick("kappa"); sg <- pick("sigma")
+  for (i in seq_along(omega_out$omegas)) omega_out$omegas[[i]]$names <- om[[i]]$name
+  for (i in seq_along(kappa_out$kappas)) kappa_out$kappas[[i]]$name  <- ka[[i]]$name
+  for (i in seq_along(sigma_out$sigmas)) sigma_out$sigmas[[i]]$name  <- sg[[i]]$name
+
+  # The flattening (ETA-coded IOV read as IIV) is a nonmem2rx behaviour, so the
+  # warning -- which names nonmem2rx -- is only emitted for NONMEM sources.
+  # Computed AFTER uniquification: it de-duplicates with unique(), so on the
+  # pre-rename names two IOV-shaped etas that normalise onto one spelling
+  # collapsed to a single warning, naming a spelling only one of them ends up
+  # with and never mentioning the second flattened eta at all.
+  if (identical(source_format, "nonmem"))
+    warn <- c(warn, .iov_flattening_warnings(omega_out$omegas))
 
   name_map  <- .norm_map_from_ini(ini)
   sigma_names_norm <- toupper(vapply(sigma_out$sigmas, function(s) s$name, ""))
 
-  # Bind every random effect's SOURCE spelling to its FINAL emitted name.
+  # Bind every random effect's SOURCE spelling to its FINAL emitted name --
+  # omegas, kappas AND sigmas, so this is the single owner of that binding (the
+  # sigma-only loop that used to follow set the same keys to the same values).
   # .norm_map_from_ini() maps each iniDf key through .norm() independently, so
   # after a uniqueness rename the map still points the renamed eta's references
   # at the name its twin took -- the merge the rename exists to prevent, moved
-  # from the declaration to the reference. This must run before the theta
-  # bindings below, which are a separate channel with its own owner.
-  for (e in re_out$entries)
-    for (j in seq_along(e$name))
-      if (!is.na(e$raw[j])) name_map[[e$raw[j]]] <- e$name[j]
-
-  # Bind each sigma's SOURCE spelling to its emitted name. For a NONMEM source
-  # sigma is not an iniDf row -- it lives in ui$sigma -- so .norm_map_from_ini()
-  # never saw it and the eps symbol reached pass 3 exactly as written, matching
-  # the declaration only while both were plain uppercase. See .extract_sigmas().
-  for (i in seq_along(sigma_out$raw_names))
-    name_map[[sigma_out$raw_names[i]]] <- sigma_out$sigmas[[i]]$name
+  # from the declaration to the reference. For a NONMEM source sigma is not an
+  # iniDf row at all (it lives in ui$sigma), so this is the only binding it gets.
+  #
+  # Keyed by RAW name, which is many-to-one: duplicate $OMEGA labels give two
+  # entries the same raw spelling, and a plain assignment let the second win, so
+  # BOTH references resolved to the renamed twin -- the first omega declared,
+  # estimated and read by nothing. There is no correct single answer once the
+  # source has used one name for two effects, so the first binding is kept (it
+  # matches the declaration that kept its name) and the collision is reported.
+  bound <- character()
+  for (e in re_out$entries) {
+    for (j in seq_along(e$name)) {
+      raw <- e$raw[j]
+      if (is.na(raw) || !nzchar(raw)) next
+      if (raw %in% bound) {
+        warn <- c(warn, paste0(
+          "ERROR | the source names more than one random effect '", raw,
+          "'. They are declared distinctly as '", paste(bound_name(re_out$entries, raw), collapse = "', '"),
+          "' and '", e$name[j], "', but every reference to '", raw,
+          "' in the model text is ambiguous and resolves to the first. Rename one ",
+          "of them in the source."))
+        unsp <- c(unsp, paste0("duplicate random-effect name in source: ", raw))
+        next
+      }
+      bound <- c(bound, raw)
+      name_map[[raw]] <- e$name[j]
+    }
+  }
 
   # A theta name and the name every reference normalises to must agree, or the
   # shadowing check below compares the wrong pair. They diverge whenever the
@@ -303,18 +358,55 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     state_names <- vapply(expr_out$odes, function(o) o$state, "")
     obs_cmt     <- NULL
 
-    # $MODEL's own DEFOBS, when the source is a control stream we can read.
-    # This is the only channel that actually KNOWS which compartment is
-    # observed; everything below it is inference. `ui$central` is NULL for both
-    # nonmem2rx and rxode2, so before this the answer was always
-    # tail(state_names, 1) -- correct only when the observed compartment happens
-    # to be declared last, which every bundled model happened to satisfy.
-    if (!is.null(obs_hint) && !is.null(obs_hint$index) &&
+    # WHICH COMPARTMENT IS OBSERVED, in order of authority.
+    #
+    # 1. A compartment the DV expression names OUTRIGHT. In NONMEM that is
+    #    `$ERROR Y = A(2)/S2`, and nonmem2rx hands it over resolved:
+    #    `y <- CENT/scale2 * (1 + eps1)`. Nothing beats the model saying it.
+    # 2. $MODEL's DEFOBS. This is what NONMEM's bare `F` MEANS -- `IPRE = F`
+    #    with `COMP=(EFFECT,DEFOBS)` is the effect compartment -- so it is the
+    #    authority exactly when the DV expression went through `F`.
+    # 3. tail(state_names, 1). A guess, and announced as one.
+    #
+    # The order matters and is not interchangeable. Taking DEFOBS first
+    # regressed models that were previously right: with
+    # `COMP=(DEPOT,DEFDOSE,DEFOBS) / COMP=(CENT)` and `$ERROR Y = A(2)/S2`, the
+    # source explicitly observes CENT while DEFOBS names DEPOT, and preferring
+    # DEFOBS emitted obs_cmt=DEPOT with no [scaling] and no warning. Taking the
+    # DV expression first regresses pkpd_ir.mod the other way: there `IPRE = F`
+    # carries no compartment of its own, nonmem2rx defaults `f <- CENTRAL`
+    # ignoring DEFOBS, and the observed compartment is really EFFECT.
+    explicit <- .explicit_obs_states(lst, state_raw)
+    if (length(explicit) == 1L) {
+      obs_cmt     <- if (explicit %in% names(state_decl)) state_decl[[explicit]]
+                     else                                 explicit
+      obs_cmt_num <- match(explicit, state_raw)
+      # Say so when the source contradicts itself, rather than picking silently.
+      if (!is.null(obs_hint) && is.character(obs_hint$name) &&
+          !.same_cmt_name(explicit, obs_hint$name))
+        warn <- c(warn, paste0(
+          "WARN  | the observation expression reads compartment '", explicit,
+          "' but $MODEL declares '", obs_hint$name, "' as DEFOBS. The ",
+          "expression was used, since it names the compartment outright. ",
+          "Verify obs_cmt in [structural_model]."))
+    } else if (length(explicit) > 1L) {
+      warn <- c(warn, paste0(
+        "WARN  | the observation expression reads more than one compartment (",
+        paste(explicit, collapse = ", "), "), so it does not identify a single ",
+        "observed compartment."))
+    }
+
+    # 2. $MODEL DEFOBS, read from the raw control stream. `ui$central` is NULL
+    #    for both nonmem2rx and rxode2, so without this the answer below was
+    #    always the positional guess.
+    if (is.null(obs_cmt) && !is.null(obs_hint) && !is.null(obs_hint$index) &&
+        is.numeric(obs_hint$index) && length(obs_hint$index) == 1L &&
+        !is.na(obs_hint$index) &&
         obs_hint$index >= 1L && obs_hint$index <= length(state_names)) {
-      # Cross-check the name before trusting the position. The index is a
-      # $MODEL COMP ordinal and state_names is d/dt order; they agree in every
-      # model seen, but if they ever diverge, silently observing the wrong
-      # compartment is the failure this whole fix exists to remove.
+      # Cross-check the name before trusting the position: the index is a
+      # $MODEL COMP ordinal and state_names is d/dt order. Silently observing
+      # the wrong compartment is the failure this exists to remove, so a
+      # disagreement refuses the hint rather than believing it.
       if (.same_cmt_name(state_raw[obs_hint$index], obs_hint$name)) {
         obs_cmt     <- state_names[[obs_hint$index]]
         obs_cmt_num <- obs_hint$index
@@ -383,9 +475,31 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
           scaling <- list(obs_scale = matched)
           warn    <- c(warn, paste0("INFO  | S", obs_idx, " = ", svar,
                                     " detected -- emitting [scaling] obs_scale = ", matched))
+        } else {
+          warn <- c(warn, paste0(
+            "ERROR | $PK sets S", obs_idx, " = ", svar, " for the observed ",
+            "compartment, but '", svar, "' is neither a theta nor an individual ",
+            "parameter in the translated model, so no [scaling] block was ",
+            "emitted. The prediction will be an amount where the data are ",
+            "concentrations."))
+          unsp <- c(unsp, paste0("observation scaling variable not resolvable: ", svar))
         }
       }
     }
+    # A parsed scaling for some OTHER compartment is not automatically wrong --
+    # NONMEM models routinely scale several -- but one for the OBSERVED
+    # compartment that never made it into the file is the S2=V silent-divergence
+    # class. Success was announced at INFO and failure said nothing at all,
+    # which is exactly inverted; the `else` above covers the resolvable-name
+    # half and this covers the no-entry-at-all half.
+    if (!is.na(obs_idx) && is.null(scaling_hint[[as.character(obs_idx)]]) &&
+        length(scaling_hint) > 0L)
+      warn <- c(warn, paste0(
+        "WARN  | $PK declares scaling for compartment(s) ",
+        paste(names(scaling_hint), collapse = ", "), " but not for the observed ",
+        "compartment ", obs_idx, " ('", structural$obs_cmt, "'), so no [scaling] ",
+        "block was emitted. Verify that the observation is already on the ",
+        "data's scale."))
   }
 
   lincmt_found <- identical(structural$type, "lincmt")
@@ -438,6 +552,52 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 
   .assert_state_param_disjoint(expr_out$odes, expr_out$indiv_params)
+
+  # Resolve captured `STATE(0) <- expr` statements into `[odes] init(STATE) =`.
+  #
+  # ferx supports this (ferx-core parses an `init(...)` directive inside
+  # [odes]), but with a narrower scope than an ODE right-hand side: an init
+  # expression may reference individual parameters, other states and literals,
+  # and NOT thetas -- measured against the installed engine, `init(EFFECT) = BL`
+  # validates when BL is an individual parameter and `init(EFFECT) = TVBL` is an
+  # E_PARSE naming TVBL as undefined. So emit when everything the expression
+  # references is in scope, and say plainly what is out of scope when it is not,
+  # rather than dropping it or emitting a file the engine will reject.
+  #
+  # A theta-referencing init needs the same carrier an ODE-referencing theta
+  # needs. That mechanism is being built separately; this deliberately does not
+  # grow a second one.
+  init_conds <- list()
+  if (length(expr_out$init_conds) > 0) {
+    ip_names <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+    st_names <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
+    for (ic in expr_out$init_conds) {
+      state <- if (ic$state_raw %in% names(state_decl)) state_decl[[ic$state_raw]]
+               else                                     ic$state_raw
+      if (!toupper(state) %in% st_names) {
+        warn <- c(warn, paste0(
+          "ERROR | initial condition for '", ic$state_raw, "' names no ODE state ",
+          "in the translated model, so it was dropped."))
+        next
+      }
+      out_of_scope <- setdiff(ic$syms, c(ip_names, st_names))
+      if (length(out_of_scope) > 0) {
+        warn <- c(warn, paste0(
+          "ERROR | initial condition for '", state, "' references ",
+          paste(out_of_scope, collapse = ", "),
+          ", which ferx does not resolve inside an init expression (only ",
+          "individual parameters, other states and literals are in scope there). ",
+          "The initial condition was dropped, so the compartment starts at 0. ",
+          "Define the value as an individual parameter in the source model to ",
+          "carry it over."))
+        next
+      }
+      init_conds <- c(init_conds, list(list(state = state, rhs = ic$rhs)))
+      warn <- c(warn, paste0(
+        "INFO  | initial condition for '", state, "' emitted as 'init(", state,
+        ") = ", ic$rhs, "'."))
+    }
+  }
 
   # ferx-core checks RESERVED_ODE_NAMES against states, individual parameters
   # AND ODE intermediates (model_parser.rs, eq_ignore_ascii_case). The state
@@ -503,6 +663,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     indiv_params  = expr_out$indiv_params,
     structural    = structural,
     odes          = expr_out$odes,
+    initial_conditions = init_conds,
     error_model   = expr_out$error_model,
     scaling       = scaling,
     fit_options   = fit_opts,
@@ -623,6 +784,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # read the integrator clock and leaves the estimated theta unreferenced, and the
 # only diagnostic is a W_UNUSED_PARAM that says nothing about why.
 .RESERVED_ODE_NAMES <- c("TIME", "T", "TAFD", "TAD", "MACHEPS")
+
+# Names an init() expression may reference for free, on top of the individual
+# parameters and states ferx resolves there.
+.ODE_LITERALS <- c(.RESERVED_ODE_NAMES, "EXP", "LOG", "SQRT", "ABS", "POW")
 
 # Names referenced by the model but never assigned and never declared in iniDf.
 # ferx reads every such name as a covariate (a data column), and resolves theta
@@ -767,6 +932,45 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(map = map, warnings = warn)
 }
 
+# The state(s) the DV expression names OUTRIGHT, resolved transitively through
+# intermediate assignments.
+#
+# `f`/`ipred`/`ipre`/`pred` are deliberately NOT expanded. nonmem2rx renders
+# NONMEM's `F` -- the model prediction, which is precisely what DEFOBS defines --
+# as the variable `f`, and then defaults it to a compartment of its own choosing
+# regardless of DEFOBS (`pkpd_ir.mod` has `COMP=(EFFECT,DEFOBS)` and nonmem2rx
+# still emits `f <- CENTRAL`). Following that route would launder nonmem2rx's
+# guess into an "explicit" answer and quietly outrank the real DEFOBS. A path
+# that stops at `f` means "the model went through F", which is the signal to let
+# DEFOBS decide.
+.explicit_obs_states <- function(lst, states) {
+  if (length(states) == 0L) return(character())
+  defs <- list()
+  for (e in lst)
+    if (.is_assignment(e) && is.symbol(e[[2]]))
+      defs[[as.character(e[[2]])]] <- e[[3]]
+  seed <- NULL
+  for (e in lst) {
+    if (.is_tilde(e)) { seed <- e; break }
+    if (.is_assignment(e) && is.symbol(e[[2]]) &&
+        tolower(as.character(e[[2]])) == "y") seed <- e[[3]]
+  }
+  if (is.null(seed)) return(character())
+  seen <- character(); hits <- character()
+  walk <- function(ex, depth) {
+    if (depth > 20L) return(invisible(NULL))
+    for (sym in .collect_symbols(ex)) {
+      if (tolower(sym) %in% c("f", "ipred", "ipre", "pred")) next
+      if (toupper(sym) %in% toupper(states)) hits <<- c(hits, sym)
+      if (sym %in% seen) next
+      seen <<- c(seen, sym)
+      if (!is.null(defs[[sym]])) walk(defs[[sym]], depth + 1L)
+    }
+  }
+  walk(seed, 0L)
+  unique(hits)
+}
+
 # Does a d/dt state name refer to the same compartment $MODEL called `model_nm`?
 #
 # They are rarely spelled identically. nonmem2rx lowercases, and prefixes `c.`
@@ -792,14 +996,68 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # rxini.rxddta4.)", which names nothing they wrote. Follows a single hop only --
 # these aliases are never chained, and a fixpoint walk here would just be an
 # untested loop.
+# ONE definition of "this is a nonmem2rx internal temporary", consulted by both
+# .resolve_alias() and pass 3's skip list. They used to be two hand-maintained
+# lists that disagreed: this one knew `rxdur`/`rxrate`/`rxalag`, pass 3 knew only
+# `RXINI`/`RXF_`/`RXM_`, so `dur(cmt) <- rxdur.rxddta1.` was correctly reported
+# as a dropped feature while its companion binding `rxdur.rxddta1. <- 2` sailed
+# through .norm() and was emitted as `[individual_parameters] RXDUR_RXDDTA1_ = 2`
+# -- a nonmem2rx internal presented to the user as a model parameter, in the
+# same file that says the feature was dropped.
+.NM2RX_TEMP_RE <- "^rx(f|ini|m|dur|rate|alag|lag)[._]"
+
+# Matches the same set after .norm() has uppercased and folded the separator.
+.NM2RX_TEMP_NORM_RE <- "^RX(F|INI|M|DUR|RATE|ALAG|LAG)_"
+
+# nonmem2rx does not inline the value of an f()/alag()/init assignment -- it
+# emits an alias and binds it separately:
+#
+#   f(ABS)        <- rxf.rxddta1.        rxf.rxddta1.   <- 1
+#   EFFECT(0)     <- rxini.rxddta4.      rxini.rxddta4. <- bl
+#
+# so the right-hand side at the point of use is a meaningless internal name.
+# Resolving it decides whether the statement is a no-op and lets the diagnostic
+# name the user's own variable rather than `rxini.rxddta4.`.
+#
+# Returns the binding ONLY when the alias is bound exactly once. A symbol bound
+# more than once is not a constant, and treating it as one silently deleted real
+# model structure: the standard relative-bioavailability idiom
+# `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)` gives two bindings, and taking the
+# first made `const(1)` true, so the translator reported "sets the value ferx
+# already uses, so dropping it does not change the model" -- actively asserting
+# that nothing was lost while the formulation-dependent F disappeared.
 .resolve_alias <- function(expr, lst) {
-  if (!is.symbol(expr)) return(expr)
+  if (!is.symbol(expr)) return(list(value = expr, n_bindings = NA_integer_))
   nm <- as.character(expr)
-  if (!grepl("^rx(f|ini|m|dur|rate|alag)[._]", nm, ignore.case = TRUE)) return(expr)
-  for (e in lst)
+  if (!grepl(.NM2RX_TEMP_RE, nm, ignore.case = TRUE))
+    return(list(value = expr, n_bindings = NA_integer_))
+  hits <- list()
+  # .collect_assignments() walks into `if` bodies too: a binding inside a
+  # conditional is exactly the case that must not read as a constant.
+  for (e in .flatten_stmts(lst))
     if (.is_assignment(e) && is.symbol(e[[2]]) && identical(as.character(e[[2]]), nm))
-      return(e[[3]])
-  expr
+      hits <- c(hits, list(e[[3]]))
+  if (length(hits) == 0L) return(list(value = expr, n_bindings = 0L))
+  list(value = hits[[1]], n_bindings = length(hits))
+}
+
+# Every statement, including those nested inside `if`/`else` blocks and `{`.
+# nonmem2rx renders `IF (FORM.EQ.2) F1 = THETA(4)` as an `if` whose body rebinds
+# the alias, and a top-level-only walk cannot see it.
+.flatten_stmts <- function(lst) {
+  out <- list()
+  visit <- function(e) {
+    if (!is.call(e)) return(invisible(NULL))
+    head <- as.character(e[[1]])[1]
+    if (head %in% c("{", "if")) {
+      for (i in seq_along(e)[-1]) visit(e[[i]])
+      return(invisible(NULL))
+    }
+    out[[length(out) + 1L]] <<- e
+    invisible(NULL)
+  }
+  for (e in lst) visit(e)
+  out
 }
 
 # Name the modelling feature behind a call-shaped assignment target, so the
@@ -810,39 +1068,56 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # unrecognised rather than guessed at.
 .describe_dropped_lhs <- function(lhs, rhs = NULL) {
   src  <- paste(deparse(lhs, width.cutoff = 500L), collapse = " ")
-  head <- if (is.call(lhs) && is.symbol(lhs[[1]])) tolower(as.character(lhs[[1]]))
-          else ""
+  head_raw <- if (is.call(lhs) && is.symbol(lhs[[1]])) as.character(lhs[[1]]) else ""
+  head <- tolower(head_raw)
   arg  <- if (is.call(lhs) && length(lhs) > 1)
             paste(deparse(lhs[[2]], width.cutoff = 500L), collapse = " ") else ""
-  # Is the right-hand side the literal value that makes this statement a no-op?
-  # `F1 = 1` sets bioavailability to its own default, `ALAG1 = 0` sets no lag,
-  # `A_0(n) = 0` sets the initial condition every compartment already has. The
-  # model is IDENTICAL without them, so dropping one loses nothing -- but
-  # reporting it as untranslatable puts a feature in $unsupported that the model
-  # does not actually use, and per CLAUDE.md that field is the ferx-core
-  # prioritisation signal. A false "we need bioavailability" is the same class
-  # of phantom this finding was about, so identity assignments are noted at INFO
-  # and kept out of the gap list.
   const <- function(v) is.numeric(rhs) && length(rhs) == 1L && !is.na(rhs) && rhs == v
+
+  # `STATE(0) <- ...` is tested FIRST, before the keyword table. The head of an
+  # initial condition is the STATE's name, so a compartment legitimately called
+  # F, LAG, DUR or RATE matched the table instead: `F(0) <- 1` was described as
+  # "bioavailability for compartment '0'", and because `const(1)` is the
+  # bioavailability no-op it was downgraded to an INFO and dropped with no gap
+  # entry at all -- an initial condition of 1 silently discarded. The `(0)`
+  # argument is unambiguous; the head is not.
+  if (nzchar(head) && identical(arg, "0"))
+    return(list(kind = "init", what = paste0("initial condition for compartment '",
+                                             head_raw, "'"),
+                state = head_raw, src = src, gap = NA_character_,
+                noop = const(0)))
+
+  # ferx DOES support all of these -- ferx-core maps F{cmt} -> `f=`,
+  # ALAG{cmt} -> `lagtime=`, D{cmt}/R{cmt} -> duration/rate, and ferx-r ships
+  # bioavailability.ferx and warfarin_ode_lagtime.ferx as worked examples. So
+  # `gap` is NA for every one of them: they are a ferxtranslate limitation, not
+  # a ferx feature gap, and $unsupported is defined as the ferx-core
+  # prioritisation signal. Filing them there asked the engine team to build what
+  # they had already shipped.
   known <- list(
-    f    = list("bioavailability",              "bioavailability (f)",       1),
-    alag = list("dose lag time",                "dose lag time (alag)",      0),
-    lag  = list("dose lag time",                "dose lag time (lag)",       0),
-    dur  = list("zero-order infusion duration", "infusion duration (dur)",   NA),
-    rate = list("zero-order infusion rate",     "infusion rate (rate)",      NA))
+    f    = list("bioavailability",              1),
+    alag = list("dose lag time",                0),
+    lag  = list("dose lag time",                0),
+    dur  = list("zero-order infusion duration", NA),
+    rate = list("zero-order infusion rate",     NA))
   if (head %in% names(known)) {
     k <- known[[head]]
-    return(list(what = paste0(k[[1]], " for compartment '", arg, "'"),
-                src = src, gap = k[[2]],
-                noop = !is.na(k[[3]]) && const(k[[3]])))
+    return(list(kind = head, what = paste0(k[[1]], " for compartment '", arg, "'"),
+                state = arg, src = src, gap = NA_character_,
+                noop = !is.na(k[[2]]) && const(k[[2]])))
   }
-  # `CENT(0) <- ...` -- a state initial condition. The head is the state name,
-  # so it cannot be matched against a fixed list; the `(0)` argument is the tell.
-  if (nzchar(head) && identical(arg, "0"))
-    return(list(what = paste0("initial condition for compartment '", head, "'"),
-                src = src, gap = "state initial condition", noop = const(0)))
-  list(what = "statement with an unrecognised assignment target", src = src,
+  list(kind = "unknown",
+       what = "statement with an unrecognised assignment target",
+       state = NA_character_, src = src,
        gap = paste0("unsupported assignment target: ", src), noop = FALSE)
+}
+
+# The emitted name already bound to a raw source name, for the duplicate report.
+bound_name <- function(entries, raw) {
+  for (e in entries)
+    for (j in seq_along(e$name))
+      if (!is.na(e$raw[j]) && identical(e$raw[j], raw)) return(e$name[j])
+  raw
 }
 
 # Make every emitted random-effect name unique, and report the source name each
@@ -871,8 +1146,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # `entries` is a list of list(name=, raw=), in emission order. The FIRST
 # occurrence keeps the name -- renaming it instead would churn a name the user
 # reads for the benefit of a later duplicate.
-.uniquify_random_names <- function(entries) {
-  used <- character()
+.uniquify_random_names <- function(entries, taken = character()) {
+  used <- taken
   warn <- character()
   out  <- entries
   for (i in seq_along(entries)) {
@@ -884,7 +1159,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       if (!identical(cand, nms[j]))
         warn <- c(warn, paste0(
           "INFO  | random effect '", raw[j], "' emits as '", cand, "': '", nms[j],
-          "' is already taken by another random effect (ferx compares names ",
+          "' is already taken by another emitted name (ferx compares names ",
           "case-insensitively, and distinct source names can normalise onto ",
           "one spelling)"))
       new[j] <- cand
@@ -1293,6 +1568,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   # Variables known to hold structural-model outputs (linCmt, ODE states).
   # Propagated forward; used in pass 2 to classify auxiliaries.
+  init_conds <- list()
   aux_vars <- toupper(sigma_names)  # eps1, eps2, ...
 
   for (expr in lst) {
@@ -1354,20 +1630,54 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # once parsing moves on, all that survives is an assignment that was
       # never made.
       if (!is.symbol(lhs_expr)) {
-        val <- .resolve_alias(expr[[3]], lst)
-        d   <- .describe_dropped_lhs(lhs_expr, val)
-        if (isTRUE(d$noop)) {
+        res <- .resolve_alias(expr[[3]], lst)
+        val <- res$value
+        # Only a symbol bound EXACTLY once may be read as a constant. `NA`
+        # n_bindings means the RHS was not an alias at all (a literal in the
+        # source), which is a constant by definition.
+        single <- is.na(res$n_bindings) || identical(res$n_bindings, 1L)
+        d   <- .describe_dropped_lhs(lhs_expr, if (single) val else NULL)
+        shown <- paste(deparse(val), collapse = " ")
+
+        if (identical(d$kind, "init")) {
+          # ferx HAS initial conditions: `init(STATE) = <expr>` inside [odes].
+          # Emit it when the expression is in scope there -- ferx allows
+          # individual parameters, other states and literals, but NOT thetas --
+          # and report honestly when it is not, rather than claiming ferx
+          # cannot do it.
+          init_expr <- .normalise_expr(val, .pin_names(name_map, state_ode_pins))
+          init_syms <- setdiff(toupper(.collect_symbols(init_expr)), .ODE_LITERALS)
+          if (isTRUE(d$noop)) {
+            warnings <- c(warnings, paste0(
+              "INFO  | ", d$what, " (", d$src, " = ", shown, ") sets 0, which is ",
+              "already every compartment's initial value, so dropping it does ",
+              "not change the model."))
+          } else {
+            init_conds <- c(init_conds, list(list(
+              state_raw = d$state,
+              rhs       = paste(deparse(init_expr, width.cutoff = 500L), collapse = " "),
+              syms      = init_syms)))
+          }
+        } else if (isTRUE(d$noop)) {
           warnings <- c(warnings, paste0(
-            "INFO  | ", d$what, " (", d$src, " = ",
-            paste(deparse(val), collapse = " "), ") sets the value ferx ",
+            "INFO  | ", d$what, " (", d$src, " = ", shown, ") sets the value ferx ",
             "already uses, so dropping it does not change the model."))
         } else {
-          warnings   <- c(warnings, paste0(
-            "ERROR | ", d$what, " (", d$src, " = ",
-            paste(deparse(val), collapse = " "), ") cannot be translated -- ferx ",
-            "has no equivalent, so the statement is dropped and the fitted model ",
-            "will not include it."))
-          unsupported <- c(unsupported, d$gap)
+          # NOT "ferx has no equivalent". ferx-core maps F{cmt} -> `f=`,
+          # ALAG{cmt} -> `lagtime=` and D/R -> duration/rate, and ferx-r ships
+          # bioavailability.ferx and warfarin_ode_lagtime.ferx. This is a
+          # ferxtranslate limitation, so it does NOT go into $unsupported --
+          # that field is the ferx-core feature-gap signal, and a phantom entry
+          # there asks the engine team to build what they already shipped.
+          more <- if (!single) paste0(
+            " The source binds it more than once (a conditional override), so ",
+            "no single value could be carried over even once this is supported.")
+            else ""
+          warnings <- c(warnings, paste0(
+            "ERROR | ", d$what, " (", d$src, " = ", shown, ") is supported by ",
+            "ferx but is not yet emitted by ferxtranslate, so the statement is ",
+            "dropped and the fitted model will not include it.", more))
+          if (!is.na(d$gap)) unsupported <- c(unsupported, d$gap)
         }
         next
       }
@@ -1478,7 +1788,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
     # SCALE* vars are NONMEM-specific scaling intermediates.
     # RXINI* / RXF_* / RXM_* are nonmem2rx internal temporaries and IOV aliases.
-    if (grepl("^SCALE\\d*$|^RXINI|^RXF_|^RXM_", a$lhs)) next
+    if (grepl("^SCALE\\d*$", a$lhs) || grepl(.NM2RX_TEMP_NORM_RE, a$lhs)) next
 
     if (a$lhs %in% aux_vars) {
       # Check if this is the error model assignment (RHS contains sigma vars).
@@ -1506,6 +1816,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(
     indiv_params = indiv_params,
     odes         = odes,
+    init_conds   = init_conds,
     error_model  = error_model,
     structural   = structural,
     warnings     = warnings,

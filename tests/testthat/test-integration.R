@@ -201,8 +201,15 @@ test_that("every bundled model translates, without a shadowing theta", {
   gaps      <- character()
 
   for (m in models) {
+    # Through the SAME path a user gets, hints and all. Calling rxui_to_ir()
+    # bare swept every model through the pre-fix guessing path: defobs_not_last.ctl,
+    # the fixture bundled specifically to guard DEFOBS, came out with
+    # obs_cmt=PERIPH and no [scaling] here while nm_to_ferx() gave obs_cmt=CENT
+    # and obs_scale=V. The gate was inspecting output no user could obtain.
     ir <- tryCatch(suppressWarnings(
-                     rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem")),
+                     rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem",
+                                scaling_hint = .extract_nm_scaling(m),
+                                obs_hint     = .extract_nm_defobs(m))),
                    error = function(e) conditionMessage(e))
     if (is.character(ir)) {
       crashed <- c(crashed, paste0(basename(m), " -- ", ir))
@@ -273,9 +280,18 @@ test_that("every bundled model translates, without a shadowing theta", {
     # `grepl(b, ir$unsupported, fixed = TRUE)` exempted a name because some
     # unrelated entry happened to contain those characters, which already
     # green-lit a genuinely unparseable `ode(states=[c.RTOT])`.
-    unsup_toks <- unique(unlist(regmatches(
-      ir$unsupported, gregexpr("[A-Za-z_][A-Za-z0-9_.]*", ir$unsupported))))
-    bad <- setdiff(bad, unsup_toks)
+    # Only names reported as an untranslatable COVARIATE are exempt, and the
+    # name is taken from that entry's fixed prefix rather than by tokenising the
+    # whole string. Harvesting every token from every $unsupported entry is
+    # self-defeating now that entries can carry deparsed source: a model with
+    # `q(A.B) <- ...` yields "unsupported assignment target: q(A.B)", whose
+    # tokens include `A.B`, which then exempted `A.B` everywhere else in the
+    # file -- including a genuinely unparseable `ode(states=[A.B])`.
+    cov_pref   <- "covariate name is not a legal ferx identifier: "
+    exempt     <- sub(cov_pref, "",
+                      grep(cov_pref, ir$unsupported, fixed = TRUE, value = TRUE),
+                      fixed = TRUE)
+    bad <- setdiff(bad, exempt)
     if (length(bad) > 0)
       illegal <- c(illegal, paste0(basename(m), ": ", paste(bad, collapse = ", ")))
 

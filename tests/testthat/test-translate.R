@@ -199,14 +199,6 @@ test_that("mlx_to_ferx errors cleanly without monolix2rx", {
 
 # -- $DATA path resolution ----------------------------------------------------
 
-# Base-R scratch directory; withr is not a declared dependency of this package.
-# R clears tempdir() at session end, so no explicit cleanup is needed.
-tmp_ctl_dir <- function() {
-  d <- tempfile("ferxtr-")
-  dir.create(d)
-  d
-}
-
 test_that("$DATA path resolves relative to the control stream", {
   dir  <- tmp_ctl_dir()
   data <- file.path(dir, "mydata.csv")

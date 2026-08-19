@@ -25,6 +25,13 @@
 #' @param odes List of ODE entries. Each element is a list with `state`
 #'   (character) and `rhs` (character). Used only when
 #'   `structural$type == "ode"`.
+#' @param initial_conditions List of ODE initial-condition entries. Each element
+#'   is a list with `state` (character, an emitted state name) and `rhs`
+#'   (character, the expression). Rendered as `init(<state>) = <rhs>` inside the
+#'   `[odes]` block. ferx resolves an init expression against individual
+#'   parameters, other states and literals only -- not thetas -- so
+#'   [rxui_to_ir()] drops and reports one that would reference anything else
+#'   rather than emitting a file the engine rejects.
 #' @param diffusion List of diffusion entries. Each element is a list with
 #'   `state` (character) and `value` (numeric).
 #' @param error_model List of error model entries. Each element is a list
@@ -69,6 +76,7 @@ new_ferx_ir <- function(
   indiv_params  = list(),
   structural    = list(),
   odes          = list(),
+  initial_conditions = list(),
   diffusion     = list(),
   error_model   = list(),
   scaling       = list(),
@@ -88,6 +96,7 @@ new_ferx_ir <- function(
       indiv_params  = indiv_params,
       structural    = structural,
       odes          = odes,
+      initial_conditions = initial_conditions,
       diffusion     = diffusion,
       error_model   = error_model,
       scaling       = scaling,
@@ -146,7 +155,14 @@ validate_ferx_ir <- function(ir) {
       cli::cli_abort(
         "structural$states must be a non-empty character vector when structural$type is {.val ode}."
       )
-    if (is.null(ir$structural$obs_cmt) || !is.character(ir$structural$obs_cmt))
+    # length must be checked, not just type. is.character() is TRUE for
+    # character(0) and for a length-2 vector, and both then reach the `%in%`
+    # below, whose `if` aborts with "argument is of length zero" / "the
+    # condition has length > 1" -- a base-R error naming neither field. This is
+    # the same trap rxui_to_ir() records for `ui$central`; it must not be
+    # reintroduced in the exported validator.
+    if (is.null(ir$structural$obs_cmt) || !is.character(ir$structural$obs_cmt) ||
+        length(ir$structural$obs_cmt) != 1L)
       cli::cli_abort(
         "structural$obs_cmt must be a character scalar when structural$type is {.val ode}."
       )
@@ -198,22 +214,44 @@ validate_ferx_ir <- function(ir) {
 # working reference into E_MISSING_COVARIATE at fit time. Those are reported as
 # untranslatable by the translator instead. Nothing in the declared set has that
 # exemption, so the check needs no allowlist -- which is why it can be an abort.
+# Returns a data.frame of (channel, name) rather than a named vector. The names
+# have to travel with a label saying which field produced them -- "c.RTOT is
+# illegal" leaves the reader hunting through eleven fields -- and deriving that
+# label by stripping digits off `c()`-generated suffixes does not survive real
+# input: `pk_args` keys legitimately end in digits, so `pk_arg.v1` and
+# `pk_arg.v2` both stripped to `pk_arg.v` and two different macro slots were
+# reported under one label. A parallel vector cannot collapse that way.
 .ir_declared_names <- function(ir) {
-  nm <- function(xs, f) if (length(xs) == 0) character() else unlist(lapply(xs, f))
-  c(theta        = nm(ir$thetas,       function(t) t$name),
-    omega        = nm(ir$omegas,       function(o) o$names),
-    kappa        = nm(ir$kappas,       function(k) k$name),
-    sigma        = nm(ir$sigmas,       function(s) s$name),
-    indiv_param  = nm(ir$indiv_params, function(p) p$lhs),
-    ode_state    = nm(ir$odes,         function(o) o$state),
-    diffusion    = nm(ir$diffusion,    function(d) d$state),
-    error_dv     = nm(ir$error_model,  function(e) e$dv),
-    error_param  = nm(ir$error_model,  function(e) e$params),
-    state        = if (is.null(ir$structural$states))  character() else ir$structural$states,
-    obs_cmt      = if (is.null(ir$structural$obs_cmt)) character() else ir$structural$obs_cmt,
-    pk_arg       = if (is.null(ir$structural$pk_args)) character()
-                   else unlist(ir$structural$pk_args),
-    state_rename = unname(ir$state_renames))
+  nm  <- function(xs, f) unlist(lapply(xs, f))
+  add <- function(channel, values) {
+    values <- as.character(values)
+    if (length(values) == 0) return(NULL)
+    data.frame(channel = rep(channel, length(values)), name = values,
+               stringsAsFactors = FALSE)
+  }
+  out <- list(
+    add("theta",        nm(ir$thetas,       function(t) t$name)),
+    add("omega",        nm(ir$omegas,       function(o) o$names)),
+    add("kappa",        nm(ir$kappas,       function(k) k$name)),
+    add("sigma",        nm(ir$sigmas,       function(s) s$name)),
+    add("indiv_param",  nm(ir$indiv_params, function(p) p$lhs)),
+    add("ode state",    nm(ir$odes,         function(o) o$state)),
+    add("initial condition", nm(ir$initial_conditions, function(x) x$state)),
+    add("diffusion",    nm(ir$diffusion,    function(d) d$state)),
+    add("error dv",     nm(ir$error_model,  function(e) e$dv)),
+    add("error param",  nm(ir$error_model,  function(e) e$params)),
+    add("state",        ir$structural$states),
+    add("obs_cmt",      ir$structural$obs_cmt),
+    add("state rename", unname(ir$state_renames)))
+  # pk_args is a NAMED list and both halves are emitted (`cl=CL`), so the slot
+  # name is part of the label rather than a separate channel.
+  pk <- ir$structural$pk_args
+  if (length(pk) > 0) {
+    keys <- if (is.null(names(pk))) rep("?", length(pk)) else names(pk)
+    for (i in seq_along(pk))
+      out <- c(out, list(add(paste0("pk_arg ", keys[i]), pk[[i]])))
+  }
+  do.call(rbind, Filter(Negate(is.null), out))
 }
 
 .validate_ir_names <- function(ir) {
@@ -235,16 +273,28 @@ validate_ferx_ir <- function(ir) {
   }
 
   declared <- .ir_declared_names(ir)
-  declared <- declared[nzchar(declared)]
-  bad      <- declared[!.is_ferx_ident(declared)]
-  if (length(bad) > 0) {
-    # Report the channel, not just the name: "c.RTOT is illegal" leaves the
-    # reader hunting for which of eleven fields produced it.
-    where <- sub("[0-9]*$", "", names(bad))
+  if (!is.null(declared)) declared <- declared[nzchar(declared$name), , drop = FALSE]
+  bad <- if (is.null(declared)) declared[0, ]
+         else declared[!.is_ferx_ident(declared$name), , drop = FALSE]
+  if (!is.null(bad) && nrow(bad) > 0) {
+    # The offending name is passed as a cli VALUE, never pasted into the format
+    # string. cli evaluates `{...}` in the format string as R code, and the
+    # names reaching this line are exactly those .is_ferx_ident() rejected --
+    # which rejects `{` -- so brace-carrying names are the whole population
+    # here. Interpolated, a theta named `X{Sys.getenv("USER")}` had the
+    # expression EVALUATED into the abort text, and `CL{foo}` replaced the
+    # diagnostic with "Could not evaluate cli {} expression". The repo already
+    # guards this elsewhere (test-translate.R, "engine text with braces is never
+    # evaluated as cli syntax"); the same rule applies to any attacker- or
+    # source-controlled string, and every name here is source-controlled.
+    detail <- setNames(
+      vapply(seq_len(nrow(bad)),
+             function(i) paste0("{.field ", bad$channel[i], "}: {.val {bad$name[", i, "]}}"),
+             character(1)),
+      rep("x", nrow(bad)))
     cli::cli_abort(c(
-      "The IR declares {length(bad)} name{?s} that {?is/are} not {?a/} legal ferx identifier{?s}.",
-      setNames(paste0("{.field ", where, "}: {.val ", unname(bad), "}"),
-               rep("x", length(bad))),
+      "The IR declares {nrow(bad)} name{?s} that {?is/are} not {?a/} legal ferx identifier{?s}.",
+      detail,
       i = "ferx names are letters, digits and underscore, and must not start with a digit.",
       i = "This is a ferxtranslate bug, not a source-model limitation -- the emitted file would not parse."
     ))
