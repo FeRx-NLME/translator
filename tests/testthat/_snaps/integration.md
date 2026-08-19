@@ -347,7 +347,8 @@
     Output
       # Translated from nonmem: pkpd_ir.mod
       # Warnings: 1 -- run result$warnings for details
-      # WARNING: obs_cmt could not be inferred -- guessed 'EFFECT', verify in [structural_model]
+      # WARNING: state initial condition
+      # WARNING: initial condition for compartment 'effect' (EFFECT(0) = bl) cannot be translated -- ferx has no equivalent, so the statement is dropped and the fitted model will not include it.
       
       [parameters]
         theta TH1(1.95, -1e15, 1e15)

@@ -1446,3 +1446,125 @@ test_that("a state whose source name is also a parameter name is scope-resolved"
                                   gregexpr("exp(", ir$odes[[1]]$rhs, fixed = TRUE))),
                0L)
 })
+
+# -- $MODEL DEFOBS ------------------------------------------------------------
+
+test_that(".extract_nm_defobs reads DEFOBS wherever it is declared", {
+  f <- withr::local_tempfile(fileext = ".ctl")
+  writeLines(c("$PROBLEM x", "$MODEL",
+               "  COMP=(CENT, DEFDOSE, DEFOBS)", "  COMP=(PERIPH)", "$PK"), f)
+  out <- .extract_nm_defobs(f)
+  expect_equal(out$index, 1L)
+  expect_equal(out$name, "CENT")
+  expect_equal(out$n_comp, 2L)
+})
+
+test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
+  mk <- function(...) {
+    f <- withr::local_tempfile(fileext = ".ctl", .local_envir = parent.frame())
+    writeLines(c("$PROBLEM x", "$MODEL", ..., "$PK"), f); f
+  }
+  # `COMP (...)` without `=`, space-separated attributes.
+  expect_equal(.extract_nm_defobs(mk("  COMP (DEPOT DEFDOSE)",
+                                     "  COMP (CENTRAL DEFOBS)"))$index, 2L)
+  # DEFOBSERVATION, the unabbreviated spelling.
+  expect_equal(.extract_nm_defobs(mk("  COMP=(A)",
+                                     "  COMP=(B, DEFOBSERVATION)"))$index, 2L)
+  # DEFDOSE must not be mistaken for DEFOBS -- they share the DEF prefix.
+  expect_null(.extract_nm_defobs(mk("  COMP=(A, DEFDOSE)", "  COMP=(B)")))
+  # A DEFOBS that only appears in a comment is not a declaration.
+  expect_null(.extract_nm_defobs(mk("  COMP=(A) ; DEFOBS goes here one day",
+                                    "  COMP=(B)")))
+  # No $MODEL at all.
+  f <- withr::local_tempfile(fileext = ".ctl")
+  writeLines(c("$PROBLEM x", "$PK"), f)
+  expect_null(.extract_nm_defobs(f))
+})
+
+test_that("DEFOBS decides obs_cmt AND the scaling compartment", {
+  skip_if_not_installed("nonmem2rx")
+  # The regression this exists for: with DEFOBS declared first, the old
+  # tail(state_names, 1) guess picked PERIPH, and because the scaling lookup
+  # derives its compartment number from the same guess, the correctly parsed
+  # `S1 = V` was discarded with no diagnostic.
+  p  <- nm_path("defobs_not_last.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  sc <- .extract_nm_scaling(p)
+  expect_equal(sc[["1"]], "V")          # parsing was never the problem
+
+  fixed <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                       scaling_hint = sc,
+                                       obs_hint = .extract_nm_defobs(p)))
+  expect_equal(fixed$structural$obs_cmt, "CENT")
+  expect_equal(fixed$scaling$obs_scale, "V")
+  expect_length(grep("obs_cmt could not be inferred", fixed$warnings), 0L)
+
+  # Without the hint -- the pre-fix behaviour -- both go wrong together.
+  guessed <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                         scaling_hint = sc, obs_hint = NULL))
+  expect_equal(guessed$structural$obs_cmt, "PERIPH")
+  expect_null(guessed$scaling$obs_scale)
+})
+
+test_that("a DEFOBS that disagrees with d/dt order is refused, not trusted", {
+  skip_if_not_installed("nonmem2rx")
+  p  <- nm_path("defobs_not_last.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  # $MODEL says compartment 1 is NOPE; the first d/dt is for CENT. Believing the
+  # index anyway would silently observe the wrong compartment, which is the
+  # failure the whole fix exists to remove.
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    obs_hint = list(index = 1L, name = "NOPE",
+                                                    n_comp = 2L)))
+  expect_match(ir$warnings, "orderings disagree", all = FALSE)
+  expect_equal(ir$structural$obs_cmt, "PERIPH")   # fell back to the guess
+})
+
+test_that(".same_cmt_name sees through nonmem2rx's c. prefix and case", {
+  expect_true(.same_cmt_name("c.RTOT", "RTOT"))
+  expect_true(.same_cmt_name("central", "CENTRAL"))
+  expect_true(.same_cmt_name("A.B", "A_B"))
+  expect_false(.same_cmt_name("CENT", "PERIPH"))
+  expect_false(.same_cmt_name(NA_character_, "CENT"))
+})
+
+# -- statements with a call-shaped assignment target --------------------------
+
+test_that("a dropped f()/alag() statement is reported, not silently discarded", {
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.TV", 10), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(v <- t.TV),
+              quote(f(depot) <- BIO.AV), quote(alag(depot) <- 0.5),
+              quote(d/dt(depot) <- -cl * depot),
+              quote(d/dt(central) <- cl * depot - cl/v * central))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_true("bioavailability (f)" %in% ir$unsupported)
+  expect_true("dose lag time (alag)" %in% ir$unsupported)
+  expect_match(ir$warnings, "bioavailability for compartment 'depot'", all = FALSE)
+})
+
+test_that("a name only reachable through a dropped statement is not a covariate", {
+  # BIO.AV appears solely on the RHS of `f(depot) <- BIO.AV`, which is never
+  # emitted. Reporting it as an illegal covariate prescribed renaming a data
+  # column that fixes nothing, and put a phantom entry in $unsupported -- which
+  # per CLAUDE.md is the ferx-core prioritisation signal.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- BIO.AV),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+  expect_length(grep("BIO.AV", ir$unsupported, fixed = TRUE), 0L)
+})
+
+test_that("a genuinely illegal covariate is still reported", {
+  # The other half: this one IS emitted, so the diagnostic is real and must
+  # survive the narrowing above.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1) * WT.KG),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_match(ir$warnings, "covariate reference", all = FALSE)
+  expect_match(ir$unsupported, "WT.KG", fixed = TRUE, all = FALSE)
+})

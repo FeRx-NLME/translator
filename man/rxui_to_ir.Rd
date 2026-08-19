@@ -8,7 +8,8 @@ rxui_to_ir(
   ui,
   source_format = NA_character_,
   source_file = NA_character_,
-  scaling_hint = list()
+  scaling_hint = list(),
+  obs_hint = NULL
 )
 }
 \arguments{
@@ -23,6 +24,11 @@ string) to the NONMEM \verb{Sn=} scaling variable name, as returned by
 \code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block for ODE models
 where the observed compartment is scaled (e.g. \code{S2=V}). The default empty
 list disables scaling translation.}
+
+\item{obs_hint}{Optional list with \code{index} (integer, 1-based \verb{$MODEL} COMP
+ordinal), \code{name} (character) and \code{n_comp} (integer), as returned by
+\code{.extract_nm_defobs()}. Names the observed compartment when the source is a
+NONMEM control stream; \code{NULL} falls back to inference.}
 }
 \value{
 A \code{ferx_ir} object.

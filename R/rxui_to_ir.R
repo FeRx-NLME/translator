@@ -7,6 +7,10 @@
 #' @param ui A rxUI S3 object (environment with `$iniDf` and `$lstExpr`).
 #' @param source_format One of `"nonmem"`, `"nlmixr2"`, `"monolix"`, or `NA`.
 #' @param source_file Path to the source file, or `NA`.
+#' @param obs_hint Optional list with `index` (integer, 1-based `$MODEL` COMP
+#'   ordinal), `name` (character) and `n_comp` (integer), as returned by
+#'   `.extract_nm_defobs()`. Names the observed compartment when the source is a
+#'   NONMEM control stream; `NULL` falls back to inference.
 #' @param scaling_hint Named list mapping compartment number (as a character
 #'   string) to the NONMEM `Sn=` scaling variable name, as returned by
 #'   `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
@@ -31,7 +35,7 @@
 #' }
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
-                       scaling_hint = list()) {
+                       scaling_hint = list(), obs_hint = NULL) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -274,25 +278,55 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 
   structural <- expr_out$structural
+  obs_cmt_num <- NA_integer_
   if (identical(structural$type, "ode")) {
     state_names <- vapply(expr_out$odes, function(o) o$state, "")
-    obs_cmt     <- tryCatch(ui$central, error = function(e) NULL)
-    # length must be checked, not just type: is.character() is TRUE for
-    # character(0) and for a length-2 vector, and both then reached an `if`
-    # that aborts ("argument is of length zero" / "the condition has length > 1")
-    # on a model that previously translated.
-    if (is.null(obs_cmt) || !is.character(obs_cmt) || length(obs_cmt) != 1L) {
-      # state_names already carries the sanitised names, so the guess needs no
-      # translation -- but ui$central is raw and does.
-      obs_cmt <- tail(state_names, 1)
-      warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
-                             obs_cmt, "', verify in [structural_model]"))
-    } else if (obs_cmt %in% names(state_decl)) {
-      # Through the state declaration map for the same reason the d/dt target is:
-      # name_map would resolve a state name that happens to be a parameter key to
-      # the parameter. `state_decl` covers every state, not only the renamed
-      # ones, so an identity entry answers here rather than falling through.
-      obs_cmt <- state_decl[[obs_cmt]]
+    obs_cmt     <- NULL
+
+    # $MODEL's own DEFOBS, when the source is a control stream we can read.
+    # This is the only channel that actually KNOWS which compartment is
+    # observed; everything below it is inference. `ui$central` is NULL for both
+    # nonmem2rx and rxode2, so before this the answer was always
+    # tail(state_names, 1) -- correct only when the observed compartment happens
+    # to be declared last, which every bundled model happened to satisfy.
+    if (!is.null(obs_hint) && !is.null(obs_hint$index) &&
+        obs_hint$index >= 1L && obs_hint$index <= length(state_names)) {
+      # Cross-check the name before trusting the position. The index is a
+      # $MODEL COMP ordinal and state_names is d/dt order; they agree in every
+      # model seen, but if they ever diverge, silently observing the wrong
+      # compartment is the failure this whole fix exists to remove.
+      if (.same_cmt_name(state_raw[obs_hint$index], obs_hint$name)) {
+        obs_cmt     <- state_names[[obs_hint$index]]
+        obs_cmt_num <- obs_hint$index
+      } else {
+        warn <- c(warn, paste0(
+          "WARN  | $MODEL declares compartment ", obs_hint$index, " ('",
+          obs_hint$name, "') as DEFOBS, but the ", obs_hint$index,
+          "th differential equation is for '", state_raw[obs_hint$index],
+          "'. The two orderings disagree, so DEFOBS was not used -- verify ",
+          "obs_cmt in [structural_model]."))
+      }
+    }
+
+    if (is.null(obs_cmt)) {
+      obs_cmt <- tryCatch(ui$central, error = function(e) NULL)
+      # length must be checked, not just type: is.character() is TRUE for
+      # character(0) and for a length-2 vector, and both then reached an `if`
+      # that aborts ("argument is of length zero" / "the condition has length > 1")
+      # on a model that previously translated.
+      if (is.null(obs_cmt) || !is.character(obs_cmt) || length(obs_cmt) != 1L) {
+        # state_names already carries the sanitised names, so the guess needs no
+        # translation -- but ui$central is raw and does.
+        obs_cmt <- tail(state_names, 1)
+        warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
+                               obs_cmt, "', verify in [structural_model]"))
+      } else if (obs_cmt %in% names(state_decl)) {
+        # Through the state declaration map for the same reason the d/dt target is:
+        # name_map would resolve a state name that happens to be a parameter key to
+        # the parameter. `state_decl` covers every state, not only the renamed
+        # ones, so an identity entry answers here rather than falling through.
+        obs_cmt <- state_decl[[obs_cmt]]
+      }
     }
     structural$states  <- state_names
     structural$obs_cmt <- obs_cmt
@@ -301,9 +335,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   scaling <- list()
   if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
     state_names_uc <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
+    # Prefer the NONMEM compartment NUMBER when $MODEL gave us one. `S2 = V` is
+    # keyed by compartment number, so resolving the number by looking the guessed
+    # name back up in the state list just re-derives the guess -- and picked the
+    # wrong scaling variable, or none, whenever the guess was wrong.
     # which() may match more than one state if two share an uppercased name;
     # take the first so the list [[ ]] index below is always scalar.
-    obs_idx <- which(state_names_uc == toupper(structural$obs_cmt))[1L]
+    obs_idx <- if (!is.na(obs_cmt_num)) obs_cmt_num
+               else which(state_names_uc == toupper(structural$obs_cmt))[1L]
     if (!is.na(obs_idx)) {
       svar <- scaling_hint[[as.character(obs_idx)]]
       if (!is.null(svar)) {
@@ -607,8 +646,23 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 .unmapped_symbols <- function(lst, name_map) {
   used <- character()
   for (expr in lst) {
-    if (.is_tilde(expr))          used <- c(used, .collect_symbols(expr))
-    else if (.is_assignment(expr)) used <- c(used, .collect_symbols(expr[[3]]))
+    if (.is_tilde(expr)) { used <- c(used, .collect_symbols(expr)); next }
+    if (!.is_assignment(expr)) next
+    # Only statements .parse_model_exprs() actually EMITS. It skips every
+    # assignment whose left-hand side is neither a symbol nor a d/dt -- the
+    # `f(depot) <- BIO.AV` / `alag(depot) <- ...` / `CENT(0) <- ...` forms --
+    # so collecting their right-hand sides reported names that appear nowhere in
+    # the file. `f(depot) <- BIO.AV` raised "covariate reference(s) BIO.AV are
+    # not legal ferx identifiers ... rename the data column", a remedy that
+    # fixes nothing because BIO.AV is never emitted, while the bioavailability
+    # statement it was really about was dropped in silence. Per CLAUDE.md
+    # $unsupported is the ferx-core prioritisation signal, so a phantom entry
+    # there is worse than none: it asks the engine team to build for a gap that
+    # does not exist. The dropped statement is reported at the skip site
+    # instead, where the feature is known.
+    lhs <- expr[[2]]
+    if (!is.symbol(lhs) && !.is_ddt_lhs(lhs)) next
+    used <- c(used, .collect_symbols(expr[[3]]))
   }
   # Assignment targets are emitted through .norm(), so they are legal by
   # construction and are not free symbols. That is true regardless of where the
@@ -691,6 +745,84 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 
   list(map = map, warnings = warn)
+}
+
+# Does a d/dt state name refer to the same compartment $MODEL called `model_nm`?
+#
+# They are rarely spelled identically. nonmem2rx lowercases, and prefixes `c.`
+# onto a compartment whose name collides with a variable, so $MODEL's `RTOT`
+# arrives as `c.RTOT`. Compare case-insensitively with that prefix stripped, and
+# fold illegal characters so a sanitised name still matches its source.
+.same_cmt_name <- function(state_nm, model_nm) {
+  if (length(state_nm) != 1L || is.na(state_nm)) return(FALSE)
+  norm <- function(x) toupper(.ferx_ident(sub("^c[.]", "", x)))
+  identical(norm(state_nm), norm(model_nm))
+}
+
+# nonmem2rx does not inline the value of an f()/alag()/init assignment -- it
+# emits an alias and binds it separately:
+#
+#   f(ABS)        <- rxf.rxddta1.        rxf.rxddta1.   <- 1
+#   EFFECT(0)     <- rxini.rxddta4.      rxini.rxddta4. <- bl
+#
+# so the right-hand side at the point of use is a meaningless internal name.
+# Resolving it matters twice over: it decides whether the statement is a no-op
+# (`F1 = 1` is, `A_0(4) = BL` is not), and it is the difference between telling
+# the user "initial condition (EFFECT(0) = bl)" and "(EFFECT(0) =
+# rxini.rxddta4.)", which names nothing they wrote. Follows a single hop only --
+# these aliases are never chained, and a fixpoint walk here would just be an
+# untested loop.
+.resolve_alias <- function(expr, lst) {
+  if (!is.symbol(expr)) return(expr)
+  nm <- as.character(expr)
+  if (!grepl("^rx(f|ini|m|dur|rate|alag)[._]", nm, ignore.case = TRUE)) return(expr)
+  for (e in lst)
+    if (.is_assignment(e) && is.symbol(e[[2]]) && identical(as.character(e[[2]]), nm))
+      return(e[[3]])
+  expr
+}
+
+# Name the modelling feature behind a call-shaped assignment target, so the
+# diagnostic says "bioavailability" rather than "unsupported statement". The
+# function head is what carries the meaning in rxode2/nonmem2rx: `f()` is
+# bioavailability, `alag()` lag time, `dur()`/`rate()` zero-order input, and a
+# bare `STATE(0)` an initial condition. Anything else is reported honestly as
+# unrecognised rather than guessed at.
+.describe_dropped_lhs <- function(lhs, rhs = NULL) {
+  src  <- paste(deparse(lhs, width.cutoff = 500L), collapse = " ")
+  head <- if (is.call(lhs) && is.symbol(lhs[[1]])) tolower(as.character(lhs[[1]]))
+          else ""
+  arg  <- if (is.call(lhs) && length(lhs) > 1)
+            paste(deparse(lhs[[2]], width.cutoff = 500L), collapse = " ") else ""
+  # Is the right-hand side the literal value that makes this statement a no-op?
+  # `F1 = 1` sets bioavailability to its own default, `ALAG1 = 0` sets no lag,
+  # `A_0(n) = 0` sets the initial condition every compartment already has. The
+  # model is IDENTICAL without them, so dropping one loses nothing -- but
+  # reporting it as untranslatable puts a feature in $unsupported that the model
+  # does not actually use, and per CLAUDE.md that field is the ferx-core
+  # prioritisation signal. A false "we need bioavailability" is the same class
+  # of phantom this finding was about, so identity assignments are noted at INFO
+  # and kept out of the gap list.
+  const <- function(v) is.numeric(rhs) && length(rhs) == 1L && !is.na(rhs) && rhs == v
+  known <- list(
+    f    = list("bioavailability",              "bioavailability (f)",       1),
+    alag = list("dose lag time",                "dose lag time (alag)",      0),
+    lag  = list("dose lag time",                "dose lag time (lag)",       0),
+    dur  = list("zero-order infusion duration", "infusion duration (dur)",   NA),
+    rate = list("zero-order infusion rate",     "infusion rate (rate)",      NA))
+  if (head %in% names(known)) {
+    k <- known[[head]]
+    return(list(what = paste0(k[[1]], " for compartment '", arg, "'"),
+                src = src, gap = k[[2]],
+                noop = !is.na(k[[3]]) && const(k[[3]])))
+  }
+  # `CENT(0) <- ...` -- a state initial condition. The head is the state name,
+  # so it cannot be matched against a fixed list; the `(0)` argument is the tell.
+  if (nzchar(head) && identical(arg, "0"))
+    return(list(what = paste0("initial condition for compartment '", head, "'"),
+                src = src, gap = "state initial condition", noop = const(0)))
+  list(what = "statement with an unrecognised assignment target", src = src,
+       gap = paste0("unsupported assignment target: ", src), noop = FALSE)
 }
 
 # Make every emitted random-effect name unique, and report the source name each
@@ -1194,8 +1326,31 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         next
       }
 
-      # Skip non-symbol LHS (e.g. EFFECT(0) <- ..., f(ABS) <- ...)
-      if (!is.symbol(lhs_expr)) next
+      # A left-hand side that is a CALL, not a name: `f(depot) <- ...`,
+      # `alag(depot) <- ...`, `CENT(0) <- ...`. Every one is a real modelling
+      # feature ferx cannot express yet, and every one used to vanish without a
+      # word -- the model fitted, silently missing its bioavailability, lag time
+      # or initial condition. Report it here, where the form is still visible;
+      # once parsing moves on, all that survives is an assignment that was
+      # never made.
+      if (!is.symbol(lhs_expr)) {
+        val <- .resolve_alias(expr[[3]], lst)
+        d   <- .describe_dropped_lhs(lhs_expr, val)
+        if (isTRUE(d$noop)) {
+          warnings <- c(warnings, paste0(
+            "INFO  | ", d$what, " (", d$src, " = ",
+            paste(deparse(val), collapse = " "), ") sets the value ferx ",
+            "already uses, so dropping it does not change the model."))
+        } else {
+          warnings   <- c(warnings, paste0(
+            "ERROR | ", d$what, " (", d$src, " = ",
+            paste(deparse(val), collapse = " "), ") cannot be translated -- ferx ",
+            "has no equivalent, so the statement is dropped and the fitted model ",
+            "will not include it."))
+          unsupported <- c(unsupported, d$gap)
+        }
+        next
+      }
 
       lhs_raw  <- as.character(lhs_expr)
       lhs_norm <- .norm(lhs_raw)

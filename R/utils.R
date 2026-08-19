@@ -63,3 +63,53 @@
   }
   result
 }
+
+# The compartment $MODEL marks DEFOBS, as a 1-based index into the COMP list.
+#
+# Read from the raw control stream for the same reason .extract_nm_scaling() is:
+# nonmem2rx does not surface it. `ui$central` is NULL for both nonmem2rx and
+# rxode2, so obs_cmt fell through to tail(state_names, 1) -- a positional guess
+# that is right only when the observed compartment happens to be declared last.
+# It is not a cosmetic guess: the same index selects the $PK scaling variable, so
+# a model with `COMP=(CENT, DEFDOSE, DEFOBS)` before `COMP=(PERIPH)` and
+# `S1 = V` got no [scaling] block at all -- the S2=V silent-divergence class
+# CLAUDE.md warns about -- or, with `S2 = V2`, scaled the observation by the
+# peripheral volume and validated clean.
+#
+# Returns NULL when $MODEL is absent or names no DEFOBS. Deliberately does NOT
+# fall back to NONMEM's own default (compartment 1 when DEFOBS is omitted): the
+# caller already has a documented guess with a warning attached, and replacing a
+# loud guess with a quiet assumption about NONMEM semantics would trade a
+# visible risk for an invisible one.
+.extract_nm_defobs <- function(ctl_file) {
+  lines <- tryCatch(readLines(ctl_file, warn = FALSE), error = function(e) character())
+  if (length(lines) == 0L) return(NULL)
+  block_starts <- grep("^\\s*\\$", lines)
+  model_idx    <- grep("^\\s*\\$MODEL\\b", lines, ignore.case = TRUE)[1L]
+  if (is.na(model_idx)) return(NULL)
+  next_after   <- block_starts[block_starts > model_idx][1L]
+  body <- if (is.na(next_after)) lines[model_idx:length(lines)]
+          else                   lines[model_idx:(next_after - 1L)]
+  # Strip comments before parsing: `COMP=(CENT) ; DEFOBS is below` must not
+  # register a compartment attribute that is only mentioned in prose.
+  body <- sub(";.*$", "", body)
+  txt  <- paste(body, collapse = " ")
+  # Each COMP declaration, in source order. Both `COMP=(...)` and `COMP (...)`
+  # are legal NONMEM.
+  m <- gregexpr("COMP\\s*=?\\s*\\(([^)]*)\\)", txt, ignore.case = TRUE, perl = TRUE)
+  decls <- regmatches(txt, m)[[1]]
+  if (length(decls) == 0L) return(NULL)
+  for (i in seq_along(decls)) {
+    inner <- sub("^COMP\\s*=?\\s*\\((.*)\\)$", "\\1", decls[i],
+                 ignore.case = TRUE, perl = TRUE)
+    toks  <- trimws(strsplit(inner, "[,[:space:]]+")[[1]])
+    toks  <- toks[nzchar(toks)]
+    if (length(toks) < 2L) next
+    # NONMEM permits abbreviating an attribute to any unambiguous prefix, and
+    # DEFOBSERVATION is the full spelling, so match a prefix rather than the
+    # exact token. DEFDOSE shares "DEF", hence the four-character anchor.
+    if (any(grepl("^DEFOBS", toks[-1], ignore.case = TRUE)))
+      return(list(index = i, name = toks[1], n_comp = length(decls)))
+  }
+  NULL
+}
