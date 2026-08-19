@@ -822,11 +822,15 @@ test_that("covariate detection does not report iniDf names as covariates", {
   expect_false(any(grepl("^T_|^E_", covs)))
 })
 
-test_that("an ODE intermediate is inlined with the binding it had when written", {
+test_that("an ODE intermediate keeps the binding it had when written", {
   # Kills the mutation that reverts pass 2b to re-normalising the raw expression
   # with the FINAL name_map. De-shadowing makes that map time-varying, so `frac`
-  # -- written when `cl` still meant the theta -- was inlined as the individual
+  # -- written when `cl` still meant the theta -- resolved to the individual
   # parameter. Both forms parse; ferx cannot tell them apart.
+  #
+  # Phase 5b emits the intermediate instead of substituting it into the d/dt
+  # line, which makes the binding directly readable rather than buried in the
+  # ODE right-hand side -- but the property under test is unchanged.
   skip_if_not_installed("rxode2")
   f <- function() {
     ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
@@ -836,7 +840,9 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
             central ~ prop(prop.err) })
   }
   ir  <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
-  rhs <- vapply(ir$odes, function(o) o$rhs, "")[2]
+  frac <- Filter(function(o) identical(o$lhs, "FRAC"), ir$odes)
+  expect_length(frac, 1L)
+  rhs <- frac[[1]]$rhs
 
   # `frac` must carry the THETA's value, and it does so through a carrier
   # parameter rather than by naming the theta: a theta is not in scope in [odes]
@@ -848,7 +854,10 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
   # The carrier is named off the THETA (`TVCL_ODE`), not the source name: `CL_ODE`
   # would read as "the CL used in the ODE", which is the individual value, and
   # telling those two apart is the whole point.
-  expect_equal(rhs, "KA * depot - CL/V * central - central/TVCL_ODE")
+  expect_equal(rhs, "central/TVCL_ODE")
+  # And the d/dt line reads the intermediate rather than re-deriving it.
+  ddt_c <- Filter(function(o) identical(o$state, "central"), ir$odes)
+  expect_match(ddt_c[[1]]$rhs, "FRAC", fixed = TRUE)
   ip <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
   expect_true("TVCL_ODE=TVCL" %in% ip)
   # No numbered fallback was needed, so no warning about one.
@@ -942,8 +951,17 @@ test_that("an aux var is inlined with the name it was normalised under", {
 
   lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
   expect_false("EFF" %in% lhs)            # state-dependent: an ODE intermediate
-  rhs <- paste(vapply(ir$odes, function(o) o$rhs, ""), collapse = " ")
-  expect_false(grepl("C_2", rhs, fixed = TRUE))   # never referenced undeclared
+  # Phase 5b emits it instead of substituting it away, so the name now DOES
+  # appear -- and the property to hold is the one the old assertion stood in for:
+  # never referenced undeclared. `C_2` is the normalised spelling of `c.2`, so
+  # this also still pins that the emitted reference and the emitted declaration
+  # agree on which normalisation was applied.
+  intermediates <- vapply(Filter(function(o) identical(o$kind, "assign"), ir$odes),
+                          function(o) o$lhs, "")
+  expect_true("C_2" %in% intermediates)
+  expect_true(all(c("C_2", "EFF") %in%
+                  c(intermediates, .ode_states(ir$odes),
+                    vapply(ir$indiv_params, function(p) p$lhs, ""))))
 })
 
 test_that("an error model whose sigma arrives via a dotted name is classified", {
@@ -1208,7 +1226,7 @@ test_that("state renaming does not rename thetas -- one owner per collision", {
   lst <- list(quote(cl <- th1 * exp(eta1)), ddt("central", quote(-cl * central)))
   ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
-  expect_equal(vapply(ir$odes, function(o) o$state, ""), "central")
+  expect_equal(.ode_states(ir$odes), "central")
   expect_length(grep("state 'central'", ir$warnings), 0L)
 })
 
@@ -1942,21 +1960,32 @@ test_that("a state is not mistaken for a theta reference in an ODE", {
   expect_false(any(grepl("theta 'CENT' shares a name", ir$warnings)))
 })
 
-test_that("a theta reaching the ODE only after inlining is scoped too", {
+test_that("a theta reaching the ODE through an intermediate is scoped too", {
   # An intermediate that touches a state cannot be an individual parameter, so it
-  # is inlined into the d/dt line -- and the text that gets inlined was normalised
-  # for a different context, never against the [odes] scope. `ki <- KTP*CENT`
-  # therefore arrived as `TVKTP * CENT`: a bare theta in [odes], with the
-  # pass-through parameter defined and unreferenced beside it. This is why the
-  # scope is applied to the emitted right-hand side rather than during the walk.
+  # is emitted into [odes] -- and the text that gets emitted was normalised for a
+  # different context, never against the [odes] scope. `ki <- KTP*CENT` therefore
+  # arrived as `TVKTP * CENT`: a bare theta in [odes], with the pass-through
+  # parameter defined and unreferenced beside it. This is why the scope is
+  # applied to the emitted right-hand side rather than during the walk.
+  #
+  # Phase 5b changed HOW the intermediate reaches the block -- declared in source
+  # order rather than substituted into the d/dt line -- but not what must hold:
+  # no theta name may appear anywhere in [odes].
   ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(k <- K * exp(eta1)), quote(ki <- KTP * CENT),
               ddt("CENT", quote(-k * CENT + ki)))
   ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
-  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + KTP * CENT")
-  expect_false(grepl("TVKTP", ir$odes[[1]]$rhs, fixed = TRUE))
+  ki <- Filter(function(o) identical(o$lhs, "KI"), ir$odes)
+  expect_length(ki, 1L)
+  expect_equal(ki[[1]]$rhs, "KTP * CENT")
+  # The carrier, never the theta it carries.
+  expect_false(any(grepl("TVKTP", .emitted_ode_symbols(ir$odes), fixed = TRUE)))
   expect_true("KTP" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  # Declared before the line that reads it: [odes] has no use-before-def check,
+  # so the order is the whole correctness property.
+  kinds <- vapply(ir$odes, function(o) if (is.null(o$kind)) "ddt" else o$kind, "")
+  expect_lt(which(kinds == "assign")[1], which(kinds == "ddt")[1])
 })
 
 test_that("an intermediate that survives as a parameter carries the theta", {
