@@ -221,6 +221,34 @@ validate_ferx_ir <- function(ir) {
 # input: `pk_args` keys legitimately end in digits, so `pk_arg.v1` and
 # `pk_arg.v2` both stripped to `pk_arg.v` and two different macro slots were
 # reported under one label. A parallel vector cannot collapse that way.
+# Names a statement list DECLARES, walking into `if` bodies.
+#
+# Walking in is the whole point. A name assigned inside a branch is declared as
+# much as one at the top level, and the census below is an abort rather than a
+# warning -- so a channel that stops at the top level does not report a weaker
+# result, it reports nothing and lets an illegal name reach the engine. That is
+# the failure this census exists to prevent, reintroduced one nesting level down.
+#
+# `want` selects which half of the list to return, because [odes] declares two
+# kinds of name that need different labels: `state` covers d/dt targets and
+# init() targets, `assign` covers ODE-block intermediates. Reporting an illegal
+# intermediate as an "ode state" would send the reader to $MODEL.
+.stmt_declared <- function(stmts, default_kind, want) {
+  out <- character()
+  for (s in stmts) {
+    kind <- .stmt_kind(s, default_kind)
+    if (identical(kind, "if")) {
+      out <- c(out, .stmt_declared(s$then,  default_kind, want),
+                    .stmt_declared(s$else_, default_kind, want))
+    } else if (identical(kind, "assign")) {
+      if (identical(want, "assign")) out <- c(out, s$lhs)
+    } else {
+      if (identical(want, "state"))  out <- c(out, s$state)
+    }
+  }
+  out
+}
+
 .ir_declared_names <- function(ir) {
   nm  <- function(xs, f) unlist(lapply(xs, f))
   add <- function(channel, values) {
@@ -234,8 +262,9 @@ validate_ferx_ir <- function(ir) {
     add("omega",        nm(ir$omegas,       function(o) o$names)),
     add("kappa",        nm(ir$kappas,       function(k) k$name)),
     add("sigma",        nm(ir$sigmas,       function(s) s$name)),
-    add("indiv_param",  nm(ir$indiv_params, function(p) p$lhs)),
-    add("ode state",    nm(ir$odes,         function(o) o$state)),
+    add("indiv_param",  .stmt_declared(ir$indiv_params, "assign", "assign")),
+    add("ode state",    .stmt_declared(ir$odes, "ddt", "state")),
+    add("ode intermediate", .stmt_declared(ir$odes, "ddt", "assign")),
     add("initial condition", nm(ir$initial_conditions, function(x) x$state)),
     add("diffusion",    nm(ir$diffusion,    function(d) d$state)),
     add("error dv",     nm(ir$error_model,  function(e) e$dv)),
