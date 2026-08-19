@@ -1589,3 +1589,177 @@ test_that("a carrier leaves the [odes] block fully declared", {
   expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
   expect_length(ir$unsupported, 0L)
 })
+
+test_that("an undeclared name spelled like a math function is still reported", {
+  # The check used to declare a list of function names on the theory that
+  # `.emitted_ode_symbols()` returns call heads. It does not -- `.collect_symbols()`
+  # recurses over `expr[-1]` -- so the list could only ever whitelist ordinary
+  # identifiers that happen to share a spelling with a function, and it did:
+  # this model reported nothing while the identical one with WT reported WT, and
+  # ferx rejected the file with "RHS references undefined name(s): MAX".
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*(MAX/70)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references MAX", all = FALSE)
+  expect_match(ir$unsupported, "undeclared name referenced from \\[odes\\]: MAX",
+               all = FALSE)
+})
+
+test_that("function calls in an ODE are not reported as undeclared names", {
+  # The other half of removing that whitelist: dropping it must not start
+  # reporting the functions themselves. It cannot, because a call head is never
+  # collected -- but the check is worth pinning, since the whole list was added
+  # to prevent a false positive that could not happen.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*exp(-TIME/24) - sqrt(abs(k))*log(1 + k)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+
+# -- carrier / [scaling] ordering ---------------------------------------------
+
+test_that("[scaling] still resolves when the scaled variable needs a carrier", {
+  # S2 = VC, with VC referenced from the ODE and never assigned in $PK. The
+  # carrier moves the name that answers to `VC` from the theta list to the
+  # individual parameters, so [scaling] must be resolved AFTER the carrier is
+  # appended. Resolved before, the lookup found the theta renamed to TVVC and no
+  # parameter named VC, `matched` came back NULL, and [scaling] was dropped with
+  # no diagnostic -- an emitted model that predicts amounts against concentration
+  # data and validates clean, which is exactly the S2=V failure CLAUDE.md warns
+  # about with the loud half removed.
+  ini <- rbind(theta_row("VC", 10), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT/VC)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst),
+                                     scaling_hint = list("1" = "VC")))
+
+  expect_equal(ir$scaling$obs_scale, "VC")
+  expect_match(ir$warnings, "S1 = VC detected", all = FALSE)
+  # ...and it must be the carrier that answers, not the theta: a theta IS in
+  # scope in obs_scale, so pointing [scaling] at TVVC would also validate, and
+  # would silently drop the IIV-free/IIV distinction the carrier exists to keep.
+  expect_true("VC=TVVC" %in%
+              vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
+})
+
+
+# -- carrier naming and the state exclusion, case-correctly -------------------
+
+test_that("a carrier never takes the name of a ferx solver builtin", {
+  # `.deshadow_theta_names()` renames a theta off a builtin name (theta TIME ->
+  # TVTIME) because ferx resolves the bare name to the integrator's clock and the
+  # theta would be estimated and never read. The carrier then took the theta's
+  # SOURCE name as its first choice and put the collision straight back, one block
+  # lower: `TIME = TVTIME` in [individual_parameters], with the ODE term reading
+  # the clock. `builtin_params` reported it, but as a source defect -- "rename the
+  # variable in the source model" -- for a variable the translator had invented.
+  ini <- rbind(theta_row("TIME", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + TIME * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(toupper(lhs) %in% .RESERVED_ODE_NAMES))
+  # The carrier still exists and still carries the theta -- the fix is the name,
+  # not the mechanism.
+  expect_true("TVTIME_ODE=TVTIME" %in%
+              vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + TVTIME_ODE * CENT")
+  # ...and the translator no longer reports a collision it created itself.
+  expect_false(any(grepl("collides with a ferx solver builtin \\(", ir$warnings) &
+                   grepl("^ERROR", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("a theta sharing a lowercase state's name is left alone", {
+  # The state exclusion compares `theta_orig`, which is always `.norm()`ed to
+  # uppercase, against the state names. Keyed on the RAW d/dt target it never
+  # matched for an nlmixr2 source, where states are lowercase: theta CENTRAL was
+  # renamed to TVCENTRAL and reported as shadowing an individual parameter that
+  # does not exist. Nothing here references the theta from the ODE -- `-central *
+  # KK` is the compartment -- so no rename and no carrier are warranted.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ CENTRAL <- 1.0; v <- 10.0; prop.err <- 0.1; eta.v ~ 0.09 })
+    model({ v  <- v*exp(eta.v)
+            kk <- CENTRAL/v
+            d/dt(central) = -central*kk
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_true("CENTRAL" %in% vapply(ir$thetas, function(t) t$name, ""))
+  expect_false("CENTRAL" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_false(any(grepl("theta 'CENTRAL' shares a name", ir$warnings)))
+  expect_false(any(grepl("theta 'CENTRAL' is referenced from an ODE", ir$warnings)))
+
+  # What the spurious rename was accidentally masking, and why the exclusion
+  # cannot ship on its own. `kk <- CENTRAL/v` is an honest read of the theta in
+  # [individual_parameters] scope, but its RHS "references a state" under the
+  # case-folded comparison, so the inliner drags the text into [odes] -- the one
+  # block where CENTRAL means the compartment. Measured against ferx 0.3.0 the
+  # result validates clean and reports `W_UNUSED_PARAM: theta 'CENTRAL' ... not
+  # referenced in any model expression`: the engine read it as the state, the
+  # theta went dead, and the term became the amount squared over V. Renaming the
+  # theta hid that by moving it off the colliding spelling; nothing detected it.
+  # It is now reported, so `strict = TRUE` aborts instead of shipping the model.
+  expect_match(ir$warnings,
+               "^ERROR \\| 'central' names both an ODE state and a model parameter",
+               all = FALSE)
+  expect_match(ir$unsupported, "state/parameter source-name collision: central",
+               all = FALSE)
+})
+
+test_that("a duplicate $THETA label produces one carrier, not two", {
+  # The discovery predicate is per-theta, but duplicate labels give two thetas the
+  # same source name, and collapsing the result to names threw away which of them
+  # matched: the carrier loop tested `theta_orig[i] %in% ode_theta` and let both
+  # through. One ODE reference then defined two parameters -- the one the
+  # reference resolves to, and a dead `KTP = TVKTP` that ferx reports as
+  # `computed but never used` -- while the run simultaneously warned that ferx
+  # resolves every reference to the first of the pair.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("KTP", 0.7),
+               theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip  <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
+  expect_length(grep("is referenced from an ODE", ir$warnings), 1L)
+  # Every emitted parameter is read by something -- no orphan beside the one the
+  # ODE actually names.
+  carriers <- grep("^[^=]+=(TV|THETA_)?KTP", ip, value = TRUE)
+  expect_length(carriers, 1L)
+  expect_true(grepl(sub("=.*$", "", carriers), ir$odes[[1]]$rhs, fixed = TRUE))
+  # The duplicate itself is still reported; this changes the carrier, not that.
+  expect_match(ir$warnings, "duplicate \\$THETA label", all = FALSE)
+})
+
+test_that("scoping the ODEs does not resurrect the dropped rhs_expr field", {
+  # The inlining pass rebuilds each ode as `list(state, rhs)` and its only
+  # consumer runs earlier, so `rhs_expr` is gone by then. Writing it back in
+  # `.scope_odes_to_params()` made the field present on carrier models and absent
+  # everywhere else -- a phase-5 reader would get a correct expression from some
+  # models and NULL from the rest.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  carried <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  plain   <- suppressWarnings(rxui_to_ir(mock_ui(
+    rbind(theta_row("K", 0.1), eta_row("eta1", 0.09, 1L)),
+    list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT))))))
+
+  # Same shape either way -- that is the assertion, not which fields there are.
+  expect_equal(names(carried$odes[[1]]), names(plain$odes[[1]]))
+  expect_false("rhs_expr" %in% names(carried$odes[[1]]))
+})

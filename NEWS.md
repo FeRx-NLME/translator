@@ -67,12 +67,30 @@
   spellings are taken, and now warns: the number is positional, so it moves when
   another carrier is added before it.
 
+  A carrier never takes a name ferx reserves for the solver. The de-shadow pass
+  renames a theta off `TIME`/`T`/`TAFD`/`TAD`/`MACHEPS`, and the carrier used to
+  take the theta's source name back, putting the collision one block lower with
+  the ODE term reading the integrator's clock.
+
+  A duplicate `$THETA` label produces one carrier, not two. The discovery
+  predicate is per-theta and two thetas can share a source name, so collapsing
+  its result to names let both through and defined a second, dead parameter
+  beside the one the reference resolves to.
+
+  Carriers are appended before `[scaling]` is resolved, and the order is
+  load-bearing. `[scaling]` resolves `S2 = VC` by looking the name up among the
+  theta names and then among the individual parameters, and a carrier moves the
+  name that answers to `VC` from the first list to the second. Resolved first,
+  the lookup found the theta renamed to `TVVC` and no parameter named `VC`, so
+  `[scaling]` was dropped with no diagnostic -- an emitted model that predicts
+  amounts against concentration data and that the engine validates clean.
+
 * A carrier reuses an existing individual parameter only when that parameter is a
   *pure alias* of the theta. Matching on the name alone gets the arithmetic wrong:
   `frac <- central/cl` in a model that later writes `cl <- cl*exp(eta.cl)` reads
   the theta, so pointing that reference at the individual parameter `CL` silently
   substitutes the IIV-applied value. Both forms parse and both fit. Such a
-  reference now gets its own carrier (`CL_1 = TVCL`).
+  reference now gets its own carrier (`TVCL_ODE = TVCL`).
 
 * The `[odes]` scope is applied to the emitted right-hand side rather than during
   the walk, because that is where every path converges. An ODE-block intermediate
@@ -124,6 +142,26 @@
   in the QSS TMDD model and the unbound `KTP` in `ode_theta_ref.ctl` covariates.
   An earlier version of this check consulted them, passed the entire test suite,
   and could not fire on either defect it was written for.
+
+* A state and a model parameter whose names differ only in case are now reported
+  as the source-name collision they are. ferx compares them case-insensitively:
+  measured against ferx 0.3.0, `d/dt(central) = -central * (CENTRAL/V)` beside
+  `states=[central]` and `theta CENTRAL` validates clean and reports
+  `W_UNUSED_PARAM` for the theta -- the engine read the ODE's `CENTRAL` as the
+  compartment, the theta went dead, and the term became the amount squared over
+  `V`. The collision only becomes visible once something drags the reference into
+  `[odes]`: `kk <- CENTRAL/v` is an honest read of the theta in
+  `[individual_parameters]` scope, but its right-hand side "references a state"
+  under the same case-folded comparison, so the inliner moves the text into the
+  one block where that spelling means something else.
+
+  No function-name whitelist is consulted either, for a simpler reason: a call
+  head is never collected. The symbol walk recurses over the *arguments* of a
+  call, so `exp(-K*CENT)` yields `K` and `CENT` and nothing else, and a list of
+  function names could only ever whitelist ordinary identifiers that happen to
+  share a spelling. One did: with `EXP`/`LOG`/`ABS`/`MIN`/`MAX`/`SIGN` and the
+  rest declared, an undeclared covariate named `MAX` passed this check while `WT`
+  was reported, and ferx rejected the file the check had just called clean.
 
   Two reports, because the remedies differ: a theta, eta or sigma needs a carrier;
   anything else resolves to nothing at all. The first makes an eta referenced from
