@@ -1009,6 +1009,18 @@ name in one branch and not the other, which is a different model. Nested
 assignments therefore have to register their LHS in `name_map` for later
 references to resolve, while the emission decision stays at the `if` level.
 
+**6. Capturing conditionals opens a NEW theta-shadowing hole, and it is the
+defect CLAUDE.md opens with.** `.deshadow_theta_names()` is fed
+`indiv_names` predicted from the parser's `indiv_params` output. A name assigned
+ONLY inside a conditional never appears in that list, so a theta sharing its name
+is not renamed and silently shadows it -- `theta TVCL` beside
+`if (SEX == 1) { TVCL = TVCL * TVSEX }` reads the theta in the branch, the
+assignment is dead, and ferx emits no diagnostic. Observed the moment pass 1
+started capturing `if` statements. The fixpoint loop in `rxui_to_ir()` must
+therefore collect branch-assigned names too, not just `p$lhs` over
+`indiv_params`. The same applies to `.assert_state_param_disjoint()` and to the
+dose-attribute pass added by #17, both of which read only the top-level list.
+
 **Consequence for sequencing.** None of this changes the phase 5 -> phase 6
 dependency; it sharpens it. The partition in correction 2 is what hands phase 6
 the `W1`/`W2` statements as endpoint-selection input, so phase 6 consumes a

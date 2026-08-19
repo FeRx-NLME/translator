@@ -2223,9 +2223,78 @@ bound_name <- function(entries, raw) {
   # Variables known to hold structural-model outputs (linCmt, ODE states).
   # Propagated forward; used in pass 2 to classify auxiliaries.
   init_conds <- list()
+  conditionals <- list()
   aux_vars <- toupper(sigma_names)  # eps1, eps2, ...
 
+  # Source position, stamped on every record this pass produces.
+  #
+  # `all_assigns` and `odes` are separate lists, so without an index the order of
+  # an intermediate RELATIVE to the d/dt line that reads it is unrecoverable once
+  # the walk ends -- and that order is a correctness property with a silent
+  # failure: [odes] has no use-before-def check, so an intermediate emitted below
+  # its consumer stays valid, reads a stale slot, and collapses the prediction to
+  # a constant. `pkpd_ir.mod` already interleaves them (`C2`/`EFF` sit between
+  # DADT(3) and DADT(4)), so this is not hypothetical.
+  pos <- 0L
+
+  # -- capturing a source conditional ------------------------------------------
+  #
+  # Until now an `if` matched no branch in this loop and fell off the end,
+  # discarded with no diagnostic. Defect 4 (a $DES conditional leaving `cf`
+  # undefined) and defect 8 (an $PK covariate effect vanishing) are the same
+  # missing branch seen from two blocks.
+  #
+  # The map SNAPSHOT travels with the statement rather than the normalised text
+  # alone. Which block a conditional belongs to is not known until the
+  # reachability partition runs, and the two blocks resolve an ambiguous name
+  # differently -- inside [odes] a name that is both a state and a parameter is
+  # the state, everywhere else it is the parameter. Re-normalising later against
+  # the FINAL `name_map` is the trap the assignment branch documents (de-shadowing
+  # rebinds names mid-parse), but re-normalising against the map as it stood AT
+  # CAPTURE is exact, and it is what lets the partition apply `state_ode_pins`
+  # only to the statements that actually land in [odes].
+  capture_arm <- function(b) {
+    if (is.null(b)) return(NULL)
+    stmts <- if (is.call(b) && identical(as.character(b[[1]])[1L], "{"))
+               as.list(b)[-1L] else list(b)
+    out <- list()
+    for (st in stmts) {
+      if (is.call(st) && identical(as.character(st[[1]])[1L], "if")) {
+        out <- c(out, list(capture_if(st)))
+        next
+      }
+      # Only a plain assignment is translatable inside a branch. Anything else
+      # is reported rather than dropped -- silently discarding it is how the
+      # whole `if` used to disappear.
+      if (!.is_assignment(st) || !is.symbol(st[[2]])) {
+        warnings <<- c(warnings, paste0(
+          "ERROR | statement inside a conditional is not a plain assignment (",
+          paste(deparse(st, width.cutoff = 500L), collapse = " "),
+          ") -- it is dropped, and the conditional it belongs to will not ",
+          "reproduce the source model."))
+        next
+      }
+      lhs_raw  <- as.character(st[[2]])
+      lhs_norm <- .norm(lhs_raw)
+      snap <- name_map
+      if (!lhs_raw %in% names(snap)) snap[lhs_raw] <- lhs_norm
+      # Bind the name for statements that FOLLOW the conditional, exactly as the
+      # top-level assignment branch does; a branch-local variable is still a
+      # binding as far as later references are concerned.
+      if (!lhs_raw %in% names(state_pins)) name_map[lhs_raw] <<- lhs_norm
+      out <- c(out, list(list(kind = "assign", lhs = lhs_norm,
+                              rhs_raw = st[[3]], map = snap)))
+    }
+    out
+  }
+  capture_if <- function(e) {
+    list(kind = "if", cond_raw = e[[2]], map = name_map,
+         then  = capture_arm(e[[3]]),
+         else_ = if (length(e) >= 4L) capture_arm(e[[4]]) else NULL)
+  }
+
   for (expr in lst) {
+    pos <- pos + 1L
     # cmt() declarations from nonmem2rx -- skip silently
     if (is.call(expr) && identical(as.character(expr[[1]]), "cmt")) next
 
@@ -2259,6 +2328,13 @@ bound_name <- function(entries, raw) {
       next
     }
 
+    if (is.call(expr) && identical(as.character(expr[[1]])[1L], "if")) {
+      cap <- capture_if(expr)
+      cap$pos <- pos
+      conditionals <- c(conditionals, list(cap))
+      next
+    }
+
     if (.is_assignment(expr)) {
       lhs_expr <- expr[[2]]
 
@@ -2280,7 +2356,8 @@ bound_name <- function(entries, raw) {
         rhs_expr_norm <- .normalise_expr(expr[[3]],
                                          .pin_names(name_map, state_ode_pins))
         rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
-        odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))
+        odes  <- c(odes, list(list(state = state, rhs = rhs,
+                                   rhs_expr = rhs_expr_norm, pos = pos)))
         aux_vars <- c(aux_vars, toupper(state))  # ODE state vars are auxiliary
         if (!identical(structural$type, "ode"))
           structural <- list(type = "ode")
@@ -2392,7 +2469,8 @@ bound_name <- function(entries, raw) {
       all_assigns <- c(all_assigns,
                        list(list(lhs = lhs_norm, rhs = rhs_norm,
                                  rhs_expr = rhs_expr,
-                                 rhs_expr_norm = rhs_expr_norm)))
+                                 rhs_expr_norm = rhs_expr_norm,
+                                 pos = pos)))
     }
   }
 
@@ -2484,6 +2562,7 @@ bound_name <- function(entries, raw) {
   list(
     indiv_params = indiv_params,
     odes         = odes,
+    conditionals = conditionals,
     init_conds   = init_conds,
     error_model  = error_model,
     structural   = structural,
