@@ -38,8 +38,16 @@
 
 ## Bug fixes
 
-* `$MODEL`'s `DEFOBS` attribute is now read from the control stream to decide
-  the observed compartment. `ui$central` is `NULL` for both nonmem2rx and
+* The observed compartment is decided by the DV expression first, `$MODEL`'s
+  `DEFOBS` second, and a positional guess only as a last resort. `DEFOBS` is
+  NONMEM's default for data records with no `CMT`; it says nothing about what
+  `$ERROR` reads, so a model whose `$ERROR` names `A(2)` outright is observed on
+  compartment 2 even when `DEFOBS` names another. When the DV expression carries
+  no compartment of its own (`IPRE = F`), `DEFOBS` is the authority, because
+  that is what NONMEM's `F` means. A disagreement between the two is reported
+  rather than resolved silently.
+
+* `$MODEL`'s `DEFOBS` attribute is now read from the control stream. `ui$central` is `NULL` for both nonmem2rx and
   rxode2, so `obs_cmt` was always the LAST declared compartment -- a positional
   guess that every bundled model happened to satisfy. The same index selects the
   `$PK` scaling variable, so both failed together: a model declaring
@@ -50,15 +58,25 @@
   with a warning if the two disagree, rather than trusted. New bundled model
   `defobs_not_last.ctl` is the regression guard.
 
+* ODE state initial conditions are translated. `A_0(n) = <expr>` in `$PK`
+  becomes `init(<state>) = <expr>` inside `[odes]`. This fixes a real defect in
+  a bundled model: `pkpd_ir.mod` sets `A_0(4)=BL`, initialising the effect
+  compartment to baseline, and that was being discarded without a word, so the
+  translated model started the compartment at 0. ferx resolves an init
+  expression against individual parameters, other states and literals but not
+  thetas, so one referencing anything else is dropped with an explanation naming
+  what was out of scope, rather than emitting a file the engine rejects.
+
 * Statements whose assignment target is a call rather than a name -- `F1`,
-  `ALAG1`, `A_0(n)`, infusion `D1`/`R1` -- are no longer dropped in silence.
-  Each is reported by name in `$warnings` and `$unsupported`. This surfaced a
-  real defect in a bundled model: `pkpd_ir.mod` sets `A_0(4)=BL`, initialising
-  the effect compartment to baseline, and that was being discarded without a
-  word, so the translated model started the compartment at 0. Assignments that
-  set the value ferx already uses (`F1 = 1`, `ALAG1 = 0`) are noted at `INFO`
-  and deliberately kept out of `$unsupported`, which is the ferx-core
-  feature-gap signal.
+  `ALAG1`, infusion `D1`/`R1` -- are no longer dropped in silence. Each is
+  reported by name in `$warnings`. They are NOT added to `$unsupported`: ferx
+  supports all of them (`f=`/`lagtime=` on a pk macro, the reserved `F` and
+  `LAGTIME` names for ODE models), so not emitting them is a `ferxtranslate`
+  limitation rather than a ferx feature gap, and `$unsupported` is the
+  ferx-core prioritisation signal. Assignments that set the value ferx already
+  uses (`F1 = 1`, `ALAG1 = 0`) are noted at `INFO`. An alias the source binds
+  more than once -- the `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)` idiom -- is
+  never treated as a constant.
 
 * A name reachable only through such a dropped statement is no longer reported
   as an illegal covariate. `f(depot) <- BIO.AV` raised
