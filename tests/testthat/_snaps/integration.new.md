@@ -344,9 +344,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pkpd_ir.mod
-      # Warnings: 1 -- run result$warnings for details
-      # WARNING: undeclared name referenced from [odes]: C2, EFF
-      # WARNING: [odes] references C2, EFF, which nothing in the emitted model declares. A ferx ODE right-hand side may only name declared states, individual parameters, ODE-block intermediates and TIME/TAFD/TAD/MACHEPS. If one of these is a covariate, the covariate-dependent term has to be pre-computed in [individual_parameters] and referenced from here by that name.
       
       [parameters]
         theta TH1(1.95, -1e15, 1e15)

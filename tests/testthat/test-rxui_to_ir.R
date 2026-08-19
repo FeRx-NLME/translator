@@ -2446,3 +2446,126 @@ test_that("a rename does not land on a covariate name", {
   # The covariate reference must survive untouched.
   expect_match(ir$odes[[1]]$rhs, "F1_PAR", fixed = TRUE)
 })
+
+# -- phase 5b: statements, conditionals and the block partition ---------------
+
+# Statement helpers, so the expectations read as what the emitted block says.
+ip_of  <- function(ir) vapply(ir$indiv_params, function(p)
+  if (identical(p$kind, "if")) paste0("if (", p$cond, ")") else paste0(p$lhs, " = ", p$rhs), "")
+ode_of <- function(ir) vapply(ir$odes, function(o)
+  switch(if (is.null(o$kind)) "ddt" else o$kind,
+         `if`   = paste0("if (", o$cond, ")"),
+         assign = paste0(o$lhs, " = ", o$rhs),
+         paste0("d/dt(", o$state, ")")), "")
+
+test_that("a $DES conditional is emitted into [odes] with both arms", {
+  # Defect 4. The conditional used to match no branch in the parse loop and be
+  # discarded, leaving the name it defines undefined in the output.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(ct <- CENT / KS),
+              quote(if (ct < 0) { cf <- 0 } else { cf <- ct * 2 }),
+              ddt("CENT", quote(-k * CENT * cf)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  o <- ode_of(ir)
+  expect_true(any(grepl("^if \\(CT < 0\\)$", o)))
+  cond <- Filter(function(x) identical(x$kind, "if"), ir$odes)[[1]]
+  expect_equal(vapply(cond$then,  function(x) paste0(x$lhs, " = ", x$rhs), ""), "CF = 0")
+  expect_equal(vapply(cond$else_, function(x) paste0(x$lhs, " = ", x$rhs), ""), "CF = CT * 2")
+  # And the name it defines is no longer undeclared.
+  expect_false("CF" %in% setdiff(.emitted_ode_symbols(ir$odes),
+                                 toupper(c(.stmt_declared(ir$odes, "ddt", "assign"),
+                                           .ode_states(ir$odes),
+                                           .ip_names(ir$indiv_params)))))
+})
+
+test_that("a state-dependent variable lands in [odes], never [individual_parameters]", {
+  # The half of defect 4 that produces a file which PARSES and is numerically
+  # wrong: [individual_parameters] is evaluated once per subject, but a variable
+  # reading a compartment amount has to be evaluated at every integration step.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ct <- CENT / KS),
+              quote(fb <- ct / (KS + ct)),
+              ddt("CENT", quote(-k * CENT * fb)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false("FB" %in% .ip_names(ir$indiv_params))
+  expect_true("FB" %in% .stmt_declared(ir$odes, "ddt", "assign"))
+})
+
+test_that("an ODE intermediate is declared before the line that reads it", {
+  # [odes] has no use-before-def check. An intermediate below its consumer stays
+  # valid, reads a stale slot, and collapses the prediction to a constant with no
+  # diagnostic -- so ordering is the correctness property, not presentation.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ct <- CENT / KS),
+              ddt("CENT", quote(-k * CENT * ct)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  o <- ode_of(ir)
+  expect_lt(grep("^CT = ", o), grep("^d/dt\\(CENT\\)", o))
+})
+
+test_that("a $PK conditional is emitted into [individual_parameters]", {
+  # Defect 8. Capturing conditionals without routing them here would be WORSE
+  # than the original defect -- captured and then dropped, in neither block and
+  # with no diagnostic, so the code looks like it handles them.
+  ini <- rbind(theta_row("T1", 1), theta_row("T3", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(tvcl <- T1),
+              quote(if (SEX == 1) tvcl <- T1 * T3),
+              quote(cl <- tvcl * exp(eta1)),
+              ddt("CENT", quote(-cl * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- ip_of(ir)
+  expect_true(any(grepl("^if \\(SEX == 1\\)$", ip)))
+  # Source order: defined, conditionally overridden, then read.
+  expect_lt(grep("^TVCL = ", ip)[1], grep("^if \\(SEX", ip))
+  expect_lt(grep("^if \\(SEX", ip), grep("^CL = ", ip))
+})
+
+test_that("$ERROR indicator variables are dropped, not emitted dead", {
+  # Defect 6. W1/W2 reference nothing and nothing reads them, so no reachability
+  # rule evicts them -- they arrive through pass 3's default. ferx would report
+  # them as computed but never used.
+  ini <- rbind(theta_row("K", 0.1), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1), sigma_row("eps2", 0.2))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(w1 <- 0), quote(w2 <- 0),
+              ddt("CENT", quote(-k * CENT)),
+              quote(y <- CENT * (1 + w1 * eps1 + w2 * eps2)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(c("W1", "W2") %in% .ip_names(ir$indiv_params)))
+  expect_match(ir$warnings, "\\$ERROR scaffolding", all = FALSE)
+})
+
+test_that("a theta is de-shadowed against a name assigned only in a branch", {
+  # The defect CLAUDE.md opens with, one nesting level down. `.deshadow_theta_names()`
+  # is fed the individual-parameter names; a name assigned only inside an `if`
+  # never reached that list, so a theta of the same name silently shadowed it --
+  # the branch assignment would be dead, with no diagnostic from ferx.
+  ini <- rbind(theta_row("CL", 1), theta_row("F2", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(if (SEX == 1) CL <- CL * F2),
+              quote(k <- CL * exp(eta1)),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  thetas <- vapply(ir$thetas, function(t) t$name, "")
+  expect_false("CL" %in% thetas)          # renamed away from the branch target
+  expect_true("CL" %in% .ip_names(ir$indiv_params))
+})
+
+test_that("an unused ODE intermediate is dropped rather than emitted", {
+  # `pk_1cmt_oral.mod` has an unused `CP = A(2)/V` in $DES. Inlining discarded it
+  # for free; emitting it would produce a `computed but never used` warning from
+  # the engine and put a name in the file the model does not use.
+  ini <- rbind(theta_row("K", 0.1), theta_row("V", 10), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(cp <- CENT / V),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false("CP" %in% .stmt_declared(ir$odes, "ddt", "assign"))
+  expect_false("CP" %in% .ip_names(ir$indiv_params))
+})
