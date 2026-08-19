@@ -43,6 +43,20 @@
 
 ## Internal
 
+* The CI engine pin moves to `ferx-r@7889719` (0.3.0, tag `v0.3.0`) -- the version
+  users install. It had stayed on `ferx-r@731adc9` (0.2.0) after 0.3.0 shipped,
+  which meant the `engine` job proved only that a build nobody runs accepted the
+  emitted `.ferx`. That is the one job standing between a silent engine regression
+  and a merge, so pointing it at a stale engine defeats its purpose.
+
+  No re-baselining was needed: the full suite passes against 0.3.0 with the
+  concordance references in `test-concordance.R` and the bundled datasets in
+  `inst/testdata/` unchanged. `CLAUDE.md` says both are tied to the pin and must be
+  re-baselined alongside it; that stays true as guidance -- this bump happening to
+  need none is not evidence the next one won't.
+
+  The pin is a SHA rather than the tag on purpose: a tag can be moved.
+
 * `ferx` and `amp.sim` are declared in `Suggests`; both were already used by the
   test suite without being declared.
 
