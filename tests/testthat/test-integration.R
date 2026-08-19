@@ -220,7 +220,20 @@ test_that("every bundled model translates, without a shadowing theta", {
     # and rejected at every reference, so a declaration-only check inspects the
     # half that works. Enumerating IR fields also silently misses whichever
     # channel is added next: reading the artefact cannot.
-    txt   <- emit_ferx(ir)
+    # Guarded, because emit_ferx() opens with validate_ferx_ir() and that
+    # cli_abort()s: uncaught, ONE bad model ends the sweep at that model and the
+    # crashed/offenders/illegal/gaps tables -- all message()d after the loop --
+    # are never printed, which is the opposite of a sweep that reports per-model
+    # gaps. Classed rather than bare, unlike the rxui_to_ir() guard above: there
+    # success is a list and failure a string, so is.character() tells them
+    # apart; here both are one string.
+    txt <- tryCatch(emit_ferx(ir),
+                    error = function(e) structure(conditionMessage(e),
+                                                  class = "emit_failure"))
+    if (inherits(txt, "emit_failure")) {
+      crashed <- c(crashed, paste0(basename(m), " -- emit_ferx: ", unclass(txt)))
+      next
+    }
     lines <- strsplit(txt, "\n")[[1]]
     lines <- lines[!grepl("^\\s*#", lines)]        # comments carry source names
     toks  <- unique(unlist(regmatches(

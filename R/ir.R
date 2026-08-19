@@ -150,7 +150,19 @@ validate_ferx_ir <- function(ir) {
       cli::cli_abort(
         "structural$obs_cmt must be a character scalar when structural$type is {.val ode}."
       )
+    # ferx rejects an observable compartment that is not a declared state
+    # (E_PARSE: Observable compartment 'CENT' not in states). Emitted, it
+    # produced only INFO-level warnings and an empty $unsupported -- the
+    # translation looked clean and the engine refused the file.
+    if (!ir$structural$obs_cmt %in% ir$structural$states)
+      cli::cli_abort(c(
+        "structural$obs_cmt {.val {ir$structural$obs_cmt}} is not one of structural$states.",
+        i = "States are {.val {ir$structural$states}}.",
+        x = "ferx rejects this with {.code E_PARSE: Observable compartment not in states}."
+      ))
   }
+
+  .validate_ir_names(ir)
 
   if (identical(ir$structural$type, "pk_macro")) {
     if (is.null(ir$structural$pk_call) || !nzchar(ir$structural$pk_call))
@@ -161,6 +173,81 @@ validate_ferx_ir <- function(ir) {
       cli::cli_abort(
         "structural$pk_args must be a named list when structural$type is {.val pk_macro}."
       )
+  }
+
+  invisible(ir)
+}
+
+# Every name the IR DECLARES must be a legal ferx identifier.
+#
+# This is the structural half of the guarantee. Legality was previously enforced
+# only where each name was minted -- in .norm(), in .sanitise_state_names(), in
+# .deshadow_theta_names() -- plus one corpus test that tokenised the emitted text
+# of whichever models happen to be bundled. Both miss the same thing: a name that
+# reaches the file through a channel nobody thought to check. An IR carrying
+# `theta 1BAD`, `omega c.RTOT`, an individual parameter `A B` and a state `9CENT`
+# passed validation untouched and was emitted verbatim, and the engine answered
+# `E_PARSE: Expected an assignment, an 'if' block, or 'd/dt(...)', got Ident("A")`.
+# Asserting it HERE means the next channel added fails the first time it emits an
+# illegal name, not the first time someone bundles a model that uses one.
+#
+# DECLARATIONS ONLY -- deliberately not expression text. `indiv_params$rhs`,
+# `odes$rhs` and `scaling$obs_scale` legitimately carry covariate references, and
+# a covariate is the one name that must NOT be sanitised: ferx resolves it
+# against a data column case-sensitively, so rewriting an illegal one turns a
+# working reference into E_MISSING_COVARIATE at fit time. Those are reported as
+# untranslatable by the translator instead. Nothing in the declared set has that
+# exemption, so the check needs no allowlist -- which is why it can be an abort.
+.ir_declared_names <- function(ir) {
+  nm <- function(xs, f) if (length(xs) == 0) character() else unlist(lapply(xs, f))
+  c(theta        = nm(ir$thetas,       function(t) t$name),
+    omega        = nm(ir$omegas,       function(o) o$names),
+    kappa        = nm(ir$kappas,       function(k) k$name),
+    sigma        = nm(ir$sigmas,       function(s) s$name),
+    indiv_param  = nm(ir$indiv_params, function(p) p$lhs),
+    ode_state    = nm(ir$odes,         function(o) o$state),
+    diffusion    = nm(ir$diffusion,    function(d) d$state),
+    error_dv     = nm(ir$error_model,  function(e) e$dv),
+    error_param  = nm(ir$error_model,  function(e) e$params),
+    state        = if (is.null(ir$structural$states))  character() else ir$structural$states,
+    obs_cmt      = if (is.null(ir$structural$obs_cmt)) character() else ir$structural$obs_cmt,
+    pk_arg       = if (is.null(ir$structural$pk_args)) character()
+                   else unlist(ir$structural$pk_args),
+    state_rename = unname(ir$state_renames))
+}
+
+.validate_ir_names <- function(ir) {
+  # state_renames is source name -> emitted name, and BOTH halves matter: the
+  # values are emitted into `ode(states=[...])` so they must be legal, and the
+  # names are rendered as the source half of a `# renamed:` comment. An unnamed
+  # vector -- easy to pass to the exported constructor -- emitted
+  # `# renamed: state  -> c_RTOT` with a blank source name, which is provenance
+  # that provenances nothing.
+  ren <- ir$state_renames
+  if (length(ren) > 0) {
+    if (!is.character(ren))
+      cli::cli_abort("state_renames must be a character vector.")
+    if (is.null(names(ren)) || !all(nzchar(names(ren))))
+      cli::cli_abort(c(
+        "state_renames must be NAMED, source name -> emitted name.",
+        i = "It is rendered as {.code # renamed: <source> -> <emitted>}; without names the source half is blank."
+      ))
+  }
+
+  declared <- .ir_declared_names(ir)
+  declared <- declared[nzchar(declared)]
+  bad      <- declared[!.is_ferx_ident(declared)]
+  if (length(bad) > 0) {
+    # Report the channel, not just the name: "c.RTOT is illegal" leaves the
+    # reader hunting for which of eleven fields produced it.
+    where <- sub("[0-9]*$", "", names(bad))
+    cli::cli_abort(c(
+      "The IR declares {length(bad)} name{?s} that {?is/are} not {?a/} legal ferx identifier{?s}.",
+      setNames(paste0("{.field ", where, "}: {.val ", unname(bad), "}"),
+               rep("x", length(bad))),
+      i = "ferx names are letters, digits and underscore, and must not start with a digit.",
+      i = "This is a ferxtranslate bug, not a source-model limitation -- the emitted file would not parse."
+    ))
   }
 
   invisible(ir)

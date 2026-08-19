@@ -510,6 +510,58 @@ test_that("ODE nlmixr2 model sets structural type ode", {
 
 # -- theta / individual-parameter de-shadowing --------------------------------
 
+test_that(".free_theta_name never returns the theta's own name", {
+  # `base` was a candidate in .free_name's preference chain, so with both
+  # prefixes taken the de-shadower could hand back the very name it was asked to
+  # replace -- a non-NA answer, so the caller reports "theta 'CL' renamed to
+  # 'CL'" and the shadowing survives silently. Reachable only if `taken` ever
+  # stops containing the theta's own name; .deshadow_theta_names() seeds it, but
+  # nothing stated that, so the guard belongs in the function.
+  expect_equal(.free_theta_name("CL", c("TVCL", "THETA_CL")), "CL_1")
+  for (taken in list(character(), "CL", c("TVCL", "THETA_CL"),
+                     c("CL", "TVCL", "THETA_CL"),
+                     c("TVCL", "THETA_CL", "CL_1", "CL_2")))
+    expect_false(identical(.free_theta_name("CL", taken), "CL"))
+})
+
+test_that(".free_name still lets a non-theta caller keep its own name", {
+  # The state sanitiser and the carrier-name path both WANT base as a fallback:
+  # renaming `central` to CENTRAL_1 for nothing churns a name the user indexes
+  # by. Only the theta path opts out.
+  expect_equal(.free_name("central", c("DEPOT")), "central")
+  expect_equal(.free_name("central", c("CENTRAL")), "central_1")
+  expect_equal(.free_name("CL", c("X"), prefer = c("TVCL")), "TVCL")
+  expect_equal(.free_name("CL", c("TVCL"), prefer = c("TVCL")), "CL")
+  expect_equal(.free_name("CL", c("TVCL"), prefer = c("TVCL"),
+                          allow_base = FALSE), "CL_1")
+})
+
+# -- internal invariant: states and individual parameters stay disjoint --------
+
+test_that(".assert_state_param_disjoint passes on disjoint names", {
+  expect_true(.assert_state_param_disjoint(
+    list(list(state = "central"), list(state = "depot")),
+    list(list(lhs = "CL"), list(lhs = "V"))))
+  expect_true(.assert_state_param_disjoint(list(), list()))
+})
+
+test_that(".assert_state_param_disjoint stops, case-insensitively, on a clash", {
+  # Unreachable through the current pipeline by construction -- .parse_model_exprs()
+  # puts every state into `aux_vars` and pass 3 keeps aux_vars out of
+  # indiv_params -- so it is called directly. It is a stop() and not a warning
+  # because reaching it means the translator broke its own contract: the
+  # assignment would be absorbed, dropped from [individual_parameters] and
+  # inlined into itself, leaving an ODE that references a name nothing declares.
+  expect_error(
+    .assert_state_param_disjoint(list(list(state = "CENT")),
+                                 list(list(lhs = "CENT"))),
+    "internal error.*CENT.*names both an ODE state and an individual parameter")
+  expect_error(
+    .assert_state_param_disjoint(list(list(state = "cent")),
+                                 list(list(lhs = "CENT"))),
+    "internal error")
+})
+
 test_that("no rename when theta and individual parameter names are disjoint", {
   out <- .deshadow_theta_names(c("TVCL", "TVV"), c("CL", "V"))
   expect_true(all(is.na(out$map)))

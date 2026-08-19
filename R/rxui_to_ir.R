@@ -344,25 +344,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                            paste(final_clash, collapse = ", ")))
   }
 
-  # A state and an individual parameter sharing a name is an E_PARSE in ferx,
-  # but the translator never gets that far: the assignment is absorbed into
-  # `aux_vars` (its RHS now "references a state"), dropped from
-  # [individual_parameters], and inlined into itself until the depth cap. The
-  # result is an ODE referencing a name nothing declares, with no diagnostic --
-  # a loud dot-parse error turned into a silently deleted parameter. The state
-  # sanitiser cannot prevent it (individual-parameter names are not known until
-  # the model block is parsed), so assert it here, where they are.
-  state_clash <- intersect(
-    toupper(vapply(expr_out$odes, function(o) o$state, "")),
-    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
-  if (length(state_clash) > 0) {
-    warn <- c(warn, paste0(
-      "ERROR | ", paste(state_clash, collapse = ", "), " names both an ODE state ",
-      "and an individual parameter. ferx requires them to be distinct, and the ",
-      "individual parameter is dropped from the output rather than emitted."))
-    unsp <- c(unsp, paste0("state/individual-parameter name collision: ",
-                           paste(state_clash, collapse = ", ")))
-  }
+  .assert_state_param_disjoint(expr_out$odes, expr_out$indiv_params)
 
   # ferx-core checks RESERVED_ODE_NAMES against states, individual parameters
   # AND ODE intermediates (model_parser.rs, eq_ignore_ascii_case). The state
@@ -677,18 +659,62 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(map = map, warnings = warn)
 }
 
+# A state and an individual parameter sharing a name is an E_PARSE in ferx, and
+# the translator would never get that far: the assignment is absorbed into
+# `aux_vars` (its RHS now "references a state"), dropped from
+# [individual_parameters], and inlined into itself until the depth cap. The
+# result is an ODE referencing a name nothing declares, with no diagnostic -- a
+# loud dot-parse error turned into a silently deleted parameter.
+#
+# This is an INTERNAL INVARIANT, not a user diagnostic, and it is deliberately a
+# `stop()` rather than a warning. It cannot fire on any input the current
+# pipeline can build: .parse_model_exprs() pushes `toupper(state)` into
+# `aux_vars` the moment it accepts a `d/dt`, and pass 3 routes every assignment
+# whose LHS is in `aux_vars` to the error-model branch, so a state name can
+# never reach `indiv_params`. The only other producer, the linCmt passthrough,
+# runs only when there are no ODEs at all.
+#
+# It is kept because the thing it guards is a SILENT wrong model, and the two
+# facts that make it unreachable are both incidental to other goals -- either
+# one could be relaxed by a change that looks unrelated. Reported as a bug
+# rather than as a translation gap because reaching it means the translator
+# broke its own contract, not that the source model used something ferx lacks.
+.assert_state_param_disjoint <- function(odes, indiv_params) {
+  clash <- intersect(toupper(vapply(odes, function(o) o$state, "")),
+                     toupper(vapply(indiv_params, function(p) p$lhs, "")))
+  if (length(clash) > 0)
+    stop("internal error: ", paste(clash, collapse = ", "),
+         " names both an ODE state and an individual parameter after parsing. ",
+         "ferx requires them to be distinct and the emitted model would be ",
+         "silently wrong. Please report this with the source model.",
+         call. = FALSE)
+  invisible(TRUE)
+}
+
 # Pick a name that is free in `taken`, comparing case-insensitively because
-# that is how ferx compares them. `prefer` is tried first, in order; failing
-# that, `base` is suffixed _1, _2, ... until something is free.
+# that is how ferx compares them. `prefer` is tried first, in order; then `base`
+# itself if `allow_base`; failing that, `base` is suffixed _1, _2, ... until
+# something is free.
 #
 # `taken` is folded here rather than by the caller. The two users of this used
 # to carry separate copies of the suffix search with OPPOSITE conventions --
 # .free_theta_name() required an already-uppercased `taken`, .sanitise_state_names()
 # uppercased its own -- which is exactly the sort of difference that survives a
 # refactor and silently stops matching.
-.free_name <- function(base, taken, prefer = character()) {
+#
+# `allow_base` is explicit rather than inferred from `length(prefer)` because the
+# two callers want opposite things and only one of them is safe by accident. A
+# state MAY keep its source name (allow_base = TRUE, the common case: renaming
+# `central` to `CENTRAL` churns a name the user indexes by for nothing). A
+# shadowed theta MUST NOT keep its own name -- returning it is the exact defect
+# .deshadow_theta_names() exists to prevent, and it would return non-NA, so the
+# caller reports "theta 'CL' renamed to 'CL'" and the shadowing survives.
+# That was reachable: with `prefer` exhausted, `base` was next in line, and only
+# .deshadow_theta_names() happening to seed `taken` with `theta_names` kept it
+# from firing -- an invariant nothing stated and nothing tested.
+.free_name <- function(base, taken, prefer = character(), allow_base = TRUE) {
   taken <- toupper(taken)
-  for (cand in c(prefer, base))
+  for (cand in if (allow_base) c(prefer, base) else prefer)
     if (!toupper(cand) %in% taken) return(cand)
   i <- 1L
   repeat {
@@ -698,9 +724,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 }
 
-# Pick a free replacement for a shadowed theta.
+# Pick a free replacement for a shadowed theta. Never `old` itself -- see
+# `allow_base` above.
 .free_theta_name <- function(old, taken) {
-  .free_name(old, taken, prefer = c(paste0("TV", old), paste0("THETA_", old)))
+  .free_name(old, taken, prefer = c(paste0("TV", old), paste0("THETA_", old)),
+             allow_base = FALSE)
 }
 
 # Give every theta a name that is unique among thetas and does not shadow a

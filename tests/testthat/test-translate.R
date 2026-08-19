@@ -281,10 +281,20 @@ test_that("validating without a dataset says so rather than implying a clean bil
 
 test_that("invalid output aborts under strict and warns otherwise", {
   skip_if_not_installed("ferx")
+  # An INCOMPLETE model, not a misspelt one. This used to use a dotted state
+  # name (`c.BAD`) and stopped working the moment validate_ferx_ir() began
+  # rejecting illegal declared identifiers -- the same rot the test below this
+  # one already records for `c.RTOT`. The subject here is the strict/non-strict
+  # branch of .report_validation(), so the vehicle must be something no phase of
+  # the translator will ever make valid: an IR that declares an ODE and simply
+  # has no [individual_parameters] and no [error_model] is not a defect being
+  # exercised, it is a model that is genuinely missing required blocks, and
+  # ferx answers E_MISSING_BLOCK. Every name in it is a legal ferx identifier
+  # on purpose, so the fixture does not depend on a name rule holding still.
   bad <- new_ferx_ir(
     thetas     = list(list(name = "TVCL", init = 1, lower = 0, upper = 10)),
-    structural = list(type = "ode", obs_cmt = "c.BAD", states = "c.BAD"),
-    odes       = list(list(state = "c.BAD", rhs = "-TVCL * c.BAD"))
+    structural = list(type = "ode", obs_cmt = "CENT", states = "CENT"),
+    odes       = list(list(state = "CENT", rhs = "-TVCL * CENT"))
   )
   val <- .validate_ferx_text(emit_ferx(bad))
   expect_false(val$ok)
