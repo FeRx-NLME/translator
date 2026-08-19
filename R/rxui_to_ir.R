@@ -729,6 +729,44 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         next
       }
       out_of_scope <- setdiff(ic$syms, c(ip_names, st_names))
+      # TIME is SUBSTITUTED, not grounds for dropping the statement. Model time
+      # at initialisation is zero, and the engine computes exactly that --
+      # measured, `init(central) = TIME + 50` and `init(central) = 0 + 50` agree
+      # to max |diff| = 0.0. So the rest of the expression is still the value the
+      # source asked for, and abandoning it starts the compartment at 0 when the
+      # correct value was in hand: `A_0 = TIME + 50` must emit 50, not nothing.
+      # Dropping is right only for a BARE TIME, which reduces to 0 -- and that
+      # falls out of the substitution rather than needing its own branch, which
+      # is why this is not two code paths.
+      if ("TIME" %in% ic$syms) {
+        ic$expr <- .substitute_sym(ic$expr, "TIME", 0)
+        ic$rhs  <- paste(deparse(ic$expr, width.cutoff = 500L), collapse = " ")
+        ic$syms <- setdiff(toupper(.collect_symbols(ic$expr)), .ODE_LITERALS)
+        out_of_scope <- setdiff(ic$syms, c(ip_names, st_names))
+        if (.is_zero_expr(ic$expr)) {
+          warn <- c(warn, paste0(
+            "INFO  | initial condition for '", state, "' is TIME, which is zero ",
+            "at initialisation, so it sets the value every compartment already ",
+            "has and dropping it does not change the model."))
+          next
+        }
+        warn <- c(warn, paste0(
+          "WARN  | initial condition for '", state, "' references TIME, which is ",
+          "always zero at initialisation. It was replaced with 0, giving 'init(",
+          state, ") = ", ic$rhs, "'. ferx accepts a bare TIME here and reads it ",
+          "as 0 (ferx-core#994), so the emitted model matches the source; the ",
+          "substitution is done here so the file does not depend on that."))
+        # And say it AT THE LINE, not only in the header block. `K + 0` reads as
+        # a translator bug to anyone who does not know why it is there, and the
+        # header warning is twenty lines away and does not travel with the eye.
+        # CLAUDE.md asks for the comment "at the exact location in the .ferx
+        # output where the unsupported feature would have appeared"; this is
+        # that. Deliberately NOT solved by folding `K + 0` to `K`: the unfolded
+        # form is itself evidence that something was zeroed here, and the
+        # artefact is what gets run, shared and diffed months later, while
+        # result$warnings is not.
+        ic$note <- "TIME replaced with 0 -- model time is zero at initialisation"
+      }
       if (length(out_of_scope) > 0) {
         warn <- c(warn, paste0(
           "ERROR | initial condition for '", state, "' references ",
@@ -740,7 +778,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
           "carry it over."))
         next
       }
-      init_conds <- c(init_conds, list(list(state = state, rhs = ic$rhs)))
+      init_conds <- c(init_conds, list(list(state = state, rhs = ic$rhs,
+                                            note = ic$note)))
       warn <- c(warn, paste0(
         "INFO  | initial condition for '", state, "' emitted as 'init(", state,
         ") = ", ic$rhs, "'."))
@@ -1021,7 +1060,45 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
 # Names an init() expression may reference for free, on top of the individual
 # parameters and states ferx resolves there.
-.ODE_LITERALS <- c(.RESERVED_ODE_NAMES, "EXP", "LOG", "SQRT", "ABS", "POW")
+#
+# NOT `.RESERVED_ODE_NAMES`. Those are the names reserved inside `[odes]` at
+# large, and an init expression has a narrower scope than a d/dt right-hand
+# side. Measured against ferx 0.3.0, varying only the init RHS:
+#
+#   init(CENT) = MACHEPS   ok        init(CENT) = T      E_PARSE
+#                                    init(CENT) = TAFD   E_PARSE
+#                                    init(CENT) = TAD    E_PARSE
+#
+# The engine states the rule outright: "An init expression may only reference
+# declared states (0 at init time), individual parameters, or the MACHEPS
+# constant". Reusing the wider list let `A_0(n) = TAD` pass the scope guard and
+# emit `init(CENT) = TAD`, which the engine then rejects -- the guard exists
+# precisely to avoid emitting a file the engine will refuse, so a too-permissive
+# allowlist defeats it rather than merely being untidy.
+#
+# TIME is EXCLUDED even though the engine accepts it, which is the one place
+# this list deliberately does not mirror ferx. It is accepted by accident, not
+# by design: a bare TIME parses to `Expression::Time`, a dedicated AST node
+# rather than a variable (model_parser.rs:3215), so the undefined-name check
+# never sees it -- while TAFD and TAD go through the variable path and are
+# flagged. The check exempts exactly one name by hand,
+# `undef.retain(|n| !n.eq_ignore_ascii_case("MACHEPS"))`. All three sit in the
+# same RESERVED_ODE_NAMES list; init accepts one and rejects two purely on AST
+# shape.
+#
+# And it is silently zero. Measured by forward simulation (maxiter = 0):
+#
+#   init(central) = BL         PRED 50.000000 45.241871 37.040912 24.829319
+#   init(central) = 0 + 50     PRED 50.000000 45.241871 37.040912 24.829319
+#   init(central) = TIME + 50  PRED 50.000000 45.241871 37.040912 24.829319
+#   init(central) = TIME       PRED  0.000000  0.000000  0.000000  0.000000
+#
+# Model time at init is zero by definition, so TIME can carry no value there.
+# Emitting it would produce a file the engine accepts and silently reads as 0 --
+# worse than the rejection TAD gets, because nothing surfaces it. Mirroring the
+# engine here would reproduce its bug, and would break the moment ferx-core
+# fixes it.
+.ODE_LITERALS <- c("MACHEPS", "EXP", "LOG", "SQRT", "ABS", "POW")
 
 # Names referenced by the model but never assigned and never declared in iniDf.
 # ferx reads every such name as a covariate (a data column), and resolves theta
@@ -1169,6 +1246,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # owner of "what counts as a state" and is what this function reads too.
   list(map = map, warnings = warn)
 }
+
+# Replace every occurrence of a symbol in an expression with a value.
+.substitute_sym <- function(expr, sym, value) {
+  if (is.symbol(expr))
+    return(if (identical(as.character(expr), sym)) value else expr)
+  if (!is.call(expr)) return(expr)
+  as.call(c(list(expr[[1]]),
+            lapply(as.list(expr[-1]), .substitute_sym, sym = sym, value = value)))
+}
+
+# Is this expression the literal zero? Only the bare literal -- deliberately not
+# an arithmetic simplifier, because `0 + 50` must stay a value, not become one.
+.is_zero_expr <- function(expr)
+  is.numeric(expr) && length(expr) == 1L && !is.na(expr) && expr == 0
 
 # The state(s) the DV expression names OUTRIGHT, resolved transitively through
 # intermediate assignments.
@@ -1325,13 +1416,26 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                 state = head_raw, src = src, gap = NA_character_,
                 noop = const(0)))
 
-  # ferx DOES support all of these -- ferx-core maps F{cmt} -> `f=`,
-  # ALAG{cmt} -> `lagtime=`, D{cmt}/R{cmt} -> duration/rate, and ferx-r ships
-  # bioavailability.ferx and warfarin_ode_lagtime.ferx as worked examples. So
-  # `gap` is NA for every one of them: they are a ferxtranslate limitation, not
-  # a ferx feature gap, and $unsupported is defined as the ferx-core
-  # prioritisation signal. Filing them there asked the engine team to build what
-  # they had already shipped.
+  # ferx DOES support all of these, so `gap` is NA for every one: they are a
+  # ferxtranslate limitation, not a ferx feature gap, and $unsupported is
+  # defined as the ferx-core prioritisation signal. Filing them there asked the
+  # engine team to build what they had already shipped.
+  #
+  # How ferx expresses them differs by engine, and the earlier version of this
+  # comment had the mechanism wrong in two places (corrected against ferx 0.3.0):
+  #
+  #   * There is NO `dur=`/`rate=` pk-macro argument. The valid role names are
+  #     cl, v/v1, q/q2, v2, ka, f, q3, v3, lagtime/alag. D{n} and R{n} are
+  #     ordinary INDIVIDUAL PARAMETERS on both engines, consulted when a
+  #     RATE=-2/-1 dose targets that compartment.
+  #   * F is not one mapping but two opposite ones. The ODE engine binds it by
+  #     NAME -- a parameter called F or F{n} is applied as bioavailability with
+  #     no mapping. The ANALYTICAL engine binds by ROLE (`f=F1` in the macro
+  #     call) and rejects an unbound F{cmt}, since per-compartment F and lag are
+  #     ODE-only.
+  #
+  # ferx-r ships bioavailability.ferx, bioavailability_ode.ferx and
+  # warfarin_ode_lagtime.ferx as worked examples.
   known <- list(
     f    = list("bioavailability",              1),
     alag = list("dose lag time",                0),
@@ -2005,6 +2109,10 @@ bound_name <- function(entries, raw) {
           } else {
             init_conds <- c(init_conds, list(list(
               state_raw = d$state,
+              # The parsed expression travels with the text: the caller may need
+              # to rewrite it (TIME -> 0) and re-deparse, which cannot be done
+              # from the string without re-parsing it.
+              expr      = init_expr,
               rhs       = paste(deparse(init_expr, width.cutoff = 500L), collapse = " "),
               syms      = init_syms)))
           }
@@ -2013,10 +2121,9 @@ bound_name <- function(entries, raw) {
             "INFO  | ", d$what, " (", d$src, " = ", shown, ") sets the value ferx ",
             "already uses, so dropping it does not change the model."))
         } else {
-          # NOT "ferx has no equivalent". ferx-core maps F{cmt} -> `f=`,
-          # ALAG{cmt} -> `lagtime=` and D/R -> duration/rate, and ferx-r ships
-          # bioavailability.ferx and warfarin_ode_lagtime.ferx. This is a
-          # ferxtranslate limitation, so it does NOT go into $unsupported --
+          # NOT "ferx has no equivalent" -- ferx supports all four; see
+          # .describe_dropped_lhs() for how each is actually expressed. This is
+          # a ferxtranslate limitation, so it does NOT go into $unsupported --
           # that field is the ferx-core feature-gap signal, and a phantom entry
           # there asks the engine team to build what they already shipped.
           more <- if (!single) paste0(
