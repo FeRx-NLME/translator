@@ -916,6 +916,71 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (length(kappa_out$kappas) > 0)
     fit_opts$iov_column <- kappa_out$iov_column
 
+  # Rename individual parameters ferx would silently read as dose attributes.
+  #
+  # This runs LAST, on the finished names, and the position is load-bearing.
+  # Reading the EMITTED set rather than the source names buys two things.
+  #
+  # It cannot drift from what is actually written. Every generator that can put a
+  # name into [individual_parameters] is upstream of this point, so a future one
+  # is covered without being told about this rule. .carrier_name() declines these
+  # names at its own site, for a reason local to it (see there), but that is a
+  # better message rather than the only guard.
+  #
+  # And it proposes no rename for a name that never reaches the file: a $DES
+  # intermediate called `F1` is inlined away, so it is simply not in this list and
+  # the user is not warned about a parameter they will not see.
+  dose_out <- .deconflict_dose_attr_names(
+    vapply(expr_out$indiv_params, function(p) p$lhs, ""),
+    # `reserved_base` rather than a fresh `random_names` list: it is what the
+    # carrier path already reserves (random effects AND covariate names), and
+    # this is the third naming authority in the file. The other two are passed
+    # foreign names for a reason the comment at the top of this function records
+    # -- an authority that reserves only its own channel fixes collisions inside
+    # it while creating them across channels. Without the covariates a rename
+    # could land on a data column, where the declared parameter wins and the
+    # covariate silently becomes unreferenceable.
+    taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
+              vapply(expr_out$odes, function(o) o$state, ""),
+              reserved_base, .RESERVED_ODE_NAMES))
+
+  if (length(dose_out$map) > 0L) {
+    warn <- c(warn, dose_out$warnings)
+    # Every site that can name an individual parameter, rewritten from the one
+    # decision above. The list is the emitters in emit_ferx.R that interpolate a
+    # parameter name: the [individual_parameters] declaration and its own right-
+    # hand sides, the [odes] right-hand sides, the init() expressions, the pk
+    # macro arguments and a character obs_scale. `obs_cmt` and `states` name
+    # STATES and are deliberately absent.
+    #
+    # Two of those are unreachable TODAY and are written anyway, which is worth
+    # saying so the next reader does not go looking for the test that covers
+    # them. `.infer_pk_macro()` draws pk argument values only from
+    # `.PK_CANDIDATES` (CL/V/V1/V2/V3/Q/Q2/Q3/KA), and no name in that set can
+    # match the dose-attribute grammar -- so a renamed parameter cannot currently
+    # BE a pk argument. That stops being true the moment translator#16 starts
+    # emitting `f=`/`alag=` arguments, which is the change most likely to reach
+    # this code. obs_scale is reachable only through NONMEM `S1 = <param>`, which
+    # needs a raw control stream rather than a mock UI; the same `.rewrite_syms()`
+    # call is exercised by the [individual_parameters] cross-reference test.
+    expr_out$indiv_params <- lapply(expr_out$indiv_params, function(p) {
+      if (!is.null(dose_out$map[[p$lhs]])) p$lhs <- dose_out$map[[p$lhs]]
+      p$rhs <- .rewrite_syms(p$rhs, dose_out$map)
+      p
+    })
+    expr_out$odes <- lapply(expr_out$odes, function(o) {
+      o$rhs <- .rewrite_syms(o$rhs, dose_out$map); o
+    })
+    init_conds <- lapply(init_conds, function(x) {
+      x$rhs <- .rewrite_syms(x$rhs, dose_out$map); x
+    })
+    if (identical(structural$type, "pk_macro") && length(structural$pk_args) > 0)
+      structural$pk_args <- lapply(structural$pk_args, .rewrite_syms,
+                                   map = dose_out$map)
+    if (is.character(scaling$obs_scale))
+      scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, dose_out$map)
+  }
+
   # CLAUDE.md: every translation warning is emitted at translation time so the
   # user sees it immediately, not only when they inspect result$warnings.
   .emit_warnings(warn)
@@ -1615,9 +1680,20 @@ bound_name <- function(entries, raw) {
 # to the integrator's clock, so the ODE term silently becomes time-dependent;
 # `builtin_params` does report it, but as a source defect the user cannot act on,
 # since no variable of that name exists in their model.
+#
+# The source name is also declined when ferx would read it as a dose attribute,
+# and this is not a redundant belt on top of the emitted-set pass in
+# `rxui_to_ir()`. The carrier is REACHED by that name: a theta labelled `F1` and
+# referenced only from $DES is de-shadowed to `TVF1` -- because the carrier
+# about to be created predicts an individual parameter called `F1` -- which
+# frees `F1` for the carrier to take. Measured: the pair emitted
+# `theta TVF1` beside `F1 = TVF1`, a bioavailability nothing in the source
+# asked for. Renaming it afterwards works, but leaves the carrier's own INFO
+# message naming a parameter (`F1 = TVF1`) that is not in the file. Declining it
+# here means one decision and one message instead of two that disagree.
 .carrier_name <- function(source_name, theta_name, taken) {
   .free_name(paste0(theta_name, "_ODE"), c(taken, .RESERVED_ODE_NAMES),
-             prefer = source_name)
+             prefer = source_name[!.is_dose_attr_name(source_name)])
 }
 
 # Give every theta a name that is unique among thetas and does not shadow a
@@ -1664,6 +1740,141 @@ bound_name <- function(entries, raw) {
     if (builtin[i])  reasons[[i]] <- c(reasons[[i]], "builtin")
   }
   list(map = map, reasons = reasons, warnings = character())
+}
+
+# -- accidental dose attributes -----------------------------------------------
+
+# ferx reads an [individual_parameters] NAME as a dose attribute and applies it
+# to the dose, whatever the source meant by it. `DoseAttr::from_indexed_name`
+# (ferx-core src/types.rs) matches, case-insensitively, any name that is one of
+# the prefixes LAGTIME / ALAG / F / D / R followed by a pure digit string that
+# denotes a compartment number >= 1; bare `F` / `LAGTIME` / `ALAG` are matched
+# separately, by `PkParams::name_to_index` routing them to RESERVED_PK_SLOTS.
+#
+# The consequence is silent and total. An ODE model whose rate constant happens
+# to be called `F1` emits `F1 = TVF1`, validates with zero diagnostics, and is
+# then read TWICE -- once as the parameter the user wrote, once as a
+# bioavailability on every dose into compartment 1. Measured (translator#17):
+# every prediction differs from the same model with the parameter renamed by
+# exactly that parameter's value. RESERVED_PK_SLOTS also exempts these names
+# from the W_UNUSED_PARAM census, so they are the one class for which neither
+# "used" nor "unused" produces any output at all.
+#
+# ferx-core declines to reserve `D{n}` / `R{n}` deliberately, on the ground that
+# a hand-written model naming a non-dose parameter `R1` while also dosing
+# `RATE=-1` is the author's collision to resolve. That reasoning does not
+# transfer here: the user never chose the ferx spelling, we did.
+#
+# Scope is individual parameters ONLY. A THETA named `F1` is NOT a dose
+# attribute -- measured against ferx 0.3.0, two models differing only in whether
+# the theta is called `F1` or `TVKE` give predictions equal to every printed
+# digit -- so .deshadow_theta_names() needs no rule of its own here.
+#
+# NONMEM sources are largely protected by NONMEM's own reservation of Fn/Dn/Rn/
+# ALAGn in $PK, and in this package's corpus no NONMEM model reaches
+# [individual_parameters] with such a name at all. nlmixr2 and Monolix reserve
+# nothing, so there the repro is an ordinary model.
+.DOSE_ATTR_PREFIXES <- c("LAGTIME", "ALAG", "F", "D", "R")
+.DOSE_ATTR_BARE     <- c("F", "LAGTIME", "ALAG")
+
+# TRUE for every name ferx would read as a dose attribute. Vectorised.
+#
+# The ">= 1 compartment" rule is tested as "the digits contain a nonzero digit"
+# rather than by converting them, which is exact for any length: `F0` and `F00`
+# are not attributes, `F01` and `F10` are. Converting would also disagree with
+# ferx-core at the top of the usize range, where its parse fails and the name
+# stops being an attribute -- over-approximating there is the safe direction,
+# since the cost of a needless rename is a rename and the cost of a missed one
+# is a wrong model.
+.is_dose_attr_name <- function(nm) {
+  x   <- toupper(as.character(nm))
+  out <- x %in% .DOSE_ATTR_BARE
+  # NA is excluded from `hit` rather than left to propagate. `startsWith(NA, p)`
+  # is NA, which makes `any(hit)` NA and `if (!any(hit))` an abort -- a
+  # translation that dies mid-run instead of reporting anything. No current
+  # caller supplies NA (`.norm()` maps it to "X"), but nothing enforces that and
+  # a predicate documented as vectorised should answer for every input.
+  ok <- !is.na(x)
+  for (p in .DOSE_ATTR_PREFIXES) {
+    hit <- ok & startsWith(x, p)
+    if (!any(hit)) next
+    suf <- substring(x[hit], nchar(p) + 1L)
+    out[hit] <- out[hit] |
+      (nzchar(suf) & !grepl("[^0-9]", suf) & grepl("[1-9]", suf))
+  }
+  out
+}
+
+# What ferx would DO with the name, for the warning. The prefixes are mutually
+# exclusive in their first character except LAGTIME/ALAG, which are disjoint, so
+# the order of these tests does not matter -- the same reasoning ferx-core's own
+# loop records.
+.dose_attr_kind <- function(nm) {
+  x <- toupper(as.character(nm))
+  if (x %in% c("F", "LAGTIME", "ALAG")) {
+    return(if (identical(x, "F")) "bioavailability applied to every dose"
+           else "a lag time applied to every dose")
+  }
+  # Leading zeros are stripped: ferx parses the suffix as an integer, so `F01`
+  # is compartment 1, and echoing "01" points the reader at a compartment
+  # numbering that appears nowhere in their model.
+  n <- sub("^0+(?=[0-9])", "", sub("^[A-Z]+", "", x), perl = TRUE)
+  switch(sub("[0-9]+$", "", x),
+    F        = paste0("bioavailability for doses into compartment ", n),
+    D        = paste0("modelled infusion duration for compartment ", n,
+                      " (consulted for RATE=-2 doses)"),
+    R        = paste0("modelled infusion rate for compartment ", n,
+                      " (consulted for RATE=-1 doses)"),
+    paste0("a dose lag time for compartment ", n))
+}
+
+# Rename every individual parameter whose name ferx would read as a dose
+# attribute. Single owner, like .deshadow_theta_names() and
+# .sanitise_state_names(): the caller applies the returned map to the
+# declaration AND to every reference in one step, so the two cannot drift.
+#
+# The replacement is `<name>_PAR`, which cannot itself be a dose attribute for a
+# structural reason rather than by luck -- an attribute name is a prefix
+# followed by digits and nothing else, and `_PAR` is neither.
+#
+# `_PAR` rather than `_1`: that suffix already means "state disambiguated" and
+# is .free_theta_name()'s last resort, and a third meaning on the same spelling
+# leaves a reader unable to tell the three apart. It is only reached here as
+# .free_name()'s fallback when `<name>_PAR` is itself taken.
+.deconflict_dose_attr_names <- function(lhs, taken = character()) {
+  bad <- which(.is_dose_attr_name(lhs))
+  if (length(bad) == 0L) return(list(map = list(), warnings = character()))
+
+  map  <- list()
+  warn <- character()
+  used <- toupper(c(taken, lhs))
+  for (i in bad) {
+    old  <- lhs[i]
+    cand <- .free_name(paste0(old, "_PAR"), used)
+    used <- c(used, toupper(cand))
+    map[[old]] <- cand
+    warn <- c(warn, paste0(
+      "WARN  | individual parameter '", old, "' has the shape of a ferx dose ",
+      "attribute -- renamed to '", cand, "'. ferx would have read the name as ",
+      .dose_attr_kind(old), " and applied it to the dose in addition to the ",
+      "use the source model makes of it, with no error and no warning from the ",
+      "engine. If the source really did mean a dose attribute, it is not ",
+      "translated yet -- see translator#16."))
+  }
+  list(map = map, warnings = warn)
+}
+
+# Rewrite an emitted expression STRING through a rename map, via the parse tree
+# rather than by text substitution -- `gsub` on `F1` also hits `F10` and `XF1`.
+# Same route .scope_odes_to_params() takes, for the same reason. A string that
+# will not parse is returned untouched: it is already broken, and a half-applied
+# rename would make it harder to read, not easier.
+.rewrite_syms <- function(txt, map) {
+  if (!is.character(txt) || length(txt) != 1L || is.na(txt) || !nzchar(txt))
+    return(txt)
+  e <- tryCatch(str2lang(txt), error = function(e) NULL)
+  if (is.null(e)) return(txt)
+  paste(deparse(.normalise_expr(e, map), width.cutoff = 500L), collapse = " ")
 }
 
 # -- iniDf extractors ---------------------------------------------------------

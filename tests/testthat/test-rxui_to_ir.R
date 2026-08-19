@@ -2238,3 +2238,182 @@ test_that("scoping the ODEs does not resurrect the dropped rhs_expr field", {
   expect_equal(names(carried$odes[[1]]), names(plain$odes[[1]]))
   expect_false("rhs_expr" %in% names(carried$odes[[1]]))
 })
+
+# -- accidental dose attributes (issue #17) -----------------------------------
+
+test_that(".is_dose_attr_name matches ferx's grammar, including its edges", {
+  # Mirrors DoseAttr::from_indexed_name (ferx-core src/types.rs): one of the
+  # prefixes LAGTIME/ALAG/F/D/R followed by a pure digit string denoting a
+  # compartment >= 1, plus the bare F/LAGTIME/ALAG that occupy RESERVED_PK_SLOTS.
+  expect_true(all(.is_dose_attr_name(
+    c("F1", "D1", "R1", "ALAG1", "LAGTIME1", "F10", "D23"))))
+  expect_true(all(.is_dose_attr_name(c("F", "ALAG", "LAGTIME"))))
+  # Case-insensitive, as the engine's own lowercase comparison is.
+  expect_true(all(.is_dose_attr_name(c("f1", "alag2", "lagtime3", "f"))))
+  # `cmt >= 1`, so an all-zero suffix is NOT an attribute but a leading zero is.
+  expect_false(.is_dose_attr_name("F0"))
+  expect_false(.is_dose_attr_name("F00"))
+  expect_true(.is_dose_attr_name("F01"))
+  # A non-numeric suffix is not an attribute -- this is what keeps every
+  # ordinary pharmacometric name (and our own generated ones) out of the net.
+  expect_false(any(.is_dose_attr_name(
+    c("CL", "V", "KA", "F_BIO", "FRAC", "DUR", "RATE", "D_1", "F1_PAR",
+      "TVF1", "TVF1_ODE", "RBASE", "DSC"))))
+})
+
+test_that("a dose-attribute parameter name is renamed and every reference follows", {
+  # The reporter's model (translator#17): an ordinary elimination rate constant
+  # that happens to be called F1. Emitted verbatim, ferx reads it as
+  # bioavailability AND as the rate constant, and every prediction is off by
+  # exactly its value -- with no error and no warning from the engine.
+  ini <- rbind(theta_row("F1", 0.1), theta_row("V", 50), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F1 <- F1 * exp(eta1)), ddt("CENT", quote(-F1 * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  # The rename is only correct if the ODE follows it. A renamed declaration
+  # beside an unrewritten reference is an undefined name, not a fix.
+  expect_true(any(grepl("F1_PAR", ip, fixed = TRUE)))
+  expect_match(ir$odes[[1]]$rhs, "F1_PAR", fixed = TRUE)
+  expect_false(grepl("\\bF1\\b", ir$odes[[1]]$rhs))
+  expect_match(ir$warnings, "shape of a ferx dose attribute", all = FALSE)
+})
+
+test_that("the carrier declines a source name ferx reads as a dose attribute", {
+  # Reachable without the source ever assigning the name: a theta labelled F1 and
+  # referenced only from $DES is de-shadowed to TVF1 -- because the carrier about
+  # to be created predicts an individual parameter called F1 -- which frees F1 for
+  # the carrier to take. Measured before the guard: `theta TVF1` beside
+  # `F1 = TVF1`, a bioavailability nothing in the source asked for.
+  ini <- rbind(theta_row("F1", 0.6), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT - F1 * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_match(ir$odes[[1]]$rhs, "TVF1_ODE", fixed = TRUE)
+  # One message, naming the parameter that is actually in the file. Renaming the
+  # carrier after the fact instead would leave the carrier's own INFO line
+  # describing `F1 = TVF1`, which no longer exists.
+  expect_length(grep("dose attribute", ir$warnings), 0L)
+})
+
+test_that("a name that only looks like a dose attribute is left alone", {
+  # The opposite failure: over-matching would churn ordinary names and, for
+  # F0 specifically, contradict the engine -- `cmt >= 1` makes F0 an ordinary
+  # parameter, so renaming it would be wrong rather than merely noisy.
+  ini <- rbind(theta_row("F0", 0.1), theta_row("FRAC", 0.5),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F0 <- F0 * exp(eta1)), quote(FRAC <- FRAC),
+              ddt("CENT", quote(-F0 * FRAC * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("F0" %in% ip)
+  expect_false(any(grepl("_PAR$", ip)))
+  expect_length(grep("dose attribute", ir$warnings), 0L)
+})
+
+test_that("the replacement dodges a name the model already uses", {
+  # `.free_name()`'s fallback, reached when F1_PAR is itself taken. The point is
+  # that the two names stay distinct -- collapsing them would merge two
+  # parameters into one and lose an estimate silently.
+  taken <- c("F1_PAR", "CL")
+  out   <- .deconflict_dose_attr_names(c("F1", "F1_PAR", "CL"), taken = taken)
+  expect_equal(names(out$map), "F1")
+  expect_false(out$map[["F1"]] %in% taken)
+  expect_false(.is_dose_attr_name(out$map[["F1"]]))
+})
+
+test_that("another individual parameter reading the renamed one follows it", {
+  # The declaration is only half of it: [individual_parameters] right-hand sides
+  # are a reference site too, and one left unrewritten names a parameter that no
+  # longer exists. Rewriting goes through the parse tree rather than gsub, so
+  # `R1` does not also hit `R10` or `XR1`.
+  ini <- rbind(theta_row("R1", 2), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(R1 <- R1 * exp(eta1)), quote(KTOT <- K * R1),
+              ddt("CENT", quote(-KTOT * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip  <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_match(rhs[ip == "KTOT"], "R1_PAR", fixed = TRUE)
+  # Every name a right-hand side references must still be declared somewhere.
+  expect_false(any(grepl("\\bR1\\b", rhs)))
+})
+
+test_that(".is_dose_attr_name answers for NA rather than aborting", {
+  # `startsWith(NA, p)` is NA, which made `any(hit)` NA and the guard an abort --
+  # a translation dying mid-run instead of reporting anything.
+  expect_false(.is_dose_attr_name(NA_character_))
+  expect_equal(.is_dose_attr_name(c("F1", NA, "CL")), c(TRUE, FALSE, FALSE))
+})
+
+test_that(".dose_attr_kind names what ferx would do for every prefix", {
+  # The switch() falls through to the lag default for any prefix it does not
+  # name, so a typo in the D or R case would describe a modelled-infusion
+  # parameter as a lag time -- telling the user the wrong reason their model
+  # was changed. Only the F{n} branch was covered before.
+  expect_match(.dose_attr_kind("F1"),  "bioavailability for doses into compartment 1")
+  expect_match(.dose_attr_kind("D1"),  "duration for compartment 1")
+  expect_match(.dose_attr_kind("R1"),  "rate for compartment 1")
+  expect_match(.dose_attr_kind("ALAG2"),    "lag time for compartment 2")
+  expect_match(.dose_attr_kind("LAGTIME3"), "lag time for compartment 3")
+  expect_match(.dose_attr_kind("F"),        "bioavailability applied to every dose")
+  expect_match(.dose_attr_kind("ALAG"),     "lag time applied to every dose")
+  expect_match(.dose_attr_kind("LAGTIME"),  "lag time applied to every dose")
+  # ferx parses the suffix as an integer, so F01 is compartment 1. Echoing "01"
+  # points the reader at a numbering that appears nowhere in their model.
+  expect_match(.dose_attr_kind("F01"), "compartment 1$")
+})
+
+test_that("a bare F individual parameter is renamed too", {
+  # The highest-consequence name in the class: ferx applies a bare `F` as
+  # bioavailability to every dose, with no compartment index and no RATE column
+  # needed. Every other end-to-end fixture here uses an indexed name.
+  ini <- rbind(theta_row("F", 0.1), theta_row("K", 0.5), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F <- F * exp(eta1)), ddt("CENT", quote(-K * CENT * F)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_true("F_PAR" %in% ip)
+  expect_match(ir$odes[[1]]$rhs, "F_PAR", fixed = TRUE)
+  expect_match(ir$warnings, "bioavailability applied to every dose", all = FALSE)
+})
+
+test_that("an init() expression follows the rename", {
+  # phase 4 added init() to [odes], and its expressions name individual
+  # parameters. An unrewritten one is an init referencing a name nothing
+  # declares -- the undefined-name failure this whole change exists to prevent,
+  # in the newest block.
+  ini <- rbind(theta_row("F1", 5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(F1 <- F1 * exp(eta1)),
+              as.call(list(as.name("<-"), as.call(list(as.name("CENT"), 0)),
+                           as.name("F1"))),
+              ddt("CENT", quote(-K * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_length(ir$initial_conditions, 1L)
+  expect_equal(ir$initial_conditions[[1]]$rhs, "F1_PAR")
+  expect_true("F1_PAR" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+})
+
+test_that("a rename does not land on a covariate name", {
+  # This is the third naming authority in the file; the other two reserve
+  # foreign names. A rename onto a data column is silent -- the declared
+  # parameter wins and the covariate becomes unreferenceable.
+  ini <- rbind(theta_row("F1", 0.1), theta_row("K", 0.5), eta_row("eta1", 0.09, 1L))
+  # F1_PAR is bound by nothing, so .covariate_names() classifies it as a covariate.
+  lst <- list(quote(F1 <- F1 * exp(eta1)),
+              ddt("CENT", quote(-K * CENT * F1 * F1_PAR)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(.is_dose_attr_name(ip)))
+  expect_false("F1_PAR" %in% ip)
+  # The covariate reference must survive untouched.
+  expect_match(ir$odes[[1]]$rhs, "F1_PAR", fixed = TRUE)
+})
