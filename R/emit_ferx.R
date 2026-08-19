@@ -128,9 +128,106 @@ emit_ferx <- function(ir) {
   sprintf("  sigma %s ~ %s%s", s$name, .fmt_num(s$value), suffix)
 }
 
+# -- statement rendering ------------------------------------------------------
+
+# [individual_parameters] and [odes] each hold an ORDERED statement list, and
+# both may contain an `if`. One renderer serves both, because the only thing
+# that differs between them is which statement kind a bare entry defaults to.
+#
+# Entries carry an explicit `kind`; an entry without one is read as the kind
+# that block used before statement lists existed -- `assign` for
+# [individual_parameters], `ddt` for [odes], `init` for initial_conditions. That
+# is what keeps the hand-built IRs in test-emit.R and test-ir.R working, and it
+# is a compatibility rule rather than a guess: those shapes have no `kind` field
+# at all, so there is nothing to misread.
+.stmt_kind <- function(s, default) {
+  if (!is.null(s$kind) && length(s$kind) == 1L && nzchar(s$kind)) s$kind else default
+}
+
+# The required fields per kind. Checked rather than assumed for the same reason
+# an unknown `kind` aborts: without it, a statement of a KNOWN kind that is
+# missing a field emits a broken line instead -- `list(kind = "assign", rhs =
+# "1")` produced the line `   = 1`, which the identifier census cannot see
+# (`unlist()` drops the NULL) and only the engine objects to, when it is run.
+# Refusing one and mangling the other is the inconsistency; 5b builds these
+# statements programmatically, which is when a missing field becomes reachable.
+.STMT_REQUIRED <- list(
+  assign = c("lhs", "rhs"),
+  ddt    = c("state", "rhs"),
+  init   = c("state", "rhs"),
+  `if`   = c("cond", "then"))
+
+.emit_stmt <- function(s, default_kind, indent = "  ") {
+  kind <- .stmt_kind(s, default_kind)
+  need <- .STMT_REQUIRED[[kind]]
+  if (!is.null(need)) {
+    absent <- need[vapply(need, function(f) {
+      v <- s[[f]]
+      length(v) == 0L || (is.character(v) && !nzchar(v[1L]))
+    }, logical(1))]
+    if (length(absent) > 0)
+      cli::cli_abort(c(
+        "{.val {kind}} statement is missing {.field {absent}}.",
+        i = "A statement of a known kind must carry every field that kind emits."))
+  }
+  switch(kind,
+    assign = paste0(indent, s$lhs, " = ", s$rhs),
+    ddt    = paste0(indent, "d/dt(", s$state, ") = ", s$rhs),
+    init   = {
+      line <- paste0(indent, "init(", s$state, ") = ", s$rhs)
+      # A per-line note goes ABOVE the line it explains. The header warning block
+      # is the index; this is the annotation a reader needs where they are.
+      if (!is.null(s$note) && nzchar(s$note)) c(paste0(indent, "# ", s$note), line)
+      else                                    line
+    },
+    `if`   = .emit_if_stmt(s, default_kind, indent),
+    cli::cli_abort(c(
+      "Unknown statement kind {.val {kind}}.",
+      i = "Expected one of {.val assign}, {.val ddt}, {.val init}, {.val if}."))
+  )
+}
+
+# Braces are MANDATORY, on both arms, and this is measured rather than stylistic:
+# ferx answers `E_PARSE: Expected `{` after if-condition` to the unbraced form.
+# NONMEM writes its commonest conditional unbraced (`IF (DSC.LT.0.0) DSC = 0.0`,
+# no THEN/ENDIF), so the one-statement case is the one that matters and it still
+# has to be wrapped.
+#
+# A single simple statement per arm renders inline, which is what makes an
+# emitted [odes] block diffable against the source $DES it came from. Anything
+# longer, or a nested `if`, goes multi-line -- ferx accepts both layouts, as it
+# does `else if` and `else` on its own line.
+# Each arm is rendered EXACTLY ONCE, at the nested indent, and the inline form is
+# derived from that text by trimming. Rendering once to choose the layout and
+# again to emit it doubles the work at every nesting level -- 2^depth for the
+# innermost statement -- which is avoidable rather than merely cheap at the
+# depths real models use.
+.emit_if_stmt <- function(s, default_kind, indent) {
+  inner  <- paste0(indent, "  ")
+  render <- function(b)
+    unlist(lapply(b, .emit_stmt, default_kind = default_kind, indent = inner))
+
+  thn <- render(s$then)
+  els <- if (length(s$else_) > 0) render(s$else_) else NULL
+
+  # One rendered line per arm, and neither arm is itself an `if`. Testing the
+  # rendered text rather than the statement kind also catches the multi-line
+  # shapes a single statement can take, such as an init() carrying a note.
+  inline <- length(thn) == 1L && (is.null(els) || length(els) == 1L) &&
+            !any(grepl("^\\s*if \\(", c(thn, els)))
+  if (inline) {
+    out <- paste0(indent, "if (", s$cond, ") { ", trimws(thn), " }")
+    if (!is.null(els)) out <- paste0(out, " else { ", trimws(els), " }")
+    return(out)
+  }
+
+  out <- c(paste0(indent, "if (", s$cond, ") {"), thn)
+  if (!is.null(els)) out <- c(out, paste0(indent, "} else {"), els)
+  c(out, paste0(indent, "}"))
+}
+
 .emit_indiv_params_section <- function(ir) {
-  lines <- vapply(ir$indiv_params,
-                  function(p) paste0("  ", p$lhs, " = ", p$rhs), "")
+  lines <- unlist(lapply(ir$indiv_params, .emit_stmt, default_kind = "assign"))
   paste0("[individual_parameters]\n", paste(lines, collapse = "\n"))
 }
 
@@ -151,16 +248,15 @@ emit_ferx <- function(ir) {
   # init() directives lead, so a reader sees each compartment's starting value
   # before its rate of change -- and because ferx parses them as [odes] lines,
   # they belong in this block rather than a section of their own.
-  init <- unlist(lapply(ir$initial_conditions, function(x) {
-    line <- paste0("  init(", x$state, ") = ", x$rhs)
-    # A per-line note goes ABOVE the line it explains. The header warning block
-    # is the index; this is the annotation a reader needs where they are.
-    if (!is.null(x$note) && nzchar(x$note)) c(paste0("  # ", x$note), line)
-    else                                    line
-  }))
+  #
+  # The rest of the block is emitted in list order and NOTHING here reorders it.
+  # [odes] has no use-before-def check: an intermediate placed below the d/dt
+  # line that reads it stays valid and reads a stale slot, and PRED collapses to
+  # a constant with no diagnostic. Source order is the correctness property.
+  init <- unlist(lapply(ir$initial_conditions, .emit_stmt, default_kind = "init"))
   if (is.null(init)) init <- character()
-  lines <- vapply(ir$odes,
-                  function(o) paste0("  d/dt(", o$state, ") = ", o$rhs), "")
+  lines <- unlist(lapply(ir$odes, .emit_stmt, default_kind = "ddt"))
+  if (is.null(lines)) lines <- character()
   paste0("[odes]\n", paste(c(init, lines), collapse = "\n"))
 }
 

@@ -220,3 +220,200 @@ test_that("method appears before iov_column in fit_options", {
   pos_i <- regexpr("iov_column", out)
   expect_true(pos_m < pos_i)
 })
+
+# -- ordered statement lists (issue #6 phase 5a) ------------------------------
+
+# Minimal ODE IR whose [odes] block is whatever `stmts` says. Deliberately not
+# built on warfarin_1cpt_ir(): this tier is about statement RENDERING, and a
+# fixture carrying an unrelated pk macro would obscure which block is under test.
+stmt_ode_ir <- function(stmts, indiv = list(list(lhs = "KE", rhs = "TVKE")),
+                        inits = list()) {
+  new_ferx_ir(
+    source_format = "nonmem",
+    thetas = list(list(name = "TVKE", init = 0.1, lower = 0.001, upper = 10)),
+    omegas = list(list(type = "diagonal", names = "ETA_KE", values = 0.09)),
+    sigmas = list(list(name = "PROP", value = 0.15, scale = "sd")),
+    indiv_params = indiv,
+    structural = list(type = "ode", obs_cmt = "CENTRAL", states = "CENTRAL"),
+    initial_conditions = inits,
+    odes = stmts,
+    error_model = list(list(dv = "DV", type = "proportional", params = "PROP")))
+}
+
+odes_block <- function(txt) {
+  ln <- strsplit(txt, "\n")[[1]]
+  i  <- grep("^\\[odes\\]", ln)
+  rest <- ln[(i + 1):length(ln)]
+  e <- grep("^\\[", rest)
+  if (length(e)) rest <- rest[seq_len(e[1] - 1)]
+  # Sections are joined with a blank line, so the last one trails an empty
+  # string. Drop it here rather than writing it into every expectation.
+  while (length(rest) && !nzchar(rest[length(rest)])) rest <- rest[-length(rest)]
+  rest
+}
+
+test_that("an entry with no kind still renders as it did before statement lists", {
+  # The compatibility rule the hand-built IRs in this file and test-ir.R rely on:
+  # a bare list(state, rhs) in odes is a d/dt, a bare list(lhs, rhs) in
+  # indiv_params is an assignment. Neither carries a `kind` field to misread.
+  txt <- emit_ferx(stmt_ode_ir(list(list(state = "CENTRAL", rhs = "-KE * CENTRAL"))))
+  expect_match(txt, "  d/dt(CENTRAL) = -KE * CENTRAL", fixed = TRUE)
+  expect_match(txt, "  KE = TVKE", fixed = TRUE)
+})
+
+test_that("a single-statement if is braced and rendered inline", {
+  # Braces are not stylistic. Measured against ferx 0.3.0, the unbraced form is
+  # `E_PARSE: Expected `{` after if-condition` -- and NONMEM writes its commonest
+  # conditional unbraced (`IF (DSC.LT.0.0) DSC = 0.0`), so this is the shape that
+  # matters most.
+  txt <- emit_ferx(stmt_ode_ir(list(
+    list(kind = "if", cond = "CT < 0",
+         then = list(list(kind = "assign", lhs = "CT", rhs = "0"))),
+    list(state = "CENTRAL", rhs = "-KE * CENTRAL"))))
+  expect_match(txt, "  if (CT < 0) { CT = 0 }", fixed = TRUE)
+})
+
+test_that("an if/else with one statement per arm renders inline", {
+  txt <- emit_ferx(stmt_ode_ir(list(
+    list(kind = "if", cond = "BB >= 0",
+         then  = list(list(kind = "assign", lhs = "CF", rhs = "0.5 * (BB + DD)")),
+         else_ = list(list(kind = "assign", lhs = "CF", rhs = "2 * KSS"))),
+    list(state = "CENTRAL", rhs = "-KE * CENTRAL"))))
+  expect_match(txt, "  if (BB >= 0) { CF = 0.5 * (BB + DD) } else { CF = 2 * KSS }",
+               fixed = TRUE)
+})
+
+test_that("a multi-statement arm renders multi-line with indented body", {
+  txt <- emit_ferx(stmt_ode_ir(list(
+    list(kind = "if", cond = "CT > 100",
+         then  = list(list(kind = "assign", lhs = "AA",  rhs = "CT * 2"),
+                      list(kind = "assign", lhs = "SCL", rhs = "AA / (AA + 1)")),
+         else_ = list(list(kind = "assign", lhs = "SCL", rhs = "0.5"))),
+    list(state = "CENTRAL", rhs = "-KE * CENTRAL * SCL"))))
+  expect_equal(odes_block(txt),
+               c("  if (CT > 100) {",
+                 "    AA = CT * 2",
+                 "    SCL = AA / (AA + 1)",
+                 "  } else {",
+                 "    SCL = 0.5",
+                 "  }",
+                 "  d/dt(CENTRAL) = -KE * CENTRAL * SCL"))
+})
+
+test_that("a nested if is never collapsed onto one line", {
+  # Inlining a nested `if` produces `if (a) { if (b) { x = 1 } else ... } ...`,
+  # which parses but is unreadable at the exact place a reader most needs to
+  # follow the branching.
+  txt <- emit_ferx(stmt_ode_ir(list(
+    list(kind = "if", cond = "CT >= 0",
+         then = list(list(kind = "if", cond = "CT > 100",
+                          then  = list(list(kind = "assign", lhs = "SCL", rhs = "0.5")),
+                          else_ = list(list(kind = "assign", lhs = "SCL", rhs = "1.0"))))),
+    list(state = "CENTRAL", rhs = "-KE * CENTRAL * SCL"))))
+  expect_equal(odes_block(txt),
+               c("  if (CT >= 0) {",
+                 "    if (CT > 100) { SCL = 0.5 } else { SCL = 1.0 }",
+                 "  }",
+                 "  d/dt(CENTRAL) = -KE * CENTRAL * SCL"))
+})
+
+test_that("statement order is preserved exactly, init() first", {
+  # The correctness property of the whole block. ferx has NO use-before-def check
+  # in [odes]: an intermediate below the d/dt line that reads it stays valid,
+  # reads a stale slot, and collapses PRED to a constant with no diagnostic. A
+  # renderer that sorted or grouped would be silently wrong.
+  txt <- emit_ferx(stmt_ode_ir(
+    list(list(kind = "assign", lhs = "CT",  rhs = "CENTRAL / V"),
+         list(kind = "assign", lhs = "SCL", rhs = "CT + 1"),
+         list(state = "CENTRAL", rhs = "-KE * CENTRAL * SCL"),
+         list(kind = "assign", lhs = "ZZ", rhs = "1")),
+    inits = list(list(state = "CENTRAL", rhs = "0.0"))))
+  expect_equal(odes_block(txt),
+               c("  init(CENTRAL) = 0.0",
+                 "  CT = CENTRAL / V",
+                 "  SCL = CT + 1",
+                 "  d/dt(CENTRAL) = -KE * CENTRAL * SCL",
+                 "  ZZ = 1"))
+})
+
+test_that("an illegal name declared inside an if branch is still caught", {
+  # The census aborts, so a walk that stopped at the top level would not report a
+  # weaker result -- it would report nothing and let the name reach the engine.
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(
+      list(kind = "if", cond = "CT < 0",
+           then = list(list(kind = "assign", lhs = "c.BAD", rhs = "0"))),
+      list(state = "CENTRAL", rhs = "-KE * CENTRAL")))),
+    "c.BAD")
+})
+
+test_that("an unknown statement kind is refused rather than skipped", {
+  # Silently dropping it would emit a model missing a statement the IR carried,
+  # which is the whole class of defect issue #6 is about.
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(kind = "loop", lhs = "X", rhs = "1")))),
+    "Unknown statement kind")
+})
+
+test_that("a statement of a known kind missing a field is refused", {
+  # The asymmetry this closes: an unknown `kind` aborted, but a known kind with
+  # a missing field emitted the broken line `   = 1`, which the identifier
+  # census cannot see (unlist() drops the NULL) and only the engine objects to.
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+                          indiv = list(list(kind = "assign", rhs = "1")))),
+    "missing")
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(kind = "ddt", rhs = "-KE * CENTRAL")))),
+    "missing")
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(kind = "if", cond = "CT < 0")))),
+    "missing")
+})
+
+test_that("an if in [individual_parameters] renders and is censused", {
+  # Every other statement test puts its `if` in [odes]. The two blocks pass
+  # different `default_kind`s, so they take different branches through
+  # .stmt_kind(), and phase 6 emits conditionals into THIS block.
+  ir <- stmt_ode_ir(
+    list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+    indiv = list(
+      list(lhs = "KE", rhs = "TVKE"),
+      list(kind = "if", cond = "SEX == 1",
+           then  = list(list(kind = "assign", lhs = "KE", rhs = "TVKE * 2")),
+           else_ = list(list(kind = "assign", lhs = "KE", rhs = "TVKE")))))
+  txt <- emit_ferx(ir)
+  expect_match(txt, "  if (SEX == 1) { KE = TVKE * 2 } else { KE = TVKE }",
+               fixed = TRUE)
+
+  # And the census reaches a name declared inside the branch.
+  bad <- stmt_ode_ir(
+    list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+    indiv = list(list(lhs = "KE", rhs = "TVKE"),
+                 list(kind = "if", cond = "SEX == 1",
+                      then = list(list(kind = "assign", lhs = "c.BAD", rhs = "1")))))
+  expect_error(emit_ferx(bad), "c.BAD")
+})
+
+test_that("each if arm is rendered once, not once per layout decision", {
+  # Rendering to choose the layout and again to emit doubles the work at every
+  # nesting level. Counting renders directly is the only way to see it -- the
+  # OUTPUT is identical either way, which is why it survived the first pass.
+  # Three nested levels, one statement each.
+  deep <- list(kind = "if", cond = "A > 0", then = list(
+           list(kind = "if", cond = "B > 0", then = list(
+             list(kind = "if", cond = "C > 0",
+                  then = list(list(kind = "assign", lhs = "X", rhs = "1")))))))
+  txt <- emit_ferx(stmt_ode_ir(list(deep,
+                    list(state = "CENTRAL", rhs = "-KE * CENTRAL * X"))))
+  # Structural assertion instead of a counter: the innermost assignment must
+  # appear exactly once in the output at each depth, and the nesting must be
+  # laid out rather than collapsed.
+  expect_equal(odes_block(txt),
+               c("  if (A > 0) {",
+                 "    if (B > 0) {",
+                 "      if (C > 0) { X = 1 }",
+                 "    }",
+                 "  }",
+                 "  d/dt(CENTRAL) = -KE * CENTRAL * X"))
+})

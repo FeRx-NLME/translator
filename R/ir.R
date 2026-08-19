@@ -17,14 +17,25 @@
 #'   `name` (character) and `value` (numeric).
 #' @param sigmas List of sigma entries. Each element is a list with `name`
 #'   (character), `value` (numeric), and `scale` (`"sd"` or `"var"`).
-#' @param indiv_params List of individual parameter assignments. Each element
-#'   is a list with `lhs` (character) and `rhs` (character).
+#' @param indiv_params Ordered list of statements. Each element is a list with
+#'   a `kind`: `"assign"` (`lhs`, `rhs`, both character) or `"if"` (`cond`,
+#'   character; `then`, and optionally `else_`, each a nested statement list).
+#'   An element with no `kind` is read as an `"assign"`, which is the shape this
+#'   field held before statement lists. Order is preserved exactly.
 #' @param structural List describing the structural model. Must have `type`:
 #'   `"pk_macro"` (add `pk_call` and `pk_args`) or `"ode"` (add `obs_cmt`
 #'   and `states`). May be empty during incremental construction.
-#' @param odes List of ODE entries. Each element is a list with `state`
-#'   (character) and `rhs` (character). Used only when
+#' @param odes Ordered list of statements forming the `[odes]` block. Each
+#'   element is a list with a `kind`: `"ddt"` (`state`, `rhs`), `"assign"`
+#'   (`lhs`, `rhs`) for an ODE-block intermediate, or `"if"` (`cond`, `then`,
+#'   and optionally `else_`). An element with no `kind` is read as a `"ddt"`,
+#'   which is the shape this field held before statement lists. Used only when
 #'   `structural$type == "ode"`.
+#'
+#'   Order is preserved exactly and nothing reorders it. ferx has no
+#'   use-before-def check in `[odes]`: an intermediate placed below the `d/dt`
+#'   line that reads it stays valid, reads a stale slot, and collapses the
+#'   prediction to a constant with no diagnostic.
 #' @param initial_conditions List of ODE initial-condition entries. Each element
 #'   is a list with `state` (character, an emitted state name) and `rhs`
 #'   (character, the expression). Rendered as `init(<state>) = <rhs>` inside the
@@ -194,6 +205,34 @@ validate_ferx_ir <- function(ir) {
   invisible(ir)
 }
 
+# Names a statement list DECLARES, walking into `if` bodies.
+#
+# Walking in is the whole point. A name assigned inside a branch is declared as
+# much as one at the top level, and the census below is an abort rather than a
+# warning -- so a channel that stops at the top level does not report a weaker
+# result, it reports nothing and lets an illegal name reach the engine. That is
+# the failure this census exists to prevent, reintroduced one nesting level down.
+#
+# `want` selects which half of the list to return, because [odes] declares two
+# kinds of name that need different labels: `state` covers d/dt targets and
+# init() targets, `assign` covers ODE-block intermediates. Reporting an illegal
+# intermediate as an "ode state" would send the reader to $MODEL.
+.stmt_declared <- function(stmts, default_kind, want) {
+  out <- character()
+  for (s in stmts) {
+    kind <- .stmt_kind(s, default_kind)
+    if (identical(kind, "if")) {
+      out <- c(out, .stmt_declared(s$then,  default_kind, want),
+                    .stmt_declared(s$else_, default_kind, want))
+    } else if (identical(kind, "assign")) {
+      if (identical(want, "assign")) out <- c(out, s$lhs)
+    } else {
+      if (identical(want, "state"))  out <- c(out, s$state)
+    }
+  }
+  out
+}
+
 # Every name the IR DECLARES must be a legal ferx identifier.
 #
 # This is the structural half of the guarantee. Legality was previously enforced
@@ -234,8 +273,9 @@ validate_ferx_ir <- function(ir) {
     add("omega",        nm(ir$omegas,       function(o) o$names)),
     add("kappa",        nm(ir$kappas,       function(k) k$name)),
     add("sigma",        nm(ir$sigmas,       function(s) s$name)),
-    add("indiv_param",  nm(ir$indiv_params, function(p) p$lhs)),
-    add("ode state",    nm(ir$odes,         function(o) o$state)),
+    add("indiv_param",  .stmt_declared(ir$indiv_params, "assign", "assign")),
+    add("ode state",    .stmt_declared(ir$odes, "ddt", "state")),
+    add("ode intermediate", .stmt_declared(ir$odes, "ddt", "assign")),
     add("initial condition", nm(ir$initial_conditions, function(x) x$state)),
     add("diffusion",    nm(ir$diffusion,    function(d) d$state)),
     add("error dv",     nm(ir$error_model,  function(e) e$dv)),

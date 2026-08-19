@@ -20,6 +20,17 @@
 
 ## New features
 
+* `ferx_ir`'s `indiv_params` and `odes` are now ordered STATEMENT lists rather
+  than flat assignment lists, and `emit_ferx()` renders them. A statement
+  carries a `kind` -- `assign`, `ddt`, `init`, or `if` (with `cond`, `then` and
+  an optional `else_` holding nested statement lists). This is what makes a
+  source-model conditional representable at all; the translator does not yet
+  produce `if` statements, so no translated model changes. An entry with no
+  `kind` is read as the kind its block used before, so existing hand-built IRs
+  keep working. Order is preserved exactly and nothing reorders it: ferx has no
+  use-before-def check in `[odes]`, and an intermediate below the `d/dt` line
+  that reads it stays valid while collapsing the prediction to a constant.
+
 * The emitted `.ferx` records ODE state renames as `# renamed: state <from> ->
   <to>` provenance comments, and `ferx_ir` gains a `$state_renames` field. The
   `.ferx` is the artefact that gets shared, and a reader holding only that file
