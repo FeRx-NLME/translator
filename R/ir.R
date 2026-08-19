@@ -205,33 +205,6 @@ validate_ferx_ir <- function(ir) {
   invisible(ir)
 }
 
-# Every name the IR DECLARES must be a legal ferx identifier.
-#
-# This is the structural half of the guarantee. Legality was previously enforced
-# only where each name was minted -- in .norm(), in .sanitise_state_names(), in
-# .deshadow_theta_names() -- plus one corpus test that tokenised the emitted text
-# of whichever models happen to be bundled. Both miss the same thing: a name that
-# reaches the file through a channel nobody thought to check. An IR carrying
-# `theta 1BAD`, `omega c.RTOT`, an individual parameter `A B` and a state `9CENT`
-# passed validation untouched and was emitted verbatim, and the engine answered
-# `E_PARSE: Expected an assignment, an 'if' block, or 'd/dt(...)', got Ident("A")`.
-# Asserting it HERE means the next channel added fails the first time it emits an
-# illegal name, not the first time someone bundles a model that uses one.
-#
-# DECLARATIONS ONLY -- deliberately not expression text. `indiv_params$rhs`,
-# `odes$rhs` and `scaling$obs_scale` legitimately carry covariate references, and
-# a covariate is the one name that must NOT be sanitised: ferx resolves it
-# against a data column case-sensitively, so rewriting an illegal one turns a
-# working reference into E_MISSING_COVARIATE at fit time. Those are reported as
-# untranslatable by the translator instead. Nothing in the declared set has that
-# exemption, so the check needs no allowlist -- which is why it can be an abort.
-# Returns a data.frame of (channel, name) rather than a named vector. The names
-# have to travel with a label saying which field produced them -- "c.RTOT is
-# illegal" leaves the reader hunting through eleven fields -- and deriving that
-# label by stripping digits off `c()`-generated suffixes does not survive real
-# input: `pk_args` keys legitimately end in digits, so `pk_arg.v1` and
-# `pk_arg.v2` both stripped to `pk_arg.v` and two different macro slots were
-# reported under one label. A parallel vector cannot collapse that way.
 # Names a statement list DECLARES, walking into `if` bodies.
 #
 # Walking in is the whole point. A name assigned inside a branch is declared as
@@ -260,6 +233,33 @@ validate_ferx_ir <- function(ir) {
   out
 }
 
+# Every name the IR DECLARES must be a legal ferx identifier.
+#
+# This is the structural half of the guarantee. Legality was previously enforced
+# only where each name was minted -- in .norm(), in .sanitise_state_names(), in
+# .deshadow_theta_names() -- plus one corpus test that tokenised the emitted text
+# of whichever models happen to be bundled. Both miss the same thing: a name that
+# reaches the file through a channel nobody thought to check. An IR carrying
+# `theta 1BAD`, `omega c.RTOT`, an individual parameter `A B` and a state `9CENT`
+# passed validation untouched and was emitted verbatim, and the engine answered
+# `E_PARSE: Expected an assignment, an 'if' block, or 'd/dt(...)', got Ident("A")`.
+# Asserting it HERE means the next channel added fails the first time it emits an
+# illegal name, not the first time someone bundles a model that uses one.
+#
+# DECLARATIONS ONLY -- deliberately not expression text. `indiv_params$rhs`,
+# `odes$rhs` and `scaling$obs_scale` legitimately carry covariate references, and
+# a covariate is the one name that must NOT be sanitised: ferx resolves it
+# against a data column case-sensitively, so rewriting an illegal one turns a
+# working reference into E_MISSING_COVARIATE at fit time. Those are reported as
+# untranslatable by the translator instead. Nothing in the declared set has that
+# exemption, so the check needs no allowlist -- which is why it can be an abort.
+# Returns a data.frame of (channel, name) rather than a named vector. The names
+# have to travel with a label saying which field produced them -- "c.RTOT is
+# illegal" leaves the reader hunting through eleven fields -- and deriving that
+# label by stripping digits off `c()`-generated suffixes does not survive real
+# input: `pk_args` keys legitimately end in digits, so `pk_arg.v1` and
+# `pk_arg.v2` both stripped to `pk_arg.v` and two different macro slots were
+# reported under one label. A parallel vector cannot collapse that way.
 .ir_declared_names <- function(ir) {
   nm  <- function(xs, f) unlist(lapply(xs, f))
   add <- function(channel, values) {

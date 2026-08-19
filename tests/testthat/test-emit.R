@@ -354,3 +354,66 @@ test_that("an unknown statement kind is refused rather than skipped", {
     emit_ferx(stmt_ode_ir(list(list(kind = "loop", lhs = "X", rhs = "1")))),
     "Unknown statement kind")
 })
+
+test_that("a statement of a known kind missing a field is refused", {
+  # The asymmetry this closes: an unknown `kind` aborted, but a known kind with
+  # a missing field emitted the broken line `   = 1`, which the identifier
+  # census cannot see (unlist() drops the NULL) and only the engine objects to.
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+                          indiv = list(list(kind = "assign", rhs = "1")))),
+    "missing")
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(kind = "ddt", rhs = "-KE * CENTRAL")))),
+    "missing")
+  expect_error(
+    emit_ferx(stmt_ode_ir(list(list(kind = "if", cond = "CT < 0")))),
+    "missing")
+})
+
+test_that("an if in [individual_parameters] renders and is censused", {
+  # Every other statement test puts its `if` in [odes]. The two blocks pass
+  # different `default_kind`s, so they take different branches through
+  # .stmt_kind(), and phase 6 emits conditionals into THIS block.
+  ir <- stmt_ode_ir(
+    list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+    indiv = list(
+      list(lhs = "KE", rhs = "TVKE"),
+      list(kind = "if", cond = "SEX == 1",
+           then  = list(list(kind = "assign", lhs = "KE", rhs = "TVKE * 2")),
+           else_ = list(list(kind = "assign", lhs = "KE", rhs = "TVKE")))))
+  txt <- emit_ferx(ir)
+  expect_match(txt, "  if (SEX == 1) { KE = TVKE * 2 } else { KE = TVKE }",
+               fixed = TRUE)
+
+  # And the census reaches a name declared inside the branch.
+  bad <- stmt_ode_ir(
+    list(list(state = "CENTRAL", rhs = "-KE * CENTRAL")),
+    indiv = list(list(lhs = "KE", rhs = "TVKE"),
+                 list(kind = "if", cond = "SEX == 1",
+                      then = list(list(kind = "assign", lhs = "c.BAD", rhs = "1")))))
+  expect_error(emit_ferx(bad), "c.BAD")
+})
+
+test_that("each if arm is rendered once, not once per layout decision", {
+  # Rendering to choose the layout and again to emit doubles the work at every
+  # nesting level. Counting renders directly is the only way to see it -- the
+  # OUTPUT is identical either way, which is why it survived the first pass.
+  # Three nested levels, one statement each.
+  deep <- list(kind = "if", cond = "A > 0", then = list(
+           list(kind = "if", cond = "B > 0", then = list(
+             list(kind = "if", cond = "C > 0",
+                  then = list(list(kind = "assign", lhs = "X", rhs = "1")))))))
+  txt <- emit_ferx(stmt_ode_ir(list(deep,
+                    list(state = "CENTRAL", rhs = "-KE * CENTRAL * X"))))
+  # Structural assertion instead of a counter: the innermost assignment must
+  # appear exactly once in the output at each depth, and the nesting must be
+  # laid out rather than collapsed.
+  expect_equal(odes_block(txt),
+               c("  if (A > 0) {",
+                 "    if (B > 0) {",
+                 "      if (C > 0) { X = 1 }",
+                 "    }",
+                 "  }",
+                 "  d/dt(CENTRAL) = -KE * CENTRAL * X"))
+})

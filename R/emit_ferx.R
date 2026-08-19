@@ -144,8 +144,32 @@ emit_ferx <- function(ir) {
   if (!is.null(s$kind) && length(s$kind) == 1L && nzchar(s$kind)) s$kind else default
 }
 
+# The required fields per kind. Checked rather than assumed for the same reason
+# an unknown `kind` aborts: without it, a statement of a KNOWN kind that is
+# missing a field emits a broken line instead -- `list(kind = "assign", rhs =
+# "1")` produced the line `   = 1`, which the identifier census cannot see
+# (`unlist()` drops the NULL) and only the engine objects to, when it is run.
+# Refusing one and mangling the other is the inconsistency; 5b builds these
+# statements programmatically, which is when a missing field becomes reachable.
+.STMT_REQUIRED <- list(
+  assign = c("lhs", "rhs"),
+  ddt    = c("state", "rhs"),
+  init   = c("state", "rhs"),
+  `if`   = c("cond", "then"))
+
 .emit_stmt <- function(s, default_kind, indent = "  ") {
   kind <- .stmt_kind(s, default_kind)
+  need <- .STMT_REQUIRED[[kind]]
+  if (!is.null(need)) {
+    absent <- need[vapply(need, function(f) {
+      v <- s[[f]]
+      length(v) == 0L || (is.character(v) && !nzchar(v[1L]))
+    }, logical(1))]
+    if (length(absent) > 0)
+      cli::cli_abort(c(
+        "{.val {kind}} statement is missing {.field {absent}}.",
+        i = "A statement of a known kind must carry every field that kind emits."))
+  }
   switch(kind,
     assign = paste0(indent, s$lhs, " = ", s$rhs),
     ddt    = paste0(indent, "d/dt(", s$state, ") = ", s$rhs),
@@ -173,26 +197,32 @@ emit_ferx <- function(ir) {
 # emitted [odes] block diffable against the source $DES it came from. Anything
 # longer, or a nested `if`, goes multi-line -- ferx accepts both layouts, as it
 # does `else if` and `else` on its own line.
+# Each arm is rendered EXACTLY ONCE, at the nested indent, and the inline form is
+# derived from that text by trimming. Rendering once to choose the layout and
+# again to emit it doubles the work at every nesting level -- 2^depth for the
+# innermost statement -- which is avoidable rather than merely cheap at the
+# depths real models use.
 .emit_if_stmt <- function(s, default_kind, indent) {
-  render <- function(b, ind)
-    unlist(lapply(b, .emit_stmt, default_kind = default_kind, indent = ind))
+  inner  <- paste0(indent, "  ")
+  render <- function(b)
+    unlist(lapply(b, .emit_stmt, default_kind = default_kind, indent = inner))
 
-  flat_then <- render(s$then, "")
-  flat_else <- if (length(s$else_) > 0) render(s$else_, "") else NULL
+  thn <- render(s$then)
+  els <- if (length(s$else_) > 0) render(s$else_) else NULL
 
-  inline <- length(flat_then) == 1L &&
-            (is.null(flat_else) || length(flat_else) == 1L) &&
-            !any(grepl("^if \\(", c(flat_then, flat_else)))
+  # One rendered line per arm, and neither arm is itself an `if`. Testing the
+  # rendered text rather than the statement kind also catches the multi-line
+  # shapes a single statement can take, such as an init() carrying a note.
+  inline <- length(thn) == 1L && (is.null(els) || length(els) == 1L) &&
+            !any(grepl("^\\s*if \\(", c(thn, els)))
   if (inline) {
-    out <- paste0(indent, "if (", s$cond, ") { ", flat_then, " }")
-    if (!is.null(flat_else)) out <- paste0(out, " else { ", flat_else, " }")
+    out <- paste0(indent, "if (", s$cond, ") { ", trimws(thn), " }")
+    if (!is.null(els)) out <- paste0(out, " else { ", trimws(els), " }")
     return(out)
   }
 
-  inner <- paste0(indent, "  ")
-  out   <- c(paste0(indent, "if (", s$cond, ") {"), render(s$then, inner))
-  if (!is.null(flat_else))
-    out <- c(out, paste0(indent, "} else {"), render(s$else_, inner))
+  out <- c(paste0(indent, "if (", s$cond, ") {"), thn)
+  if (!is.null(els)) out <- c(out, paste0(indent, "} else {"), els)
   c(out, paste0(indent, "}"))
 }
 
