@@ -155,6 +155,26 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (!.is_assignment(e)) next
     if (is.symbol(e[[2]])) assigned_lhs <- c(assigned_lhs, .norm(as.character(e[[2]])))
   }
+  # `random_names` is reserved here even though ferx itself does not require it,
+  # and the distinction is worth stating because the opposite looks correct.
+  # ferx-core's [odes] collision check covers states, individual parameters and
+  # ODE intermediates only -- etas, kappas and sigmas are not in that namespace,
+  # and a hand-written .ferx with `omega ETA1 ~ 0.09` beside `states=[ETA1]` and
+  # `d/dt(ETA1)` validates ok against the engine (measured, as does the sigma
+  # equivalent; the individual-parameter version really is an E_PARSE). So
+  # reserving them looks like pointless over-strictness.
+  #
+  # It is not. The reservation is not about what ferx ACCEPTS, it is about what
+  # this translator can BUILD. In the source, `ETA_X` in $PK means the eta and
+  # `ETA_X` in $DES means the compartment, and `lst` gives no way to tell the
+  # two apart. Drop the reservation and .parse_model_exprs() puts the state into
+  # `aux_vars`, sees `k <- t.K * exp(ETA_X)` reference it, absorbs `k` as an ODE
+  # intermediate, drops it from [individual_parameters] and self-inlines to the
+  # depth cap -- measured output
+  # `d/dt(ETA_X) = -(K * exp(ETA_X) * ... 15 times ...) * ETA_X`, with the rate
+  # constant gone. Renaming the state to ETA_X_1 is what keeps the two readings
+  # apart, and yields the correct `d/dt(ETA_X_1) = -K * ETA_X_1`. Case-differing
+  # names go the same way, because aux_vars matching is case-insensitive.
   state_out <- .sanitise_state_names(
     lst,
     taken = c(random_names,
