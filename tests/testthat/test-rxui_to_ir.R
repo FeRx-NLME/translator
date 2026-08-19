@@ -508,6 +508,75 @@ test_that("ODE nlmixr2 model sets structural type ode", {
   expect_length(ir$odes, 2L)
 })
 
+# -- random-effect name uniqueness --------------------------------------------
+
+test_that(".uniquify_random_names leaves already-distinct names alone", {
+  e <- list(list(name = "ETA_CL", raw = "eta.cl"),
+            list(name = "ETA_V",  raw = "eta.v"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""), c("ETA_CL", "ETA_V"))
+  expect_length(out$warnings, 0L)
+})
+
+test_that("two source names normalising onto one spelling are made distinct", {
+  # .norm() folds every illegal character onto `_`, which is many-to-one. The
+  # theta channel has a uniqueness check and the state channel has one; this
+  # channel had none, so both emitted `omega CL_IIV` and every reference
+  # resolved to the first -- one IIV dropped, one double-counted, engine ok.
+  e <- list(list(name = "CL_IIV", raw = "CL.IIV"),
+            list(name = "CL_IIV", raw = "CL_IIV"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""),
+               c("CL_IIV", "CL_IIV_1"))
+  expect_match(out$warnings, "CL_IIV_1", all = FALSE)
+})
+
+test_that("uniqueness is case-insensitive, as ferx compares names", {
+  e <- list(list(name = "ETA_CL", raw = "eta.cl"),
+            list(name = "eta_cl", raw = "ETA.CL"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""),
+               c("ETA_CL", "eta_cl_1"))
+})
+
+test_that("the first occurrence keeps its name", {
+  # Renaming the first instead would churn a name the user already reads for the
+  # benefit of a later duplicate.
+  e <- list(list(name = "X", raw = "x1"), list(name = "X", raw = "x2"),
+            list(name = "X", raw = "x3"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""), c("X", "X_1", "X_2"))
+})
+
+test_that("a block omega uniquifies each of its names", {
+  e <- list(list(name = c("A", "B"), raw = c("a", "b")),
+            list(name = "A",         raw = "a2"))
+  out <- .uniquify_random_names(e)
+  expect_equal(out$entries[[1]]$name, c("A", "B"))
+  expect_equal(out$entries[[2]]$name, "A_1")
+})
+
+test_that("colliding etas emit distinct omegas AND distinct references", {
+  # The end-to-end version: the rename is worthless if name_map still points the
+  # second eta's references at the name its twin took, which just moves the
+  # merge from the declaration to the reference.
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.TV", 10),
+               eta_row("CL.IIV", 0.09, 1L), eta_row("CL_IIV", 0.04, 2L))
+  lst <- list(quote(cl <- t.TCL * exp(CL.IIV)),
+              quote(v  <- t.TV  * exp(CL_IIV)),
+              quote(d/dt(central) <- -cl/v * central))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  nms <- unlist(lapply(ir$omegas, function(o) o$names))
+  expect_length(unique(nms), 2L)
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_match(rhs, "exp(CL_IIV)",   fixed = TRUE, all = FALSE)
+  expect_match(rhs, "exp(CL_IIV_1)", fixed = TRUE, all = FALSE)
+  # Each omega is referenced exactly once -- neither dropped nor double-counted.
+  for (n in nms)
+    expect_length(grep(paste0("\\b", n, "\\b"), rhs), 1L)
+})
+
 # -- theta / individual-parameter de-shadowing --------------------------------
 
 test_that(".free_theta_name never returns the theta's own name", {

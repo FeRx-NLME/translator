@@ -50,8 +50,42 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   sigma_out <- .extract_sigmas(ini, tryCatch(ui$sigma, error = function(e) NULL))
 
+  # One uniqueness pass over ALL THREE random-effect channels together, not
+  # three per-channel ones: an omega and a sigma normalising onto the same
+  # spelling collide in exactly the same way as two omegas, and ferx has a
+  # single namespace for them. Order is omega, kappa, sigma -- the order they
+  # are emitted in -- so the name a reader sees first is the one that keeps it.
+  re_entries <- c(
+    lapply(omega_out$omegas, function(o) list(name = o$names, raw = o$raw)),
+    lapply(kappa_out$kappas, function(k) list(name = k$name,  raw = k$raw)),
+    lapply(sigma_out$sigmas, function(x) list(name = x$name,  raw = NA_character_)))
+  # Sigmas carry their raw spelling in a parallel vector, not per entry.
+  for (i in seq_along(sigma_out$sigmas))
+    re_entries[[length(omega_out$omegas) + length(kappa_out$kappas) + i]]$raw <-
+      sigma_out$raw_names[i]
+
+  re_out <- .uniquify_random_names(re_entries)
+  warn   <- c(warn, re_out$warnings)
+  n_om   <- length(omega_out$omegas); n_ka <- length(kappa_out$kappas)
+  for (i in seq_along(omega_out$omegas))
+    omega_out$omegas[[i]]$names <- re_out$entries[[i]]$name
+  for (i in seq_along(kappa_out$kappas))
+    kappa_out$kappas[[i]]$name  <- re_out$entries[[n_om + i]]$name
+  for (i in seq_along(sigma_out$sigmas))
+    sigma_out$sigmas[[i]]$name  <- re_out$entries[[n_om + n_ka + i]]$name
+
   name_map  <- .norm_map_from_ini(ini)
   sigma_names_norm <- toupper(vapply(sigma_out$sigmas, function(s) s$name, ""))
+
+  # Bind every random effect's SOURCE spelling to its FINAL emitted name.
+  # .norm_map_from_ini() maps each iniDf key through .norm() independently, so
+  # after a uniqueness rename the map still points the renamed eta's references
+  # at the name its twin took -- the merge the rename exists to prevent, moved
+  # from the declaration to the reference. This must run before the theta
+  # bindings below, which are a separate channel with its own owner.
+  for (e in re_out$entries)
+    for (j in seq_along(e$name))
+      if (!is.na(e$raw[j])) name_map[[e$raw[j]]] <- e$name[j]
 
   # Bind each sigma's SOURCE spelling to its emitted name. For a NONMEM source
   # sigma is not an iniDf row -- it lives in ui$sigma -- so .norm_map_from_ini()
@@ -659,6 +693,56 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(map = map, warnings = warn)
 }
 
+# Make every emitted random-effect name unique, and report the source name each
+# one came from so references can be rewritten with it.
+#
+# .norm() folds EVERY illegal character onto `_`, which is what makes a dotted
+# or hyphenated source name emit at all -- but folding is many-to-one, and the
+# eta/omega/kappa/sigma channel was the only naming channel with no uniqueness
+# check afterwards. Thetas get one (`duped` in .deshadow_theta_names) and states
+# get one (.free_name suffixing); random effects got none, so two distinct
+# source names collapsing onto one spelling merged silently:
+#
+#   $OMEGA 0.09 ; CL.IIV        both emit `omega CL_IIV ~ ...`
+#   $OMEGA 0.04 ; CL_IIV        and every reference resolves to the FIRST
+#
+# One IIV is dropped and the other double-counted, ferx returns ok = TRUE, and
+# $unsupported is empty. That is reachable from a plain .ctl through real
+# nonmem2rx today. Note this is strictly worse than the pre-folding behaviour:
+# an unfolded `CL.IIV` produced a loud E_PARSE, so widening .norm() converted a
+# hard failure into a silent wrong model for the newly covered characters --
+# which is why the uniqueness check has to land with the folding, not after it.
+#
+# Comparison is case-INSENSITIVE because that is how ferx compares names, so
+# `eta_cl` and `ETA_CL` are a collision even though R would call them distinct.
+#
+# `entries` is a list of list(name=, raw=), in emission order. The FIRST
+# occurrence keeps the name -- renaming it instead would churn a name the user
+# reads for the benefit of a later duplicate.
+.uniquify_random_names <- function(entries) {
+  used <- character()
+  warn <- character()
+  out  <- entries
+  for (i in seq_along(entries)) {
+    nms <- entries[[i]]$name
+    raw <- entries[[i]]$raw
+    new <- character(length(nms))
+    for (j in seq_along(nms)) {
+      cand <- .free_name(nms[j], used)
+      if (!identical(cand, nms[j]))
+        warn <- c(warn, paste0(
+          "INFO  | random effect '", raw[j], "' emits as '", cand, "': '", nms[j],
+          "' is already taken by another random effect (ferx compares names ",
+          "case-insensitively, and distinct source names can normalise onto ",
+          "one spelling)"))
+      new[j] <- cand
+      used   <- c(used, cand)
+    }
+    out[[i]]$name <- new
+  }
+  list(entries = out, warnings = warn)
+}
+
 # A state and an individual parameter sharing a name is an E_PARSE in ferx, and
 # the translator would never get that far: the assignment is absorbed into
 # `aux_vars` (its RHS now "references a state"), dropped from
@@ -812,7 +896,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   if (nrow(off) == 0) {
     omegas <- lapply(seq_len(nrow(diag)), function(i) {
-      list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])), values = diag$est[i])
+      list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])),
+           raw = diag$name[i], values = diag$est[i])
     })
     return(list(omegas = omegas))
   }
@@ -824,17 +909,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   for (bg in blocks) {
     lt    <- iiv[iiv$neta1 %in% bg & iiv$neta2 %in% bg, , drop = FALSE]
     lt    <- lt[order(lt$neta1, lt$neta2), ]
-    nms   <- vapply(bg, function(e) {
+    raws  <- vapply(bg, function(e) {
       row <- lt[lt$neta1 == e & lt$neta2 == e, , drop = FALSE]
-      .norm(.strip_prefix(row$name[1]))
+      as.character(row$name[1])
     }, "")
-    omegas <- c(omegas, list(list(type = "block", names = nms, values = lt$est)))
+    nms   <- unname(vapply(raws, function(r) .norm(.strip_prefix(r)), ""))
+    omegas <- c(omegas, list(list(type = "block", names = nms,
+                                  raw = unname(raws), values = lt$est)))
   }
 
   for (i in seq_len(nrow(diag))) {
     if (!diag$neta1[i] %in% block_eta_set)
       omegas <- c(omegas, list(
-        list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])), values = diag$est[i])
+        list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])),
+             raw = diag$name[i], values = diag$est[i])
       ))
   }
 
@@ -881,7 +969,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   iov_col <- iov_col[1]
 
   kappas <- lapply(seq_len(nrow(diag)), function(i)
-    list(name = .norm(.strip_prefix(diag$name[i])), value = diag$est[i])
+    list(name = .norm(.strip_prefix(diag$name[i])), raw = diag$name[i],
+         value = diag$est[i])
   )
   list(kappas = kappas, iov_column = iov_col, warnings = warn)
 }
