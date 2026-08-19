@@ -1,0 +1,114 @@
+name: engine-pin-drift
+
+# The `engine` job in check.yml is the only tier that exercises the ferx engine --
+# the fast PR job has no ferx at all. Its entire value is that it runs the version
+# users install, and it silently stopped doing that once: the pin sat on 0.2.0 for
+# the whole life of 0.3.0, so every green engine check proved only that a build
+# nobody runs accepted the emitted .ferx. Nothing surfaced it. It was noticed by
+# hand, months later.
+#
+# This watches for the same drift and opens an issue. It is deliberately NOT part
+# of check.yml and is not a required check: a ferx-r release must never turn this
+# repo's PR checks red, because that punishes an unrelated contributor for a
+# maintenance task.
+#
+# It compares against the latest ferx-r RELEASE, not against `main`. Tracking main
+# would fire on every upstream commit; the pin is meant to follow shipped versions.
+
+# NOTE for anyone copying this file as a template: a workflow whose only triggers
+# are `schedule` and `workflow_dispatch` is NOT registered by GitHub until it has
+# run once. Until then it is missing from `gh workflow list` and the Actions API,
+# and `gh workflow run` answers `404: not found on the default branch` -- valid
+# file, default branch, Actions enabled, still invisible. Break the cycle by
+# pushing it to a throwaway branch with a temporary `push:` trigger; that first run
+# registers the path for good. See "Known gotchas" in CLAUDE.md.
+on:
+  schedule:
+    - cron: "0 7 * * 1" # Mondays, 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-pin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the engine pin with ferx-r's latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM: FeRx-NLME/ferx-r
+        run: |
+          set -euo pipefail
+
+          # Read the pin out of check.yml. If this stops matching -- the line moves,
+          # the syntax changes, the repo is renamed -- FAIL LOUDLY. A drift detector
+          # that finds nothing and reports "up to date" has become the exact failure
+          # it exists to catch, and would do so silently forever.
+          pinned=$(grep -oE "${UPSTREAM}@[0-9a-fA-F]+" .github/workflows/check.yml \
+                   | head -1 | cut -d@ -f2 || true)
+          if [ -z "${pinned}" ]; then
+            echo "::error::could not read the ${UPSTREAM} pin from .github/workflows/check.yml -- the extraction in this workflow needs updating"
+            exit 1
+          fi
+          echo "pinned: ${pinned}"
+
+          tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
+          if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
+            echo "::error::${UPSTREAM} reported no latest release"
+            exit 1
+          fi
+          # Resolve through the commit endpoint so an annotated tag is dereferenced
+          # for us; the git/ref endpoint would hand back the tag object's own SHA.
+          latest=$(gh api "repos/${UPSTREAM}/commits/${tag}" --jq .sha)
+          echo "latest release: ${tag} = ${latest}"
+
+          # The pin is a short SHA by convention, so compare on the prefix.
+          case "${latest}" in
+            "${pinned}"*) echo "Pin is current."; exit 0 ;;
+          esac
+
+          title="Engine pin behind ferx ${tag}"
+          existing=$(gh issue list --state open --search "in:title \"Engine pin behind\"" \
+                     --json number --jq '.[0].number // empty')
+          if [ -n "${existing}" ]; then
+            echo "Issue #${existing} is already open for this; not filing another."
+            exit 0
+          fi
+
+          # No --label: the repo has no `ci` label, and `gh issue create` FAILS on an
+          # unknown one -- which would leave a red scheduled job that nobody watches
+          # and no issue filed, i.e. the detector silently doing nothing. The title
+          # is distinctive and the dedup search above is title-based, so a label
+          # buys nothing here.
+          #
+          # The body is built with printf rather than a heredoc: a heredoc body has
+          # to start at column 1, which breaks out of this YAML block scalar and
+          # makes the whole workflow unparseable -- and an unparseable workflow never
+          # runs, which is the same silent nothing this file exists to prevent.
+          body=$(printf '%s\n' \
+            "\`${UPSTREAM}\` released **${tag}** (\`${latest}\`), but the \`engine\` job in" \
+            "\`.github/workflows/check.yml\` still pins \`${pinned}\`." \
+            "" \
+            "That job is the only tier that exercises the engine -- the fast PR job has" \
+            "no \`ferx\` -- so until the pin moves, a green engine check proves only that" \
+            "a build users are not installing accepts the emitted \`.ferx\`." \
+            "" \
+            "To fix:" \
+            "" \
+            "1. Bump the pin in \`.github/workflows/check.yml\` (three places: two" \
+            "   comments and the \`extra-packages\` entry) and in \`CLAUDE.md\`." \
+            "2. Run the full suite against the new engine. Per \`CLAUDE.md\` the reference" \
+            "   omegas in \`tests/testthat/test-concordance.R\` and the bundled datasets in" \
+            "   \`inst/testdata/\` are tied to the pinned build. If either moves," \
+            "   re-baseline in the same commit -- \`data-raw/generate_concordance_data.R\`" \
+            "   regenerates the datasets. If neither moves, say so in the PR rather than" \
+            "   leaving it unstated." \
+            "3. Add a \`NEWS.md\` entry under Internal." \
+            "" \
+            "Filed automatically by \`.github/workflows/engine-pin-drift.yml\`.")
+
+          gh issue create --title "${title}" --body "${body}"
