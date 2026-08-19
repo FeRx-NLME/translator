@@ -1092,14 +1092,26 @@ test_that("the emitted state name does not depend on statement order", {
   # d/dt(central) renamed the state to CENTRAL, and the same model with that
   # line BELOW did not. The renames are decided once, before parsing, and the
   # declaration reads only those.
+  #
+  # The RHS is asserted, not only the state. Comparing `o$state` alone passed
+  # while the equations still differed: the declaration was already read from
+  # the pre-parse decision, but the references were not, so `central <- 0`
+  # standing above rebound the state's key mid-walk and emitted
+  # `d/dt(central_1) = -K * CENTRAL` -- a derivative that reads the constant
+  # individual parameter and never its own compartment, which ferx validates
+  # clean.
   ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
-  st  <- function(l) vapply(suppressWarnings(rxui_to_ir(mock_ui(ini, l)))$odes,
-                            function(o) o$state, "")
-  above <- st(list(quote(k <- t.K * exp(eta1)), quote(central <- 0),
-                   ddt("central", quote(-k * central))))
-  below <- st(list(quote(k <- t.K * exp(eta1)),
-                   ddt("central", quote(-k * central)), quote(central <- 0)))
+  ode <- function(l) {
+    o <- suppressWarnings(rxui_to_ir(mock_ui(ini, l)))$odes
+    vapply(o, function(x) paste0("d/dt(", x$state, ") = ", x$rhs), "")
+  }
+  above <- ode(list(quote(k <- t.K * exp(eta1)), quote(central <- 0),
+                    ddt("central", quote(-k * central))))
+  below <- ode(list(quote(k <- t.K * exp(eta1)),
+                    ddt("central", quote(-k * central)), quote(central <- 0)))
   expect_equal(above, below)
+  # and the surviving equation is the right one -- the state, not the constant.
+  expect_equal(above, "d/dt(central_1) = -K * central_1")
 })
 
 test_that("a state whose raw name is a parameter key keeps its own name", {
@@ -1115,6 +1127,17 @@ test_that("a state whose raw name is a parameter key keeps its own name", {
 
   expect_equal(vapply(ir$odes, function(o) o$state, ""), "CENT")
   expect_equal(vapply(ir$thetas, function(t) t$name, ""), "VC")
+  # The RHS is the half that was wrong, and asserting only the two names above
+  # let it stay wrong: the declaration kept CENT while every reference to it
+  # resolved through name_map to the theta, emitting `d/dt(CENT) = -K * VC` --
+  # the compartment amount replaced by a fixed theta, no warning, engine clean.
+  # Inside [odes] the state wins; in $PK the same symbol still means the theta.
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT")
+  expect_equal(ir$indiv_params[[1]]$rhs, "VC * exp(ETA1)")
+  # ...and the ambiguity itself is reported, since the source cannot say which
+  # reading it meant.
+  expect_match(ir$unsupported, "state/parameter source-name collision: CENT",
+               all = FALSE, fixed = TRUE)
 })
 
 test_that("a sanitised state never swallows an individual parameter", {
@@ -1144,6 +1167,101 @@ test_that("a sanitised state never swallows an individual parameter", {
 # depth -- ferx is silent about this collision and the symptom is a deleted
 # parameter -- but it is unasserted, and a test that merely built the colliding
 # IR by hand would assert the constructor, not the guard.
+
+test_that("a symbol referenced before its assignment gets the emitted name", {
+  # The alias used to be installed only once the walk had passed the assignment,
+  # so a forward reference was emitted EXACTLY as written -- two spellings of one
+  # variable, `f.rac` illegal at every reference site and `F_RAC` declared beside
+  # it. Nothing reported it either: .unmapped_symbols() subtracts assignment
+  # targets regardless of position, so the leaked name was filtered out of the
+  # legality check as "assigned, therefore legal by construction".
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              ddt("central", quote(-cl * central * `f.rac`)),
+              quote(f.rac <- 0.5))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$odes[[1]]$rhs, "-CL * central * F_RAC")
+  expect_true("F_RAC" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("f.rac", code, fixed = TRUE)))
+})
+
+test_that("the order-independent alias does not override an iniDf binding", {
+  # Seeding every assignment target up front must not disturb de-shadowing: in
+  # `cl <- cl * exp(eta.cl)` the RHS `cl` is the THETA and the following
+  # `k20 <- cl/v` is the individual parameter, and only the mid-walk rebinding
+  # tells them apart. The seed therefore skips names the map already holds.
+  ini <- rbind(theta_row("cl", 1), theta_row("v", 10), eta_row("eta.cl", 0.09, 1L))
+  lst <- list(quote(cl <- cl * exp(eta.cl)), quote(v <- v), quote(k20 <- cl / v),
+              ddt("central", quote(-k20 * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_match(ir$indiv_params[[match("CL", lhs)]]$rhs, "exp(ETA_CL)", fixed = TRUE)
+  # the theta was renamed away, and K20 reads the individual parameter
+  expect_equal(ir$indiv_params[[match("K20", lhs)]]$rhs, "CL/V")
+})
+
+test_that("a theta named after a ferx solver builtin is renamed", {
+  # The quietest of the three theta failures. ferx does not reject `theta TIME`
+  # -- it resolves the bare name to the value the solver injects, so KA reads the
+  # integrator clock, the theta is declared and estimated and never referenced,
+  # and the only diagnostic is a W_UNUSED_PARAM that explains none of it.
+  ini <- rbind(theta_row("t.KA", 0.1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("TIME", NA_character_)
+  lst <- list(quote(ka <- t.KA * exp(eta1)), ddt("depot", quote(-ka * depot)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), "TVTIME")
+  expect_equal(ir$indiv_params[[1]]$rhs, "TVTIME * exp(ETA1)")
+  expect_match(ir$warnings, "collides with a ferx solver builtin", all = FALSE)
+  # Every name in the list, not just TIME -- T and TAD are ordinary $DES and
+  # $PK variable names, so the whole set has to be covered.
+  for (nm in .RESERVED_ODE_NAMES) {
+    i2 <- rbind(theta_row("t.KA", 0.1), eta_row("eta1", 0.09, 1L))
+    i2$label <- c(nm, NA_character_)
+    r2 <- suppressWarnings(rxui_to_ir(mock_ui(i2, lst)))
+    expect_false(toupper(r2$thetas[[1]]$name) %in% .RESERVED_ODE_NAMES, info = nm)
+  }
+})
+
+test_that("an individual parameter named after a builtin is reported", {
+  # It cannot be renamed the way a theta can -- the name is the source's, and
+  # [scaling] and [error_model] reference it by that name -- so it is reported.
+  # ferx-core rejects the model outright, but names no source variable.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(TAD <- t.K * exp(eta1)), ddt("depot", quote(-TAD * depot)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| TAD names both an individual parameter",
+               all = FALSE)
+  expect_match(ir$unsupported, "individual parameter collides with a ferx builtin",
+               all = FALSE)
+  expect_match(emit_ferx(ir), "# WARNING: TAD names both an individual parameter")
+})
+
+test_that("a sigma whose source name needs sanitising still reaches the error model", {
+  # nonmem2rx keeps sigma out of iniDf, so nothing bound its source spelling to
+  # its emitted name: the declaration and the eps reference in $ERROR agreed only
+  # while both were plain uppercase. Once the declaration was sanitised the two
+  # diverged, pass 3 found no sigma in the error assignment, and the file came
+  # out with `sigma EPS_1` declared and NO [error_model] block at all -- a model
+  # with no residual error and not one word about it.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  sig <- matrix(0.04, 1, 1, dimnames = list("eps.1", "eps.1"))
+  ui  <- c(mock_ui(ini, list(quote(k <- t.K * exp(eta1)),
+                             ddt("cent", quote(-k * cent)),
+                             quote(y <- cent * (1 + `eps.1`)))),
+           list(sigma = sig))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(vapply(ir$sigmas, function(s) s$name, ""), "EPS_1")
+  expect_length(ir$error_model, 1L)
+  expect_equal(ir$error_model[[1]]$params, "EPS_1")
+  # and the sigma is not misreported as an illegal covariate on the way through
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+})
 
 test_that("a non-scalar ui$central does not abort the translation", {
   # is.character() is TRUE for character(0) and for length 2, so both reached an
@@ -1179,16 +1297,31 @@ test_that("an illegal free symbol is reported even when it normalises to a known
   expect_match(ir$unsupported, "c.RTOT", all = FALSE, fixed = TRUE)
 })
 
-test_that("a state whose source name is also a parameter key is refused loudly", {
-  # Writing that rename into name_map would rewrite the PARAMETER's references
-  # along with the state's, because both deparse to the same symbol. Refusing
-  # is the only safe answer, and it must be loud.
+test_that("a state whose source name is also a parameter name is scope-resolved", {
+  # Both deparse to the same symbol, so the source cannot say which is meant and
+  # the collision has to be reported. What it must NOT do is corrupt the model:
+  # refusing the rename left the state sharing a name with the eta, so the
+  # assignment referencing it was absorbed into aux_vars, dropped from
+  # [individual_parameters] -- the block came out EMPTY -- and self-inlined to
+  # the depth cap, emitting exp(ETA_X) fifteen times.
   ini <- rbind(theta_row("t.K", 1), eta_row("ETA_X", 0.09, 1L))
   lst <- list(quote(k <- t.K * exp(ETA_X)), ddt("ETA_X", quote(-k * ETA_X)))
   ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
-  expect_match(ir$warnings, "^ERROR \\| state 'ETA_X' has the same source name",
+  expect_match(ir$warnings, "^ERROR \\| 'ETA_X' names both an ODE state and a",
                all = FALSE)
   expect_match(ir$unsupported, "state/parameter source-name collision",
                all = FALSE)
+
+  # Resolved by scope, which is how ferx itself reads them: inside [odes] the
+  # bare name is the state (etas are out of scope there), outside it the eta.
+  expect_equal(ir$odes[[1]]$state, "ETA_X_1")
+  expect_equal(ir$odes[[1]]$rhs, "-K * ETA_X_1")
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("K" %in% lhs)
+  expect_match(ir$indiv_params[[match("K", lhs)]]$rhs, "exp(ETA_X)", fixed = TRUE)
+  # One exp(), not the depth-cap cascade.
+  expect_equal(lengths(regmatches(ir$odes[[1]]$rhs,
+                                  gregexpr("exp(", ir$odes[[1]]$rhs, fixed = TRUE))),
+               0L)
 })

@@ -53,6 +53,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   name_map  <- .norm_map_from_ini(ini)
   sigma_names_norm <- toupper(vapply(sigma_out$sigmas, function(s) s$name, ""))
 
+  # Bind each sigma's SOURCE spelling to its emitted name. For a NONMEM source
+  # sigma is not an iniDf row -- it lives in ui$sigma -- so .norm_map_from_ini()
+  # never saw it and the eps symbol reached pass 3 exactly as written, matching
+  # the declaration only while both were plain uppercase. See .extract_sigmas().
+  for (i in seq_along(sigma_out$raw_names))
+    name_map[[sigma_out$raw_names[i]]] <- sigma_out$sigmas[[i]]$name
+
   # A theta name and the name every reference normalises to must agree, or the
   # shadowing check below compares the wrong pair. They diverge whenever the
   # $THETA label differs from the iniDf key -- `; CL/F` gives name `t.CL` but
@@ -117,28 +124,51 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
               assigned_lhs,
               # ferx-core reserves these inside [odes] (RESERVED_ODE_NAMES); a
               # state named TIME would be shadowed by the integrator's own.
-              c("TIME", "T", "TAFD", "TAD", "MACHEPS")))
+              .RESERVED_ODE_NAMES))
 
-  # A state whose RAW name is also an iniDf key is ambiguous in the source --
-  # both deparse to the same symbol -- and writing the rename into name_map
-  # would rewrite the parameter's references along with the state's. Refuse it
-  # and say so, rather than silently corrupting the parameter.
-  ambiguous <- intersect(names(state_out$map), names(name_map))
+  # EVERY raw state name gets an entry, renamed or not. An identity entry is not
+  # a no-op: `name_map` already holds every iniDf key, and .parse_model_exprs()
+  # keeps extending its own copy as it walks, so a state whose raw name is also a
+  # parameter key or an assignment target had its REFERENCES rewritten to that
+  # other name while the declaration kept the state's own -- `d/dt(CENT) = -K *
+  # VC` when a theta keyed CENT was labelled VC, and an ODE whose right-hand side
+  # changed depending on whether `central <- 0` stood above or below it. Pinning
+  # every state on every lookup map makes the decision taken here the one that
+  # survives the walk.
+  state_raw  <- .state_raw_names(lst)
+  # `%in% names()`, not `is.null(map[[k]])`: `[[` on a list with a key it does
+  # not hold is an error, not NULL.
+  state_decl <- vapply(state_raw, function(k)
+    if (k %in% names(state_out$map)) state_out$map[[k]] else k, "")
+
+  # A state whose RAW name is also a model-parameter name is genuinely ambiguous
+  # in the source: both deparse to the same symbol, and only scope separates the
+  # two readings. Resolve it the way ferx does -- thetas and etas are out of
+  # scope inside [odes], so the state wins there and the parameter wins
+  # everywhere else -- and say so, because no .ferx file can record what the
+  # source meant and the two readings are different models.
+  ambiguous <- intersect(state_raw, names(name_map))
   for (k in ambiguous) {
-    warn <- c(warn, paste0("ERROR | state '", k, "' has the same source name as ",
-                           "a model parameter; it cannot be renamed without also ",
-                           "renaming the parameter's references"))
+    warn <- c(warn, paste0(
+      "ERROR | '", k, "' names both an ODE state and a model parameter in the ",
+      "source. References were resolved by scope -- the state inside [odes], the ",
+      "parameter everywhere else, which is how ferx reads them -- but that may ",
+      "not be what the model meant. Rename one of the two in the source."))
     unsp <- c(unsp, paste0("state/parameter source-name collision: ", k))
   }
-  applied <- setdiff(names(state_out$map), ambiguous)
-  # Two consumers, deliberately different. `state_map` is the exact set of
-  # renames that were decided, and only the d/dt declaration reads it, so the
-  # emitted state name cannot drift. `name_map` additionally carries them so
-  # .normalise_expr() rewrites the references -- but it carries much else, which
-  # is why the declaration must not be resolved through it.
-  state_map <- vapply(applied, function(k) state_out$map[[k]], "")
-  for (k in applied) name_map[[k]] <- state_out$map[[k]]
-  warn <- c(warn, unname(state_out$warnings[applied]))
+
+  # Two overlays, and the split IS the scope rule above. `pins` is applied to
+  # every expression the parser normalises; `ode_pins` only to ODE right-hand
+  # sides, because an ambiguous name means the parameter outside [odes] and the
+  # state inside it. Neither is folded into `name_map`: that map is rebound as
+  # the walk proceeds, and a decision taken here must not be.
+  state_pins     <- state_decl[setdiff(state_raw, ambiguous)]
+  state_ode_pins <- state_decl[ambiguous]
+  state_arg      <- list(decl = state_decl, pins = state_pins,
+                         ode_pins = state_ode_pins)
+  renamed   <- if (length(state_out$map) > 0L) names(state_out$map) else character()
+  state_map <- state_decl[renamed]
+  warn <- c(warn, unname(state_out$warnings[renamed]))
 
   # De-shadow against the individual-parameter names the parser ACTUALLY
   # produces, by parsing first and parsing again with the corrected map. The
@@ -154,7 +184,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # duplicate $THETA labels only one of the pair is renamed, which is exactly
   # how that happens. Re-parse and re-check until nothing new appears.
   reserved_base <- c(random_names, .covariate_names(lst, name_map))
-  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
+  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_arg)
   rename_why <- vector("list", length(theta_orig))
   for (round in 1:5) {
     # The linCmt passthrough invents an individual parameter for a fixed-effect
@@ -188,7 +218,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # that ends up an individual parameter.
       rename_why[[i]] <- unique(c(rename_why[[i]], desh$reasons[[i]]))
     }
-    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
+    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_arg)
   }
 
   for (i in seq_along(rename_why)) {
@@ -202,6 +232,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
       "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
       "an identically named individual parameter)"))
+    if (any(rename_why[[i]] == "builtin")) warn <- c(warn, paste0(
+      "WARN  | theta '", theta_orig[i], "' collides with a ferx solver builtin (",
+      paste(.RESERVED_ODE_NAMES, collapse = ", "), ") -- renamed to '", final,
+      "'. ferx resolves the bare name to the builtin, so the theta would have ",
+      "been declared and estimated but never read."))
   }
 
   structural <- expr_out$structural
@@ -218,10 +253,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       obs_cmt <- tail(state_names, 1)
       warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
                              obs_cmt, "', verify in [structural_model]"))
-    } else if (obs_cmt %in% names(state_map)) {
-      # Through state_map for the same reason the d/dt target is: name_map would
-      # resolve a state name that happens to be a parameter key to the parameter.
-      obs_cmt <- state_map[[obs_cmt]]
+    } else if (obs_cmt %in% names(state_decl)) {
+      # Through the state declaration map for the same reason the d/dt target is:
+      # name_map would resolve a state name that happens to be a parameter key to
+      # the parameter. `state_decl` covers every state, not only the renamed
+      # ones, so an identity entry answers here rather than falling through.
+      obs_cmt <- state_decl[[obs_cmt]]
     }
     structural$states  <- state_names
     structural$obs_cmt <- obs_cmt
@@ -327,6 +364,27 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                            paste(state_clash, collapse = ", ")))
   }
 
+  # ferx-core checks RESERVED_ODE_NAMES against states, individual parameters
+  # AND ODE intermediates (model_parser.rs, eq_ignore_ascii_case). The state
+  # sanitiser covers the first and .deshadow_theta_names() renames a theta onto
+  # a free name, but an individual parameter cannot be renamed the same way --
+  # it carries the source's own name and [scaling] and [error_model] reference
+  # it by that name -- so it is reported. ferx rejects the file, which is loud
+  # but says nothing about which source variable is at fault; `TAD` and `T` are
+  # ordinary $PK and $DES variable names in NONMEM.
+  builtin_params <- intersect(
+    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")),
+    .RESERVED_ODE_NAMES)
+  if (length(builtin_params) > 0) {
+    warn <- c(warn, paste0(
+      "ERROR | ", paste(builtin_params, collapse = ", "), " names both an ",
+      "individual parameter and a ferx solver builtin (",
+      paste(.RESERVED_ODE_NAMES, collapse = ", "), "), which ferx-core rejects. ",
+      "Rename the variable in the source model."))
+    unsp <- c(unsp, paste0("individual parameter collides with a ferx builtin: ",
+                           paste(builtin_params, collapse = ", ")))
+  }
+
   # A covariate is the one name we must NOT sanitise: ferx resolves it against a
   # data column, case-sensitively, so any rewrite -- of case or of an illegal
   # character -- turns a working reference into E_MISSING_COVARIATE at fit time.
@@ -430,6 +488,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
             lapply(as.list(expr[-1]), .normalise_expr, map = map)))
 }
 
+# Overwrite `map` with `pins`, unconditionally. State renames are folded in this
+# way rather than written into `name_map` because that map is rebound while the
+# statements are walked, and a name decided before the walk must not change
+# during it.
+.pin_names <- function(map, pins) {
+  for (k in names(pins)) map[[k]] <- pins[[k]]
+  map
+}
+
 # Route stored warnings to the console by their severity prefix. The text is
 # passed as a cli value, never as a format string -- a model name containing
 # braces would otherwise be evaluated as R code.
@@ -469,6 +536,18 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # passthrough in rxui_to_ir() so both agree on which fixed-effect thetas become
 # individual parameters.
 .PK_CANDIDATES <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
+
+# Names the solver injects into every ferx model. ferx-core's RESERVED_ODE_NAMES
+# (src/parser/model_parser.rs) is compared case-insensitively against states,
+# individual parameters and ODE intermediates alike, so every producer of an
+# emitted name has to agree on the list -- one copy, not one per call site.
+#
+# The two halves fail differently. A state or individual parameter that collides
+# is an outright E_PARSE; a THETA that collides is not rejected at all, because
+# ferx resolves the bare name to the builtin -- `KA = TIME * exp(ETA1)` makes KA
+# read the integrator clock and leaves the estimated theta unreferenced, and the
+# only diagnostic is a W_UNUSED_PARAM that says nothing about why.
+.RESERVED_ODE_NAMES <- c("TIME", "T", "TAFD", "TAD", "MACHEPS")
 
 # Names referenced by the model but never assigned and never declared in iniDf.
 # ferx reads every such name as a covariate (a data column), and resolves theta
@@ -516,7 +595,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     else if (.is_assignment(expr)) used <- c(used, .collect_symbols(expr[[3]]))
   }
   # Assignment targets are emitted through .norm(), so they are legal by
-  # construction and are not free symbols.
+  # construction and are not free symbols. That is true regardless of where the
+  # reference stands relative to the assignment only because
+  # .parse_model_exprs() seeds every target before it walks; when the alias was
+  # installed mid-walk, a reference ABOVE its assignment was emitted raw and
+  # this subtraction hid it.
   assigned <- character()
   for (expr in lst) {
     if (!.is_assignment(expr)) next
@@ -527,6 +610,19 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   setdiff(unique(used), c(names(name_map), assigned))
 }
 
+# The raw `d/dt()` targets, in source order. One owner: `rxui_to_ir()` needs the
+# same list the sanitiser works from -- it pins every state, not only the renamed
+# ones -- and a second hand-rolled walk would be free to disagree about what
+# counts as a state.
+.state_raw_names <- function(lst) {
+  raw <- character()
+  for (expr in lst) {
+    if (!.is_assignment(expr)) next
+    if (.is_ddt_lhs(expr[[2]])) raw <- c(raw, .ddt_state(expr[[2]]))
+  }
+  unique(raw)
+}
+
 # Give every ODE state a name that is a legal ferx identifier and collides with
 # nothing, and report the mapping so every REFERENCE can be rewritten with it.
 #
@@ -534,9 +630,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # compartment whose name collides with a variable ($MODEL COMP=(RTOT) beside an
 # $ERROR RTOT gives the state `c.RTOT`), and that name then appears in
 # `ode(states=[...])`, in `obs_cmt=`, on the `d/dt` left-hand side, AND inlined
-# into other ODE right-hand sides wherever the source wrote `A(3)`. The returned
-# map is folded into `name_map` so `.normalise_expr()` rewrites all of them from
-# one place.
+# into other ODE right-hand sides wherever the source wrote `A(3)`. The caller
+# turns the returned map into the pins `.parse_model_exprs()` applies, so the
+# declaration and every reference are rewritten from one decision.
 #
 # Only names that MUST change do change. `.ferx_ident()` preserves case rather
 # than going through `.norm()`, because `depot`/`central` are already legal and
@@ -545,13 +641,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # rejects a state that matches an individual parameter or an ODE intermediate
 # case-insensitively.
 .sanitise_state_names <- function(lst, taken = character()) {
-  raw <- character()
-  for (expr in lst) {
-    if (!.is_assignment(expr)) next
-    if (.is_ddt_lhs(expr[[2]])) raw <- c(raw, .ddt_state(expr[[2]]))
-  }
-  raw <- unique(raw)
-
+  raw  <- .state_raw_names(lst)
   map  <- list()
   warn <- character()
   # A state may legally keep its own name, so it must not be treated as taken by
@@ -631,11 +721,18 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   shadowed <- toupper(theta_names) %in% toupper(indiv_names)
   duped    <- duplicated(toupper(theta_names))
-  todo     <- which(shadowed | duped)
+  # The third silent failure, and the quietest of the three: ferx resolves a bare
+  # `TIME`/`T`/`TAD`/`TAFD`/`MACHEPS` to the value the solver injects, so a theta
+  # of that name is not rejected -- it is simply never read, and every expression
+  # that names it gets the clock instead. Renaming is safe here for the same
+  # reason it is for a shadowing theta: this function owns theta naming, and
+  # `theta TVTIME` + `KA = TVTIME * ...` is the same model under another label.
+  builtin  <- toupper(theta_names) %in% .RESERVED_ODE_NAMES
+  todo     <- which(shadowed | duped | builtin)
   if (length(todo) == 0L)
     return(list(map = map, reasons = vector("list", n), warnings = character()))
 
-  taken   <- toupper(c(theta_names, indiv_names, reserved))
+  taken   <- toupper(c(theta_names, indiv_names, reserved, .RESERVED_ODE_NAMES))
   reasons <- vector("list", n)
   for (i in todo) {
     new    <- .free_theta_name(theta_names[i], taken)
@@ -647,6 +744,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # known, since a theta may be renamed again in a later round.
     if (duped[i])    reasons[[i]] <- c(reasons[[i]], "duplicate")
     if (shadowed[i]) reasons[[i]] <- c(reasons[[i]], "shadow")
+    if (builtin[i])  reasons[[i]] <- c(reasons[[i]], "builtin")
   }
   list(map = map, reasons = reasons, warnings = character())
 }
@@ -778,6 +876,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   ), character(1), USE.NAMES = FALSE)
 }
 
+# `raw_names` is returned alongside, positionally matched to `sigmas`, because
+# the emitted name and the name the MODEL TEXT spells are two different strings
+# and both are needed. The caller binds one to the other in `name_map` so
+# .normalise_expr() rewrites the eps reference; without that the declaration and
+# the reference agree only by accident of both being plain uppercase, and the
+# moment the name needs sanitising (`rownames(ui$sigma) = "eps.1"`) they diverge
+# and pass 3 finds no sigma in the error assignment -- emitting `sigma EPS_1`
+# and NO [error_model] block at all, a model with no residual error and no
+# diagnostic. For the nlmixr2 branch the binding already exists (sigma is an
+# iniDf row, so .norm_map_from_ini() covered it); seeding it again is a no-op.
 .extract_sigmas <- function(ini, ui_sigma = NULL) {
   # nlmixr2 / rxode2 native: sigma rows appear in iniDf with err != NA.
   rows <- ini[!is.na(ini$err), , drop = FALSE]
@@ -786,7 +894,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       row <- rows[i, ]
       list(name = .norm(.strip_prefix(row$name)), value = row$est, scale = "sd")
     })
-    return(list(sigmas = sigmas))
+    return(list(sigmas = sigmas, raw_names = as.character(rows$name)))
   }
   # nonmem2rx: sigma lives in the ui$sigma matrix (variance scale); convert to SD.
   if (!is.null(ui_sigma) && is.matrix(ui_sigma) && nrow(ui_sigma) > 0) {
@@ -800,9 +908,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
            value = sqrt(ui_sigma[i, i]),
            scale = "sd")
     )
-    return(list(sigmas = sigmas))
+    return(list(sigmas = sigmas, raw_names = nms))
   }
-  list(sigmas = list())
+  list(sigmas = list(), raw_names = character())
 }
 
 # -- expression classifiers ---------------------------------------------------
@@ -864,18 +972,29 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
 # -- expression parser --------------------------------------------------------
 
-#' @param state_map Named character vector of ODE state renames, raw name ->
-#'   emitted name, from `.sanitise_state_names()`. Kept SEPARATE from
-#'   `name_map`: this function mutates its own copy of `name_map` as it walks the
-#'   statements (every ordinary assignment installs an alias), so resolving the
-#'   `d/dt` target against it made the emitted state name depend on the order of
-#'   surrounding statements -- `central <- 0` written above `d/dt(central)`
-#'   renamed the state to CENTRAL, the same model with that line below it did
-#'   not. The state renames are decided once, before parsing, and must not
-#'   change during it.
+#' @param states List of three named character vectors describing the ODE
+#'   states, all decided by `rxui_to_ir()` BEFORE this function runs and none of
+#'   them folded into `name_map`. `decl` is raw name -> emitted name for every
+#'   state, and answers the `d/dt` target. `pins` and `ode_pins` are the same
+#'   entries split by scope and re-applied on top of `name_map` at every lookup.
+#'
+#'   The split matters because `name_map` is rebound as the walk proceeds --
+#'   every ordinary assignment installs an alias -- and it already holds every
+#'   iniDf key. Resolving a state through it therefore produced a name nobody
+#'   chose: `d/dt(CENT) = -K * VC` when a theta keyed CENT was labelled VC, and
+#'   an ODE whose right-hand side changed depending on whether `central <- 0`
+#'   stood above or below it. `pins` covers the states whose raw name is
+#'   unambiguous and is applied everywhere; `ode_pins` covers a state whose raw
+#'   name is also a parameter name and is applied only to ODE right-hand sides,
+#'   which is exactly ferx's own scoping -- thetas and etas are out of scope
+#'   inside `[odes]`, so the state wins there and the parameter wins elsewhere.
 #' @noRd
 .parse_model_exprs <- function(lst, name_map, sigma_names = character(),
-                               state_map = character()) {
+                               states = list()) {
+  state_decl     <- if (is.null(states$decl))     character() else states$decl
+  state_pins     <- if (is.null(states$pins))     character() else states$pins
+  state_ode_pins <- if (is.null(states$ode_pins)) character() else states$ode_pins
+
   # Pass 1: collect assignments; handle d/dt, linCmt, tilde directly.
   all_assigns  <- list()   # list(lhs_norm, rhs_norm, rhs_expr)
   odes         <- list()
@@ -883,6 +1002,25 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   structural   <- list()
   warnings     <- character()
   unsupported  <- character()
+
+  # Seed every ordinary assignment target before the walk, so a reference that
+  # appears BEFORE its defining assignment resolves to the same emitted name as
+  # one after it. The alias used to be installed only once the walk had passed
+  # the assignment, so `d/dt(central) = -cl*central*f.rac` written above
+  # `f.rac <- 0.5` emitted the illegal `f.rac` verbatim beside `F_RAC = 0.5` --
+  # two spellings of one variable, an unparseable file, and nothing reported it
+  # (.unmapped_symbols() subtracts assignment targets regardless of position).
+  # Existing keys are never overwritten: where the name is also an iniDf key the
+  # map already holds the binding that reference means, and the walk rebinds it
+  # afterwards, which is what de-shadowing `cl <- cl * exp(eta.cl)` depends on.
+  for (expr in lst) {
+    if (!.is_assignment(expr)) next
+    lhs <- expr[[2]]
+    if (!is.symbol(lhs)) next
+    raw <- as.character(lhs)
+    if (!raw %in% names(name_map)) name_map[raw] <- .norm(raw)
+  }
+  name_map <- .pin_names(name_map, state_pins)
 
   # Variables known to hold structural-model outputs (linCmt, ODE states).
   # Propagated forward; used in pass 2 to classify auxiliaries.
@@ -921,17 +1059,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         # target is read through the rename map by hand -- .normalise_expr()
         # only rewrites symbols inside an expression.
         #
-        # Through `state_map`, NOT `name_map`. name_map holds every parameter
-        # alias as well, and this function keeps adding to it as it walks; both
-        # made the emitted state name something nobody decided. A state whose raw
-        # name merely happened to be an iniDf key was renamed to that PARAMETER's
-        # name (`d/dt(CENT)` became `d/dt(VC)` when a theta keyed CENT was
-        # labelled VC), and a state was renamed or not depending on whether an
-        # unrelated assignment appeared above or below it.
+        # Through `state_decl`, NOT `name_map`: see the `states` parameter above.
         state_raw     <- .ddt_state(lhs_expr)
-        state         <- if (state_raw %in% names(state_map)) state_map[[state_raw]]
-                         else                                 state_raw
-        rhs_expr_norm <- .normalise_expr(expr[[3]], name_map)
+        state         <- if (state_raw %in% names(state_decl)) state_decl[[state_raw]]
+                         else                                  state_raw
+        # `ode_pins` on top of the map, and only here. Inside [odes] a bare name
+        # that is both a state and a parameter is the state -- thetas and etas
+        # are out of scope in that block -- while the same name in $PK means the
+        # parameter, so the two scopes must not share one map.
+        rhs_expr_norm <- .normalise_expr(expr[[3]],
+                                         .pin_names(name_map, state_ode_pins))
         rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
         odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))
         aux_vars <- c(aux_vars, toupper(state))  # ODE state vars are auxiliary
@@ -970,8 +1107,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       if (!lhs_raw %in% names(rhs_map)) rhs_map[lhs_raw] <- lhs_norm
       rhs_expr_norm <- .normalise_expr(rhs_expr, rhs_map)
       rhs_norm <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
-      # Update name_map so subsequent expressions see the alias.
-      name_map[lhs_raw] <- lhs_norm
+      # Update name_map so subsequent expressions see the alias -- unless the
+      # name is a pinned state, whose emitted name was decided before the walk
+      # and must survive it. `central <- 0` standing above `d/dt(central)` used
+      # to rebind the state's key here, so the ODE referenced the individual
+      # parameter instead of the compartment and the same model with that line
+      # moved below it emitted a different equation.
+      if (!lhs_raw %in% names(state_pins)) name_map[lhs_raw] <- lhs_norm
 
       # rhs_expr_norm is kept because name_map is time-varying: de-shadowing
       # rebinds a name mid-parse, so re-normalising the raw expression later
