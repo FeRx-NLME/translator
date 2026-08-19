@@ -134,9 +134,11 @@
   scope, so the set of legitimate names is far larger and a leftover carries much
   less information.
 
-  Measured against ferx 0.3.0. 0.2.0 (the CI pin) could not be re-measured because
-  the local install was replaced, but no bundled model references a covariate from
-  `[odes]`, so nothing that translated before is affected either way.
+  Measured against ferx 0.3.0 (ferx-r tag `v0.3.0`), which is the version shipped
+  to users. 0.2.0 was not re-measured; no bundled model references a covariate from
+  `[odes]`, so nothing that translated before is affected either way. Note that the
+  `engine` CI job still pins `ferx-r@731adc9` = 0.2.0, so it validates against a
+  build no user runs -- tracked separately from this change.
 
 * A theta renamed only because it is ODE-referenced is no longer reported as
   shadowing an individual parameter. At the point of the rename nothing of that

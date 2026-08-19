@@ -736,9 +736,16 @@ Two reports, because the remedies differ: a theta/eta/sigma needs a carrier,
 anything else needs the term pre-computed one block earlier. The first is what
 makes an eta-in-ODE reportable for the first time.
 
-Corpus false-positive rate is zero. Measured on ferx 0.3.0; 0.2.0 could not be
-re-measured (local install replaced), but no bundled model references a covariate
-from `[odes]`, so nothing that translated before changes either way.
+Corpus false-positive rate is zero. Measured on ferx 0.3.0 (ferx-r tag `v0.3.0`),
+the version shipped to users; no bundled model references a covariate from
+`[odes]`, so nothing that translated before changes either way.
+
+Worth acting on separately: the `engine` CI job still pins `ferx-r@731adc9` =
+0.2.0, so it validates the translator against a build no user runs. The full suite
+passes against `v0.3.0` unchanged (`FAIL 0 | PASS 518`, engine tier included),
+which suggests the bump needs no re-baselining of the concordance references or the
+`inst/testdata/` datasets -- CLAUDE.md warns that both are tied to the pin, so that
+should be confirmed rather than assumed, and CLAUDE.md updated in the same commit.
 
 For phase 5 and beyond: extending this to `[individual_parameters]` is a much
 weaker check (thetas ARE in scope, so the legitimate set is far larger) and needs
