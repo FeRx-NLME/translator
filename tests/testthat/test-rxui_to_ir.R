@@ -508,7 +508,128 @@ test_that("ODE nlmixr2 model sets structural type ode", {
   expect_length(ir$odes, 2L)
 })
 
+# -- random-effect name uniqueness --------------------------------------------
+
+test_that(".uniquify_random_names leaves already-distinct names alone", {
+  e <- list(list(name = "ETA_CL", raw = "eta.cl"),
+            list(name = "ETA_V",  raw = "eta.v"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""), c("ETA_CL", "ETA_V"))
+  expect_length(out$warnings, 0L)
+})
+
+test_that("two source names normalising onto one spelling are made distinct", {
+  # .norm() folds every illegal character onto `_`, which is many-to-one. The
+  # theta channel has a uniqueness check and the state channel has one; this
+  # channel had none, so both emitted `omega CL_IIV` and every reference
+  # resolved to the first -- one IIV dropped, one double-counted, engine ok.
+  e <- list(list(name = "CL_IIV", raw = "CL.IIV"),
+            list(name = "CL_IIV", raw = "CL_IIV"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""),
+               c("CL_IIV", "CL_IIV_1"))
+  expect_match(out$warnings, "CL_IIV_1", all = FALSE)
+})
+
+test_that("uniqueness is case-insensitive, as ferx compares names", {
+  e <- list(list(name = "ETA_CL", raw = "eta.cl"),
+            list(name = "eta_cl", raw = "ETA.CL"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""),
+               c("ETA_CL", "eta_cl_1"))
+})
+
+test_that("the first occurrence keeps its name", {
+  # Renaming the first instead would churn a name the user already reads for the
+  # benefit of a later duplicate.
+  e <- list(list(name = "X", raw = "x1"), list(name = "X", raw = "x2"),
+            list(name = "X", raw = "x3"))
+  out <- .uniquify_random_names(e)
+  expect_equal(vapply(out$entries, function(x) x$name, ""), c("X", "X_1", "X_2"))
+})
+
+test_that("a block omega uniquifies each of its names", {
+  e <- list(list(name = c("A", "B"), raw = c("a", "b")),
+            list(name = "A",         raw = "a2"))
+  out <- .uniquify_random_names(e)
+  expect_equal(out$entries[[1]]$name, c("A", "B"))
+  expect_equal(out$entries[[2]]$name, "A_1")
+})
+
+test_that("colliding etas emit distinct omegas AND distinct references", {
+  # The end-to-end version: the rename is worthless if name_map still points the
+  # second eta's references at the name its twin took, which just moves the
+  # merge from the declaration to the reference.
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.TV", 10),
+               eta_row("CL.IIV", 0.09, 1L), eta_row("CL_IIV", 0.04, 2L))
+  lst <- list(quote(cl <- t.TCL * exp(CL.IIV)),
+              quote(v  <- t.TV  * exp(CL_IIV)),
+              quote(d/dt(central) <- -cl/v * central))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  nms <- unlist(lapply(ir$omegas, function(o) o$names))
+  expect_length(unique(nms), 2L)
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_match(rhs, "exp(CL_IIV)",   fixed = TRUE, all = FALSE)
+  expect_match(rhs, "exp(CL_IIV_1)", fixed = TRUE, all = FALSE)
+  # Each omega is referenced exactly once -- neither dropped nor double-counted.
+  for (n in nms)
+    expect_length(grep(paste0("\\b", n, "\\b"), rhs), 1L)
+})
+
 # -- theta / individual-parameter de-shadowing --------------------------------
+
+test_that(".free_theta_name never returns the theta's own name", {
+  # `base` was a candidate in .free_name's preference chain, so with both
+  # prefixes taken the de-shadower could hand back the very name it was asked to
+  # replace -- a non-NA answer, so the caller reports "theta 'CL' renamed to
+  # 'CL'" and the shadowing survives silently. Reachable only if `taken` ever
+  # stops containing the theta's own name; .deshadow_theta_names() seeds it, but
+  # nothing stated that, so the guard belongs in the function.
+  expect_equal(.free_theta_name("CL", c("TVCL", "THETA_CL")), "CL_1")
+  for (taken in list(character(), "CL", c("TVCL", "THETA_CL"),
+                     c("CL", "TVCL", "THETA_CL"),
+                     c("TVCL", "THETA_CL", "CL_1", "CL_2")))
+    expect_false(identical(.free_theta_name("CL", taken), "CL"))
+})
+
+test_that(".free_name still lets a non-theta caller keep its own name", {
+  # The state sanitiser and the carrier-name path both WANT base as a fallback:
+  # renaming `central` to CENTRAL_1 for nothing churns a name the user indexes
+  # by. Only the theta path opts out.
+  expect_equal(.free_name("central", c("DEPOT")), "central")
+  expect_equal(.free_name("central", c("CENTRAL")), "central_1")
+  expect_equal(.free_name("CL", c("X"), prefer = c("TVCL")), "TVCL")
+  expect_equal(.free_name("CL", c("TVCL"), prefer = c("TVCL")), "CL")
+  expect_equal(.free_name("CL", c("TVCL"), prefer = c("TVCL"),
+                          allow_base = FALSE), "CL_1")
+})
+
+# -- internal invariant: states and individual parameters stay disjoint --------
+
+test_that(".assert_state_param_disjoint passes on disjoint names", {
+  expect_true(.assert_state_param_disjoint(
+    list(list(state = "central"), list(state = "depot")),
+    list(list(lhs = "CL"), list(lhs = "V"))))
+  expect_true(.assert_state_param_disjoint(list(), list()))
+})
+
+test_that(".assert_state_param_disjoint stops, case-insensitively, on a clash", {
+  # Unreachable through the current pipeline by construction -- .parse_model_exprs()
+  # puts every state into `aux_vars` and pass 3 keeps aux_vars out of
+  # indiv_params -- so it is called directly. It is a stop() and not a warning
+  # because reaching it means the translator broke its own contract: the
+  # assignment would be absorbed, dropped from [individual_parameters] and
+  # inlined into itself, leaving an ODE that references a name nothing declares.
+  expect_error(
+    .assert_state_param_disjoint(list(list(state = "CENT")),
+                                 list(list(lhs = "CENT"))),
+    "internal error.*CENT.*names both an ODE state and an individual parameter")
+  expect_error(
+    .assert_state_param_disjoint(list(list(state = "cent")),
+                                 list(list(lhs = "CENT"))),
+    "internal error")
+})
 
 test_that("no rename when theta and individual parameter names are disjoint", {
   out <- .deshadow_theta_names(c("TVCL", "TVV"), c("CL", "V"))
@@ -1372,6 +1493,261 @@ test_that("a state whose source name is also a parameter name is scope-resolved"
                0L)
 })
 
+# -- $MODEL DEFOBS ------------------------------------------------------------
+
+test_that(".extract_nm_defobs reads DEFOBS wherever it is declared", {
+  f <- file.path(tmp_ctl_dir(), "defobs.ctl")
+  writeLines(c("$PROBLEM x", "$MODEL",
+               "  COMP=(CENT, DEFDOSE, DEFOBS)", "  COMP=(PERIPH)", "$PK"), f)
+  out <- .extract_nm_defobs(f)
+  expect_equal(out$index, 1L)
+  expect_equal(out$name, "CENT")
+  expect_equal(out$n_comp, 2L)
+})
+
+test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
+  n  <- 0L
+  mk <- function(...) {
+    n <<- n + 1L
+    f <- file.path(tmp_ctl_dir(), paste0("model", n, ".ctl"))
+    writeLines(c("$PROBLEM x", "$MODEL", ..., "$PK"), f); f
+  }
+  # `COMP (...)` without `=`, space-separated attributes.
+  expect_equal(.extract_nm_defobs(mk("  COMP (DEPOT DEFDOSE)",
+                                     "  COMP (CENTRAL DEFOBS)"))$index, 2L)
+  # DEFOBSERVATION, the unabbreviated spelling.
+  expect_equal(.extract_nm_defobs(mk("  COMP=(A)",
+                                     "  COMP=(B, DEFOBSERVATION)"))$index, 2L)
+  # DEFDOSE must not be mistaken for DEFOBS -- they share the DEF prefix.
+  expect_null(.extract_nm_defobs(mk("  COMP=(A, DEFDOSE)", "  COMP=(B)")))
+  # A DEFOBS that only appears in a comment is not a declaration.
+  expect_null(.extract_nm_defobs(mk("  COMP=(A) ; DEFOBS goes here one day",
+                                    "  COMP=(B)")))
+  # No $MODEL at all.
+  f <- file.path(tmp_ctl_dir(), "nomodel.ctl")
+  writeLines(c("$PROBLEM x", "$PK"), f)
+  expect_null(.extract_nm_defobs(f))
+})
+
+test_that("the observation expression outranks DEFOBS when they disagree", {
+  skip_if_not_installed("nonmem2rx")
+  # NONMEM's DEFOBS is the default observation compartment for records with no
+  # CMT -- it is not a statement about what $ERROR reads. When $ERROR names a
+  # compartment outright (`Y = A(2)/S2`), that is the model saying it, and
+  # preferring DEFOBS there regressed models that were previously correct.
+  p  <- nm_path("defobs_expression_wins.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    scaling_hint = .extract_nm_scaling(p),
+                                    obs_hint     = .extract_nm_defobs(p)))
+  expect_equal(.extract_nm_defobs(p)$name, "DEPOT")   # $MODEL says DEPOT
+  expect_equal(ir$structural$obs_cmt, "CENT")         # $ERROR says A(2)
+  expect_equal(ir$scaling$obs_scale, "V")             # and S2 = V follows it
+  expect_match(ir$warnings, "\\$MODEL declares 'DEPOT' as DEFOBS", all = FALSE)
+})
+
+test_that("DEFOBS decides when the DV expression goes through F", {
+  skip_if_not_installed("nonmem2rx")
+  # `$ERROR IPRE = F` carries no compartment of its own -- in NONMEM `F` IS the
+  # DEFOBS compartment. nonmem2rx nonetheless resolves `f <- CENTRAL` ignoring
+  # DEFOBS, so following `f` would launder its guess into an "explicit" answer.
+  # pkpd_ir.mod declares COMP=(EFFECT,DEFOBS) and is observed on EFFECT.
+  p  <- nm_path("pkpd_ir.mod")
+  ui <- nonmem2rx::nonmem2rx(p)
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    scaling_hint = .extract_nm_scaling(p),
+                                    obs_hint     = .extract_nm_defobs(p)))
+  expect_equal(ir$structural$obs_cmt, "EFFECT")
+  expect_length(grep("could not be inferred", ir$warnings), 0L)
+})
+
+test_that("DEFOBS decides obs_cmt AND the scaling compartment", {
+  skip_if_not_installed("nonmem2rx")
+  # The regression this exists for: with DEFOBS declared first and no explicit
+  # compartment in $ERROR, the old tail(state_names, 1) guess picked PERIPH,
+  # and because the scaling lookup derives its compartment number from the same
+  # guess, the correctly parsed `S1 = V` was discarded with no diagnostic.
+  p  <- nm_path("defobs_not_last.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  sc <- .extract_nm_scaling(p)
+  expect_equal(sc[["1"]], "V")          # parsing was never the problem
+
+  fixed <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                       scaling_hint = sc,
+                                       obs_hint = .extract_nm_defobs(p)))
+  expect_equal(fixed$structural$obs_cmt, "CENT")
+  expect_equal(fixed$scaling$obs_scale, "V")
+  expect_length(grep("obs_cmt could not be inferred", fixed$warnings), 0L)
+})
+
+test_that("a DEFOBS that disagrees with d/dt order is refused, not trusted", {
+  skip_if_not_installed("nonmem2rx")
+  # $MODEL says compartment 1 is NOPE; the first d/dt is for CENT. Believing the
+  # index anyway would silently observe the wrong compartment. Uses a model
+  # whose DV expression names no compartment, so the hint is what is on trial.
+  p  <- nm_path("pkpd_ir.mod")
+  ui <- nonmem2rx::nonmem2rx(p)
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    obs_hint = list(index = 1L, name = "NOPE",
+                                                    n_comp = 4L)))
+  expect_match(ir$warnings, "orderings disagree", all = FALSE)
+  expect_equal(ir$structural$obs_cmt, "EFFECT")   # fell back to the guess
+})
+
+test_that("a malformed obs_hint index is refused, not evaluated", {
+  skip_if_not_installed("nonmem2rx")
+  # rxui_to_ir() is exported and obs_hint is a documented @param, so a length-0,
+  # NA or length-2 index must not reach `&&` and abort with a base-R condition
+  # error naming neither field.
+  ui <- nonmem2rx::nonmem2rx(nm_path("pkpd_ir.mod"))
+  for (idx in list(NA_integer_, integer(0), c(1L, 2L), "1")) {
+    ir <- expect_no_error(suppressWarnings(
+      rxui_to_ir(ui, source_format = "nonmem",
+                 obs_hint = list(index = idx, name = "EFFECT", n_comp = 4L))))
+    expect_true(nzchar(ir$structural$obs_cmt))
+  }
+})
+
+test_that(".same_cmt_name sees through nonmem2rx's c. prefix and case", {
+  expect_true(.same_cmt_name("c.RTOT", "RTOT"))
+  expect_true(.same_cmt_name("central", "CENTRAL"))
+  expect_true(.same_cmt_name("A.B", "A_B"))
+  expect_false(.same_cmt_name("CENT", "PERIPH"))
+  expect_false(.same_cmt_name(NA_character_, "CENT"))
+})
+
+# -- statements with a call-shaped assignment target --------------------------
+
+test_that("a dropped f()/alag() statement is reported, not silently discarded", {
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.TV", 10), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(v <- t.TV),
+              quote(f(depot) <- BIO.AV), quote(alag(depot) <- 0.5),
+              quote(d/dt(depot) <- -cl * depot),
+              quote(d/dt(central) <- cl * depot - cl/v * central))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_match(ir$warnings, "bioavailability for compartment 'depot'", all = FALSE)
+  expect_match(ir$warnings, "dose lag time for compartment 'depot'",   all = FALSE)
+})
+
+test_that("a feature ferx supports is NOT filed as a ferx-core gap", {
+  # ferx-core maps F{cmt} -> `f=`, ALAG{cmt} -> `lagtime=` and D/R -> duration
+  # and rate, and ferx-r ships bioavailability.ferx and warfarin_ode_lagtime.ferx
+  # as worked examples. So the translator not emitting these is a ferxtranslate
+  # limitation, and $unsupported -- which CLAUDE.md defines as the ferx-core
+  # prioritisation signal -- must stay empty for them. Filing them there asked
+  # the engine team to build what they had already shipped.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- 0.7),
+              quote(alag(depot) <- 0.5), quote(dur(depot) <- 2),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$unsupported, 0L)
+  # ... but the user is still told, at ERROR level, that it was dropped.
+  expect_match(ir$warnings, "supported by ferx but is not yet emitted", all = FALSE)
+})
+
+test_that("a state initial condition is translated, not reported as a gap", {
+  # ferx parses `init(STATE) = <expr>` inside [odes]. The expression may
+  # reference individual parameters, other states and literals.
+  ini <- rbind(theta_row("t.TBL", 3), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(bl <- t.TBL * exp(eta1)),
+              quote(EFFECT(0) <- bl),
+              quote(d/dt(EFFECT) <- -bl * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 1L)
+  expect_equal(ir$initial_conditions[[1]]$state, "EFFECT")
+  expect_equal(ir$initial_conditions[[1]]$rhs, "BL")
+  expect_match(emit_ferx(ir), "init(EFFECT) = BL", fixed = TRUE)
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("an init referencing a theta is dropped with a scope explanation", {
+  # Measured against the engine: `init(X) = TVBL` is an E_PARSE naming TVBL
+  # undefined, because a theta is not in scope inside an init expression. Emit
+  # it and the file does not parse, so it is dropped and said out loud.
+  ini <- rbind(theta_row("t.TBL", 3), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TBL * exp(eta1)),
+              quote(EFFECT(0) <- t.TBL),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 0L)
+  expect_match(ir$warnings, "does not resolve inside an init expression",
+               all = FALSE)
+})
+
+test_that("an initial condition of 0 is a no-op, not a dropped feature", {
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)), quote(EFFECT(0) <- 0),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 0L)
+  expect_length(ir$unsupported, 0L)
+  expect_match(ir$warnings, "already every compartment's initial value",
+               all = FALSE)
+})
+
+test_that("an alias bound twice is not read as a constant", {
+  # The relative-bioavailability idiom `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)`.
+  # Taking the FIRST binding made const(1) true, so the translator said "sets
+  # the value ferx already uses, so dropping it does not change the model" --
+  # asserting nothing was lost while the formulation-dependent F disappeared.
+  ini <- rbind(theta_row("t.TCL", 1), theta_row("t.T4", 0.7), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)),
+              quote(rxf.rxddta1. <- 1),
+              quote(f(depot) <- rxf.rxddta1.),
+              quote(if (FORM == 2) { rxf.rxddta1. <- t.T4; f(depot) <- rxf.rxddta1. }),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(grep("does not change the model", ir$warnings), 0L)
+  expect_match(ir$warnings, "binds it more than once", all = FALSE)
+})
+
+test_that("a nonmem2rx alias temporary never reaches [individual_parameters]", {
+  # `.resolve_alias()` knew rxdur/rxrate/rxalag and pass 3's skip list did not,
+  # so the companion binding of a dropped statement was emitted as a model
+  # parameter named after a nonmem2rx internal.
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)),
+              quote(rxdur.rxddta1. <- 2), quote(dur(depot) <- rxdur.rxddta1.),
+              quote(rxalag.rxddta2. <- 0.5), quote(alag(depot) <- rxalag.rxddta2.),
+              quote(d/dt(depot) <- -k * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_length(grep("^RX", lhs), 0L)
+})
+
+test_that("a name only reachable through a dropped statement is not a covariate", {
+  # BIO.AV appears solely on the RHS of `f(depot) <- BIO.AV`, which is never
+  # emitted. Reporting it as an illegal covariate prescribed renaming a data
+  # column that fixes nothing, and put a phantom entry in $unsupported -- which
+  # per CLAUDE.md is the ferx-core prioritisation signal.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- BIO.AV),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+  expect_length(grep("BIO.AV", ir$unsupported, fixed = TRUE), 0L)
+})
+
+test_that("a genuinely illegal covariate is still reported", {
+  # The other half: this one IS emitted, so the diagnostic is real and must
+  # survive the narrowing above.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1) * WT.KG),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_match(ir$warnings, "covariate reference", all = FALSE)
+  expect_match(ir$unsupported, "WT.KG", fixed = TRUE, all = FALSE)
+})
 
 # -- theta pass-through into [odes] -------------------------------------------
 #

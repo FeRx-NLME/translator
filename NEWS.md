@@ -38,6 +38,78 @@
 
 ## Bug fixes
 
+* **A bundled model's fitted behaviour changes.** `pkpd_ir.mod` sets
+  `A_0(4)=BL`, initialising the effect compartment to baseline. That statement
+  was being discarded without a diagnostic, so the translated model started the
+  compartment at 0 instead of `BL` and fitted different numbers from the source
+  model. The emitted `.ferx` was valid either way and no test was looking for
+  it, so nothing surfaced it. It now emits `init(EFFECT) = BL`. If you have
+  fitted a translated indirect-response model with a non-zero baseline, the
+  results change -- for the better, but they change.
+
+* The observed compartment is decided by the DV expression first, `$MODEL`'s
+  `DEFOBS` second, and a positional guess only as a last resort. `DEFOBS` is
+  NONMEM's default for data records with no `CMT`; it says nothing about what
+  `$ERROR` reads, so a model whose `$ERROR` names `A(2)` outright is observed on
+  compartment 2 even when `DEFOBS` names another. When the DV expression carries
+  no compartment of its own (`IPRE = F`), `DEFOBS` is the authority, because
+  that is what NONMEM's `F` means. A disagreement between the two is reported
+  rather than resolved silently.
+
+* `$MODEL`'s `DEFOBS` attribute is now read from the control stream. `ui$central` is `NULL` for both nonmem2rx and
+  rxode2, so `obs_cmt` was always the LAST declared compartment -- a positional
+  guess that every bundled model happened to satisfy. The same index selects the
+  `$PK` scaling variable, so both failed together: a model declaring
+  `COMP=(CENT, DEFDOSE, DEFOBS)` before `COMP=(PERIPH)` with `S1 = V` attributed
+  observations to the peripheral compartment AND emitted no `[scaling]` block at
+  all, discarding a correctly parsed scaling with no diagnostic. The `$MODEL`
+  ordinal is cross-checked against the differential-equation order and refused
+  with a warning if the two disagree, rather than trusted. New bundled model
+  `defobs_not_last.ctl` is the regression guard.
+
+* ODE state initial conditions are translated. `A_0(n) = <expr>` in `$PK`
+  becomes `init(<state>) = <expr>` inside `[odes]` (see the behaviour-change
+  note above for the bundled model this corrects). ferx resolves an init
+  expression against individual parameters, other states and literals but not
+  thetas, so one referencing anything else is dropped with an explanation naming
+  what was out of scope, rather than emitting a file the engine rejects.
+
+* Statements whose assignment target is a call rather than a name -- `F1`,
+  `ALAG1`, infusion `D1`/`R1` -- are no longer dropped in silence. Each is
+  reported by name in `$warnings`. They are NOT added to `$unsupported`: ferx
+  supports all of them (`f=`/`lagtime=` on a pk macro, the reserved `F` and
+  `LAGTIME` names for ODE models), so not emitting them is a `ferxtranslate`
+  limitation rather than a ferx feature gap, and `$unsupported` is the
+  ferx-core prioritisation signal. Assignments that set the value ferx already
+  uses (`F1 = 1`, `ALAG1 = 0`) are noted at `INFO`. An alias the source binds
+  more than once -- the `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)` idiom -- is
+  never treated as a constant.
+
+* A name reachable only through such a dropped statement is no longer reported
+  as an illegal covariate. `f(depot) <- BIO.AV` raised
+  `ERROR | covariate reference(s) BIO.AV ...` telling the user to rename a data
+  column, a remedy that fixed nothing because `BIO.AV` was never emitted, and
+  added a phantom entry to `$unsupported`.
+
+* Two source names that normalise onto the same spelling no longer merge into
+  one random effect. `$OMEGA 0.09 ; CL.IIV` beside `$OMEGA 0.04 ; CL_IIV` both
+  emitted `omega CL_IIV`, and every reference resolved to the first -- one
+  inter-individual variability term silently dropped, the other double-counted,
+  with the engine reporting no problem. Thetas and states already had a
+  uniqueness check; the eta/omega/kappa/sigma channel did not.
+
+* `validate_ferx_ir()` now rejects an IR that declares a name which is not a
+  legal ferx identifier, an `obs_cmt` that is not one of the declared states, or
+  an unnamed `state_renames` vector. Legality was previously enforced only where
+  each name was minted, so a name reaching the file through an unchecked channel
+  was emitted verbatim into a file the engine could not parse. Expression text
+  is deliberately exempt: covariate references must keep the data column's exact
+  spelling.
+
+* A shadowed theta can no longer be "renamed" to its own name.
+  `.free_theta_name()` could return the name it was asked to replace once both
+  the `TV` and `THETA_` prefixes were taken, reporting a rename that had not
+  happened while the shadowing survived.
 * A theta referenced from an ODE is now carried in by an individual parameter.
   ferx resolves a `d/dt` right-hand side against states, individual parameters and
   covariates only -- a theta is not in scope there -- so a `$DES` line naming a

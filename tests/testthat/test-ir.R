@@ -96,3 +96,85 @@ test_that("print.ferx_ir runs without error", {
 test_that("print.ferx_ir handles empty IR without error", {
   expect_no_error(print(new_ferx_ir()))
 })
+
+# -- emitted-name legality ----------------------------------------------------
+#
+# The structural half of the identifier guarantee. Legality used to be enforced
+# only where each name was minted plus one corpus test over whichever models are
+# bundled, so a name reaching the file through an unchecked channel was emitted
+# verbatim into an unparseable file. These assert the guard fires per channel,
+# so adding a channel without wiring it into .ir_declared_names() shows up here.
+
+.pk_ir <- function(...) new_ferx_ir(
+  structural = list(type = "pk_macro", pk_call = "one_cpt_oral",
+                    pk_args = list(cl = "CL", v = "V")), ...)
+
+test_that("a legal IR still validates and emits", {
+  expect_silent(validate_ferx_ir(.pk_ir()))
+  expect_type(emit_ferx(.pk_ir()), "character")
+})
+
+test_that("an illegal declared name is rejected in every channel", {
+  channels <- list(
+    theta       = .pk_ir(thetas = list(list(name = "1BAD", init = 1,
+                                            lower = 0, upper = 10))),
+    omega       = .pk_ir(omegas = list(list(type = "diagonal",
+                                            names = "c.RTOT", values = 0.1))),
+    kappa       = .pk_ir(kappas = list(list(name = "KAPPA-1", value = 0.1))),
+    sigma       = .pk_ir(sigmas = list(list(name = "EPS.1", value = 0.1,
+                                            scale = "sd"))),
+    indiv_param = .pk_ir(indiv_params = list(list(lhs = "A B", rhs = "1"))),
+    error_dv    = .pk_ir(error_model = list(list(dv = "D V", type = "proportional",
+                                                 params = "PROP"))),
+    error_param = .pk_ir(error_model = list(list(dv = "DV", type = "proportional",
+                                                 params = "PROP.ERR"))),
+    diffusion   = .pk_ir(diffusion = list(list(state = "9X", value = 0.1))),
+    pk_arg      = new_ferx_ir(structural = list(type = "pk_macro",
+                                                pk_call = "one_cpt_oral",
+                                                pk_args = list(cl = "C.L"))),
+    state       = new_ferx_ir(structural = list(type = "ode", states = "9CENT",
+                                                obs_cmt = "9CENT"),
+                              odes = list(list(state = "9CENT", rhs = "-K"))))
+  for (ch in names(channels))
+    expect_error(validate_ferx_ir(channels[[ch]]),
+                 "not .*legal ferx identifier", info = ch)
+})
+
+test_that("the rejection names the channel, not just the name", {
+  expect_error(validate_ferx_ir(.pk_ir(omegas = list(list(type = "diagonal",
+                                                          names = "c.RTOT",
+                                                          values = 0.1)))),
+               "omega")
+})
+
+test_that("obs_cmt must be one of the declared states", {
+  # Emitted, this produced only INFO-level warnings and an empty $unsupported --
+  # a translation that looked clean and a file the engine refused with
+  # "Observable compartment 'CENT' not in states".
+  ir <- new_ferx_ir(structural = list(type = "ode", states = "c_CENT",
+                                      obs_cmt = "CENT"),
+                    odes = list(list(state = "c_CENT", rhs = "-K")))
+  expect_error(validate_ferx_ir(ir), "obs_cmt.*not one of")
+})
+
+test_that("state_renames must be a named character vector", {
+  # Unnamed, emit_ferx() rendered `# renamed: state  -> c_RTOT` -- provenance
+  # with the source half blank, which is the half a reader holding only the
+  # .ferx file cannot reconstruct.
+  expect_error(validate_ferx_ir(.pk_ir(state_renames = c("c_RTOT", "A_B"))),
+               "must be NAMED")
+  expect_error(validate_ferx_ir(.pk_ir(state_renames = c(RTOT = "c_RTOT",
+                                                         "A_B"))),
+               "must be NAMED")
+  expect_silent(validate_ferx_ir(.pk_ir(state_renames = c(RTOT = "c_RTOT"))))
+})
+
+test_that("the legality check reads declarations, not expression text", {
+  # Covariates live in RHS expressions and must keep the data column's exact
+  # spelling -- ferx matches them case-sensitively, so sanitising one turns a
+  # working reference into E_MISSING_COVARIATE at fit time. They are reported as
+  # untranslatable by the translator, not rewritten, so this guard must not fire
+  # on them or it would abort the very models that need the diagnostic.
+  ir <- .pk_ir(indiv_params = list(list(lhs = "CL", rhs = "TVCL * WT.KG")))
+  expect_silent(validate_ferx_ir(ir))
+})

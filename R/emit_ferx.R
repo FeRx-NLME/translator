@@ -148,9 +148,14 @@ emit_ferx <- function(ir) {
 }
 
 .emit_odes_section <- function(ir) {
+  # init() directives lead, so a reader sees each compartment's starting value
+  # before its rate of change -- and because ferx parses them as [odes] lines,
+  # they belong in this block rather than a section of their own.
+  init  <- vapply(ir$initial_conditions,
+                  function(x) paste0("  init(", x$state, ") = ", x$rhs), "")
   lines <- vapply(ir$odes,
                   function(o) paste0("  d/dt(", o$state, ") = ", o$rhs), "")
-  paste0("[odes]\n", paste(lines, collapse = "\n"))
+  paste0("[odes]\n", paste(c(init, lines), collapse = "\n"))
 }
 
 .emit_diffusion_section <- function(ir) {

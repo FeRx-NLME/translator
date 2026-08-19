@@ -264,8 +264,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nlmixr2: unknown
-      # Warnings: 1 -- run result$warnings for details
-      # WARNING: obs_cmt could not be inferred -- guessed 'central', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -346,8 +344,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pkpd_ir.mod
-      # Warnings: 1 -- run result$warnings for details
-      # WARNING: obs_cmt could not be inferred -- guessed 'EFFECT', verify in [structural_model]
       
       [parameters]
         theta TH1(1.95, -1e15, 1e15)
@@ -383,6 +379,7 @@
         ode(obs_cmt=EFFECT, states=[DOSE, CENTRAL, PERIPH, EFFECT])
       
       [odes]
+        init(EFFECT) = BL
         d/dt(DOSE) = -K12 * DOSE
         d/dt(CENTRAL) = K12 * DOSE - K20 * CENTRAL - K23 * CENTRAL + K32 * PERIPH
         d/dt(PERIPH) = K23 * CENTRAL - K32 * PERIPH

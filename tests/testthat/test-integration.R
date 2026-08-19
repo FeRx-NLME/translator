@@ -201,8 +201,15 @@ test_that("every bundled model translates, without a shadowing theta", {
   gaps      <- character()
 
   for (m in models) {
+    # Through the SAME path a user gets, hints and all. Calling rxui_to_ir()
+    # bare swept every model through the pre-fix guessing path: defobs_not_last.ctl,
+    # the fixture bundled specifically to guard DEFOBS, came out with
+    # obs_cmt=PERIPH and no [scaling] here while nm_to_ferx() gave obs_cmt=CENT
+    # and obs_scale=V. The gate was inspecting output no user could obtain.
     ir <- tryCatch(suppressWarnings(
-                     rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem")),
+                     rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem",
+                                scaling_hint = .extract_nm_scaling(m),
+                                obs_hint     = .extract_nm_defobs(m))),
                    error = function(e) conditionMessage(e))
     if (is.character(ir)) {
       crashed <- c(crashed, paste0(basename(m), " -- ", ir))
@@ -220,18 +227,71 @@ test_that("every bundled model translates, without a shadowing theta", {
     # and rejected at every reference, so a declaration-only check inspects the
     # half that works. Enumerating IR fields also silently misses whichever
     # channel is added next: reading the artefact cannot.
-    txt   <- emit_ferx(ir)
+    # Guarded, because emit_ferx() opens with validate_ferx_ir() and that
+    # cli_abort()s: uncaught, ONE bad model ends the sweep at that model and the
+    # crashed/offenders/illegal/gaps tables -- all message()d after the loop --
+    # are never printed, which is the opposite of a sweep that reports per-model
+    # gaps. Classed rather than bare, unlike the rxui_to_ir() guard above: there
+    # success is a list and failure a string, so is.character() tells them
+    # apart; here both are one string.
+    txt <- tryCatch(emit_ferx(ir),
+                    error = function(e) structure(conditionMessage(e),
+                                                  class = "emit_failure"))
+    if (inherits(txt, "emit_failure")) {
+      crashed <- c(crashed, paste0(basename(m), " -- emit_ferx: ", unclass(txt)))
+      next
+    }
     lines <- strsplit(txt, "\n")[[1]]
     lines <- lines[!grepl("^\\s*#", lines)]        # comments carry source names
+    # TWO checks, because they can see different things.
+    #
+    # (a) Declaration positions, extracted STRUCTURALLY. The token scan below
+    # cannot do this job: its pattern admits `.` as the only illegal
+    # continuation character, so every OTHER illegal character simply splits a
+    # bad name into two legal tokens -- `ode(obs_cmt=A-B, states=[A-B])` scans
+    # as `ode, obs_cmt, A, B, states`, all legal, and the assertion passes on an
+    # unparseable file. `has space` and `2CPT` fail the same way (a token cannot
+    # begin with a digit, so `2CPT` is only ever seen as `CPT`). Reading the
+    # declaration positions by shape catches all of them.
+    decl <- c(
+      unlist(lapply(regmatches(lines, gregexpr("states=\\[[^]]*\\]", lines)),
+                    function(m) unlist(strsplit(sub("^states=\\[(.*)\\]$", "\\1", m), ",")))),
+      unlist(regmatches(lines, gregexpr("(?<=obs_cmt=)[^,)]+", lines, perl = TRUE))),
+      unlist(regmatches(lines, gregexpr("(?<=d/dt\\()[^)]+", lines, perl = TRUE))))
+    decl <- trimws(decl)
+    decl <- decl[nzchar(decl)]
+    #
+    # (b) The token scan, which still earns its place for EXPRESSION text: a
+    # dotted covariate reference (`WT.KG`) is the realistic illegal spelling and
+    # is invisible to (a). Declaration legality itself is now guaranteed
+    # structurally by validate_ferx_ir(), which emit_ferx() always runs -- (a)
+    # is the belt to that braces, and it reads the artefact rather than the IR.
     toks  <- unique(unlist(regmatches(
       lines, gregexpr("[A-Za-z_][A-Za-z0-9_.]*", lines))))
-    bad <- setdiff(unique(toks[!.is_ferx_ident(toks)]), c("true", "false"))
+    bad <- unique(c(decl[!.is_ferx_ident(decl)], toks[!.is_ferx_ident(toks)]))
+    # No setdiff for "true"/"false" here: .is_ferx_ident("true") is already TRUE,
+    # so filtering them was dead code that read as though a real exemption
+    # existed.
+    #
     # A name the translator already reported as untranslatable is not a silent
     # leak -- covariates in particular must keep the data column's exact
     # spelling, so an illegal one is declared unsupported rather than renamed.
-    bad <- bad[!vapply(bad,
-                       function(b) any(grepl(b, ir$unsupported, fixed = TRUE)),
-                       logical(1))]
+    # Matched as a whole token, NOT as a substring of any unsupported string:
+    # `grepl(b, ir$unsupported, fixed = TRUE)` exempted a name because some
+    # unrelated entry happened to contain those characters, which already
+    # green-lit a genuinely unparseable `ode(states=[c.RTOT])`.
+    # Only names reported as an untranslatable COVARIATE are exempt, and the
+    # name is taken from that entry's fixed prefix rather than by tokenising the
+    # whole string. Harvesting every token from every $unsupported entry is
+    # self-defeating now that entries can carry deparsed source: a model with
+    # `q(A.B) <- ...` yields "unsupported assignment target: q(A.B)", whose
+    # tokens include `A.B`, which then exempted `A.B` everywhere else in the
+    # file -- including a genuinely unparseable `ode(states=[A.B])`.
+    cov_pref   <- "covariate name is not a legal ferx identifier: "
+    exempt     <- sub(cov_pref, "",
+                      grep(cov_pref, ir$unsupported, fixed = TRUE, value = TRUE),
+                      fixed = TRUE)
+    bad <- setdiff(bad, exempt)
     if (length(bad) > 0)
       illegal <- c(illegal, paste0(basename(m), ": ", paste(bad, collapse = ", ")))
 

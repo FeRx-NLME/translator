@@ -14,6 +14,7 @@ new_ferx_ir(
   indiv_params = list(),
   structural = list(),
   odes = list(),
+  initial_conditions = list(),
   diffusion = list(),
   error_model = list(),
   scaling = list(),
@@ -53,6 +54,14 @@ and \code{states}). May be empty during incremental construction.}
 \item{odes}{List of ODE entries. Each element is a list with \code{state}
 (character) and \code{rhs} (character). Used only when
 \code{structural$type == "ode"}.}
+
+\item{initial_conditions}{List of ODE initial-condition entries. Each element
+is a list with \code{state} (character, an emitted state name) and \code{rhs}
+(character, the expression). Rendered as \verb{init(<state>) = <rhs>} inside the
+\verb{[odes]} block. ferx resolves an init expression against individual
+parameters, other states and literals only -- not thetas -- so
+\code{\link[=rxui_to_ir]{rxui_to_ir()}} drops and reports one that would reference anything else
+rather than emitting a file the engine rejects.}
 
 \item{diffusion}{List of diffusion entries. Each element is a list with
 \code{state} (character) and \code{value} (numeric).}
