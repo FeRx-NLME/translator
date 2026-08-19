@@ -15,6 +15,13 @@ name: engine-pin-drift
 # It compares against the latest ferx-r RELEASE, not against `main`. Tracking main
 # would fire on every upstream commit; the pin is meant to follow shipped versions.
 
+# NOTE for anyone copying this file as a template: a workflow whose only triggers
+# are `schedule` and `workflow_dispatch` is NOT registered by GitHub until it has
+# run once. Until then it is missing from `gh workflow list` and the Actions API,
+# and `gh workflow run` answers `404: not found on the default branch` -- valid
+# file, default branch, Actions enabled, still invisible. Break the cycle by
+# pushing it to a throwaway branch with a temporary `push:` trigger; that first run
+# registers the path for good. See "Known gotchas" in CLAUDE.md.
 on:
   schedule:
     - cron: "0 7 * * 1" # Mondays, 07:00 UTC

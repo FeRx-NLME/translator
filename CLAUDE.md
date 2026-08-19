@@ -81,6 +81,26 @@ pre-simulated and stored in `inst/testdata/ampsim_1cpt_oral_concordance.csv`.
 If the amp.sim reference estimates ever change, re-run
 `data-raw/generate_concordance_data.R` to regenerate the dataset.
 
+**A schedule-only workflow is not registered until it has run once** - GitHub does
+not index a workflow whose only triggers are `schedule` and `workflow_dispatch`
+until an actual run exists for it. Until then it is absent from `gh workflow list`
+and from the Actions API, and `gh workflow run` answers
+`404: not found on the default branch` - even though the file is on the default
+branch, is valid YAML, and Actions is enabled. Merging one and walking away leaves
+something that looks installed and does nothing.
+
+It is a chicken-and-egg, not a defect: it cannot be dispatched because it is not
+registered, and it is not registered because it has never run. To break it, push
+the workflow to a throwaway branch with a temporary `push:` trigger; that first run
+registers the file path permanently, after which `workflow_dispatch` works on the
+default branch and the temporary trigger can be dropped. `engine-pin-drift.yml` was
+registered exactly this way.
+
+Worth being deliberate about, because the workflows most likely to be
+schedule-only are watchdogs - the ones nobody watches, whose whole purpose is to
+notice something on your behalf. A silently unregistered watchdog is worse than
+none: it reads as coverage.
+
 ## Four-tier test structure
 
 Every new function or behaviour needs a test. Put the test in the lowest tier
