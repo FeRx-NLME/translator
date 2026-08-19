@@ -1696,6 +1696,35 @@ test_that("an init referencing MACHEPS is emitted", {
   expect_length(ir$initial_conditions, 1L)
 })
 
+test_that("TIME in a COMPOUND init is substituted, not grounds for dropping", {
+  # The case the bare-TIME test cannot see, and the reason substitution beats
+  # dropping. Model time at init is zero and the engine computes exactly that
+  # (`init = TIME + 50` and `init = 0 + 50` agree to max |diff| = 0.0), so the
+  # rest of the expression is still the value the source asked for. Dropping
+  # started the compartment at 0 when the correct value was in hand.
+  mk <- function(rhs) {
+    ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+    lst <- list(quote(k <- t.TK * exp(eta1)),
+                bquote(EFFECT(0) <- .(rhs)),
+                quote(d/dt(EFFECT) <- -k * EFFECT))
+    suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                source_format = "nonmem"))
+  }
+  a <- mk(quote(TIME + 50))
+  expect_length(a$initial_conditions, 1L)
+  expect_equal(a$initial_conditions[[1]]$rhs, "0 + 50")
+  expect_match(a$warnings, "replaced with 0", all = FALSE)
+
+  b <- mk(quote(k + TIME))
+  expect_length(b$initial_conditions, 1L)
+  expect_equal(b$initial_conditions[[1]]$rhs, "K + 0")
+
+  # An init with no TIME at all is untouched by any of this.
+  d <- mk(quote(50))
+  expect_equal(d$initial_conditions[[1]]$rhs, "50")
+  expect_length(grep("replaced with 0", d$warnings), 0L)
+})
+
 test_that("an init referencing TIME is dropped even though ferx accepts it", {
   # The ONE place this deliberately does not mirror the engine. ferx accepts
   # `init(X) = TIME` -- by accident, since a bare TIME is an AST node rather
@@ -1710,7 +1739,10 @@ test_that("an init referencing TIME is dropped even though ferx accepts it", {
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
   expect_length(ir$initial_conditions, 0L)
-  expect_match(ir$warnings, "always zero at initialisation", all = FALSE)
+  # Dropped because substituting TIME := 0 reduces it to a bare 0, which is the
+  # value every compartment already has -- the same no-op arm as `F1 = 1`. It is
+  # NOT a special case for TIME; it falls out of the substitution.
+  expect_match(ir$warnings, "dropping it does not change the model", all = FALSE)
 })
 
 test_that("an init referencing a theta is dropped with a scope explanation", {

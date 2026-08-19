@@ -729,14 +729,33 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         next
       }
       out_of_scope <- setdiff(ic$syms, c(ip_names, st_names))
-      if ("TIME" %in% out_of_scope) {
+      # TIME is SUBSTITUTED, not grounds for dropping the statement. Model time
+      # at initialisation is zero, and the engine computes exactly that --
+      # measured, `init(central) = TIME + 50` and `init(central) = 0 + 50` agree
+      # to max |diff| = 0.0. So the rest of the expression is still the value the
+      # source asked for, and abandoning it starts the compartment at 0 when the
+      # correct value was in hand: `A_0 = TIME + 50` must emit 50, not nothing.
+      # Dropping is right only for a BARE TIME, which reduces to 0 -- and that
+      # falls out of the substitution rather than needing its own branch, which
+      # is why this is not two code paths.
+      if ("TIME" %in% ic$syms) {
+        ic$expr <- .substitute_sym(ic$expr, "TIME", 0)
+        ic$rhs  <- paste(deparse(ic$expr, width.cutoff = 500L), collapse = " ")
+        ic$syms <- setdiff(toupper(.collect_symbols(ic$expr)), .ODE_LITERALS)
+        out_of_scope <- setdiff(ic$syms, c(ip_names, st_names))
+        if (.is_zero_expr(ic$expr)) {
+          warn <- c(warn, paste0(
+            "INFO  | initial condition for '", state, "' is TIME, which is zero ",
+            "at initialisation, so it sets the value every compartment already ",
+            "has and dropping it does not change the model."))
+          next
+        }
         warn <- c(warn, paste0(
-          "ERROR | initial condition for '", state, "' references TIME, which ",
-          "is always zero at initialisation -- ferx accepts it and silently ",
-          "reads it as 0, so emitting it would produce a model that differs ",
-          "from the source with nothing to show for it. The initial condition ",
-          "was dropped; the compartment starts at 0."))
-        next
+          "WARN  | initial condition for '", state, "' references TIME, which is ",
+          "always zero at initialisation. It was replaced with 0, giving 'init(",
+          state, ") = ", ic$rhs, "'. ferx accepts a bare TIME here and reads it ",
+          "as 0 (ferx-core#994), so the emitted model matches the source; the ",
+          "substitution is done here so the file does not depend on that."))
       }
       if (length(out_of_scope) > 0) {
         warn <- c(warn, paste0(
@@ -1216,6 +1235,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # owner of "what counts as a state" and is what this function reads too.
   list(map = map, warnings = warn)
 }
+
+# Replace every occurrence of a symbol in an expression with a value.
+.substitute_sym <- function(expr, sym, value) {
+  if (is.symbol(expr))
+    return(if (identical(as.character(expr), sym)) value else expr)
+  if (!is.call(expr)) return(expr)
+  as.call(c(list(expr[[1]]),
+            lapply(as.list(expr[-1]), .substitute_sym, sym = sym, value = value)))
+}
+
+# Is this expression the literal zero? Only the bare literal -- deliberately not
+# an arithmetic simplifier, because `0 + 50` must stay a value, not become one.
+.is_zero_expr <- function(expr)
+  is.numeric(expr) && length(expr) == 1L && !is.na(expr) && expr == 0
 
 # The state(s) the DV expression names OUTRIGHT, resolved transitively through
 # intermediate assignments.
@@ -2065,6 +2098,10 @@ bound_name <- function(entries, raw) {
           } else {
             init_conds <- c(init_conds, list(list(
               state_raw = d$state,
+              # The parsed expression travels with the text: the caller may need
+              # to rewrite it (TIME -> 0) and re-deparse, which cannot be done
+              # from the string without re-parsing it.
+              expr      = init_expr,
               rhs       = paste(deparse(init_expr, width.cutoff = 500L), collapse = " "),
               syms      = init_syms)))
           }
