@@ -951,6 +951,69 @@ validator.
 **Consequence for 5b.** Both halves of the phase-5 target output are expressible
 today, so nothing here needs a ferx-core change.
 
+#### Phase 5b design notes -- what the plan above gets wrong
+
+Written after reading `.parse_model_exprs()` with 5a landed, before implementing
+5b. Five corrections; the first two change the rule itself, not its wording.
+
+**1. The intermediate rule is a CONJUNCTION, not the backward reachability
+above.** The text says an ODE intermediate is a variable "transitively reachable
+from a `d/dt` RHS or an `init()`". That alone is wrong: a `$PK` assignment is
+routinely reachable from a `d/dt`, and it must stay an individual parameter --
+individual parameters ARE in `[odes]` scope, so nothing is gained by moving it,
+and moving it loses the per-subject evaluation. The real test is
+
+    ODE intermediate  ==  references a state (transitively)
+                          AND is reachable backward from a d/dt RHS or init()
+
+The first half already exists and is computed: it is `aux_vars`, the pass-2
+fixpoint. Only the second half is new. The distinction is exactly what separates
+`FB` (reads `CF`, which reads `CT = A(1)/VC`, which reads a state -> must move)
+from `KSYN = RBASE*KDEG` (reads no state -> stays an individual parameter).
+
+**2. Defect 6 is NOT covered by that rule, in either direction.** `W1 = 0`
+references nothing, so it is not in `aux_vars`; and nothing in `[odes]`
+references it, so it is not backward-reachable either. It reaches
+`[individual_parameters]` through pass 3's DEFAULT -- "everything not in
+`aux_vars` becomes an individual parameter" -- which no reachability rule
+touches. Evicting it needs its own rule, and the narrow one is safest:
+
+    drop an assignment that is referenced by NOTHING emitted
+    AND is referenced by the error/readout expression
+
+That is precisely `W1`/`W2` and does not disturb anything else. The broader
+"drop every unused individual parameter" is tempting and should be resisted in
+this phase: it changes output for models unrelated to this issue, and ferx
+already reports those as `W_UNUSED_PARAM`.
+
+**3. Source order between an intermediate and a `d/dt` line is currently
+UNRECOVERABLE.** `all_assigns` and `odes` are separate lists built in the same
+pass, and neither records position. Since order in `[odes]` is a correctness
+property with a silent failure (5.4), 5b has to add a `pos` counter to both in
+pass 1 and interleave on it. This is the cheapest of the five and the easiest to
+forget, because the emitted file looks right either way until a model puts a
+`$DES` intermediate after a `DADT` line -- `pkpd_ir.mod` already does.
+
+**4. There is no `if` branch in pass 1 to upgrade -- an `if` falls off the end
+of the loop.** The statement matches none of the branches (`cmt`,
+`rxmissingvars`, linCmt tilde, tilde, assignment), so it is discarded with no
+diagnostic. `.flatten_stmts()` DOES walk into `if` bodies but is only called
+from the covariate census, not from the parse. So this is a new branch, not a
+changed one, and defect 8 ("`IF` in `$PK` dropped, zero warnings") is the same
+missing branch seen from `$PK`.
+
+**5. An `if` cannot be half-emitted, so reachability granularity is the whole
+statement.** If any name assigned in EITHER arm is needed, the entire `if` is
+emitted. Treating the arms independently would emit a conditional that assigns a
+name in one branch and not the other, which is a different model. Nested
+assignments therefore have to register their LHS in `name_map` for later
+references to resolve, while the emission decision stays at the `if` level.
+
+**Consequence for sequencing.** None of this changes the phase 5 -> phase 6
+dependency; it sharpens it. The partition in correction 2 is what hands phase 6
+the `W1`/`W2` statements as endpoint-selection input, so phase 6 consumes a
+THIRD bucket that phase 5b must produce -- not merely the two the plan names.
+
 ### Phase 6 -- Error model and readout (defects 5, 10, 11, 12, 15, RC-E)
 
 **6a. Structural classification.** Decompose `Y = ...` into terms and classify
