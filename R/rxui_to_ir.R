@@ -348,10 +348,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         carrier[theta_names[i]] <- lhs[hit[1L]]
         next
       }
-      # Otherwise define a new one. Its name has to dodge everything already
-      # emitted, including the individual parameter that made the reuse invalid.
-      pt <- .free_name(nm, c(lhs, theta_names, reserved_base,
-                             vapply(expr_out$odes, function(o) o$state, "")))
+      # Otherwise define a new one, dodging everything already emitted -- including
+      # the individual parameter that made the reuse invalid.
+      taken <- c(lhs, theta_names, reserved_base,
+                 vapply(expr_out$odes, function(o) o$state, ""))
+      pt    <- .carrier_name(nm, theta_names[i], taken)
       expr_out$indiv_params <- c(expr_out$indiv_params,
                                  list(list(lhs = pt, rhs = theta_names[i])))
       carrier[theta_names[i]] <- pt
@@ -359,6 +360,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         "INFO  | theta '", nm, "' is referenced from an ODE, where ferx cannot ",
         "resolve a theta -- emitting the individual parameter '", pt, " = ",
         theta_names[i], "' to carry its value"))
+      # A numbered name means both preferred spellings were taken. Say so: the
+      # number is positional, so it moves when another carrier appears before this
+      # one, and anything indexing the emitted parameters by name breaks silently.
+      if (grepl("_[0-9]+$", pt) && !grepl("_[0-9]+$", nm))
+        warn <- c(warn, paste0(
+          "WARN  | carrier for theta '", theta_names[i], "' had to be numbered ('",
+          pt, "') because both '", nm, "' and '", theta_names[i], "_ODE' are ",
+          "already in use. That name is positional and will change if another ",
+          "carrier is added before it -- rename the colliding model variable."))
     }
     expr_out$odes <- .scope_odes_to_params(expr_out$odes, carrier)
   }
@@ -430,6 +440,78 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       "individual parameter is dropped from the output rather than emitted."))
     unsp <- c(unsp, paste0("state/individual-parameter name collision: ",
                            paste(state_clash, collapse = ", ")))
+  }
+
+  # Every name the emitted [odes] block references must be declared. This is the
+  # one block where the check is unambiguous, which is why it is scoped to [odes]
+  # and not applied everywhere: thetas and etas are NOT in scope here, so a bare
+  # symbol can only be a state, an individual parameter, an ODE intermediate, a
+  # covariate or a reserved name -- and all of those are known at this point.
+  #
+  # ferx does report this itself (`[odes]: RHS references undefined name(s)`), with
+  # or without a dataset, but only where the engine runs: the fast PR job has no
+  # ferx, and the phase-2 legality check next to this one tests the GRAMMAR, not
+  # whether anything declares the name -- `KTP` is a perfectly legal identifier.
+  # So the class of defect that leaks an undeclared name went unseen by every
+  # engine-free tier. Two separate bugs reached the corpus that way (issue #6
+  # defects 2 and 4).
+  #
+  # It is deliberately NOT extended to [individual_parameters]: thetas ARE in scope
+  # there, so the set of legitimate names is much larger and a leftover carries far
+  # less information. [odes] is where the constraint is tightest, and the set is
+  # closed: ferx accepts declared states, individual parameters, ODE-block
+  # intermediates and the reserved time variables, and NOTHING else. Not thetas,
+  # not etas, not sigmas -- and not covariates either, which is the part that makes
+  # this checkable at all. Measured against ferx 0.3.0, a covariate in an ODE RHS is
+  # rejected with the remedy quoted below; the engine's advice is to pre-compute the
+  # covariate-dependent term in [individual_parameters] and reference that.
+  #
+  # (0.2.0, the CI pin, could not be re-measured -- the local install was replaced
+  # by 0.3.0 -- but no bundled model references a covariate from [odes], so nothing
+  # that translated before is affected either way.)
+  #
+  # Because the set is closed, the covariate list is NOT consulted, and that is
+  # deliberate rather than an omission: `.covariate_names()` defines a covariate as
+  # a symbol nothing else binds, and rxode2's `ui$allCovs` does much the same, so
+  # both classify a name the translator FAILED to bind as a legitimate covariate.
+  # Measured: both call the unbound `CF` in qss_tmdd.mod and the unbound `KTP` in
+  # ode_theta_ref.ctl covariates. An earlier version of this check consulted them,
+  # passed the entire suite, and could not fire on either defect it was written for.
+  if (length(expr_out$odes) > 0) {
+    ode_declared <- toupper(c(
+      vapply(expr_out$odes, function(o) o$state, ""),
+      vapply(expr_out$indiv_params, function(p) p$lhs, ""),
+      names(expr_out$odes_intermediates),   # NULL until phase 5 emits them
+      .RESERVED_ODE_NAMES, .ODE_FUNCTIONS))
+    ode_free <- setdiff(.emitted_ode_symbols(expr_out$odes), ode_declared)
+
+    # Split the report by cause: the remedy differs. A theta, eta or sigma needs a
+    # carrier; anything else is a name that resolves to nothing, which for a
+    # covariate means pre-computing the term one block earlier.
+    scope_leak <- intersect(ode_free, toupper(c(
+      vapply(theta_out$thetas, function(t) t$name, ""), random_names)))
+    unknown    <- setdiff(ode_free, scope_leak)
+
+    if (length(scope_leak) > 0) {
+      warn <- c(warn, paste0(
+        "ERROR | [odes] references ", paste(scope_leak, collapse = ", "),
+        ", which name a theta, eta or sigma. None of the three is in scope in a ",
+        "ferx ODE block -- the value has to be carried in by an individual ",
+        "parameter. ferx rejects this as E_PARSE."))
+      unsp <- c(unsp, paste0("theta/eta/sigma referenced from [odes] without a ",
+                             "carrier: ", paste(scope_leak, collapse = ", ")))
+    }
+    if (length(unknown) > 0) {
+      warn <- c(warn, paste0(
+        "ERROR | [odes] references ", paste(unknown, collapse = ", "),
+        ", which nothing in the emitted model declares. A ferx ODE right-hand side ",
+        "may only name declared states, individual parameters, ODE-block ",
+        "intermediates and TIME/TAFD/TAD/MACHEPS. If one of these is a covariate, ",
+        "the covariate-dependent term has to be pre-computed in ",
+        "[individual_parameters] and referenced from here by that name."))
+      unsp <- c(unsp, paste0("undeclared name referenced from [odes]: ",
+                             paste(unknown, collapse = ", ")))
+    }
   }
 
   # A covariate is the one name we must NOT sanitise: ferx resolves it against a
@@ -575,6 +657,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # individual parameters.
 .PK_CANDIDATES <- c("CL", "V", "V1", "V2", "V3", "Q", "Q2", "Q3", "KA")
 
+# Names an [odes] right-hand side may use without declaring them. The time
+# variables ferx provides, and the call heads and literals that survive in a
+# deparsed expression -- `.emitted_ode_symbols()` collects every symbol including
+# function names, so omitting these would report `exp` as undeclared.
+.RESERVED_ODE_NAMES <- c("TIME", "T", "TAFD", "TAD", "MACHEPS")
+.ODE_FUNCTIONS <- c("EXP", "LOG", "LOG10", "LOG2", "SQRT", "ABS", "MIN", "MAX",
+                    "SIN", "COS", "TAN", "ASIN", "ACOS", "ATAN", "ATAN2", "POW",
+                    "FLOOR", "CEILING", "ROUND", "SIGN", "LOGIT", "EXPIT",
+                    "GAMMLN", "IF", "ELSE", "TRUE", "FALSE")
+
 # Names referenced by the model but never assigned and never declared in iniDf.
 # ferx reads every such name as a covariate (a data column), and resolves theta
 # before covariate -- so a theta renamed onto one shadows it exactly as it would
@@ -719,6 +811,30 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # Pick a free replacement for a shadowed theta.
 .free_theta_name <- function(old, taken) {
   .free_name(old, taken, prefer = c(paste0("TV", old), paste0("THETA_", old)))
+}
+
+# Name the individual parameter that carries a theta's value into [odes].
+#
+# First choice is the name the source used (`KTP`), which is what ferx's own
+# bundled examples do (`KM = TVKM`) and what keeps the emitted [odes] diffable
+# against the source $DES.
+#
+# Second choice suffixes the theta's EMITTED name: `TVCL_ODE = TVCL`. Not the
+# source name -- `CL_ODE` reads as "the CL used in the ODE", which is the
+# individual value, and the entire defect class this carrier exists for is
+# confusing the theta value with the IIV-applied one. The name has to make that
+# distinction loud. It also needs no counter, because theta emitted names are
+# already unique among thetas.
+#
+# `_1` is deliberately NOT the second choice even though `.free_name()` would
+# supply it. That suffix already means "state disambiguated" (`central_1`) and is
+# `.free_theta_name()`'s last resort, so a third meaning on the same spelling
+# leaves a reader unable to tell a renamed compartment from a renamed theta from a
+# carrier. `CL_1` and `V_1` are also plausible model variables in their own right.
+# `base` is the suffixed form, not the source name, so that even the numbered last
+# resort stays recognisable as a carrier: `TVCL_ODE_1`, never `CL_1`.
+.carrier_name <- function(source_name, theta_name, taken) {
+  .free_name(paste0(theta_name, "_ODE"), taken, prefer = source_name)
 }
 
 # Give every theta a name that is unique among thetas and does not shadow a

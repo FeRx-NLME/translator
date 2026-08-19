@@ -346,7 +346,14 @@ test_that("a strict abort leaves no output file behind", {
   # $unsupported (which is the ferx-core feature-gap signal), and the emitter
   # renders every WARN/ERROR into the file's # WARNING: block.
   expect_match(res$ferx_text, "# WARNING: ferx E_PARSE")
-  expect_length(res$unsupported, 0L)
+  # $unsupported does carry one entry, but from the translator's own [odes]
+  # declaredness check rather than from the engine -- the two now agree about
+  # NOSUCHNAME, which is the point of that check: it reaches the same verdict in the
+  # engine-free tier. What must NOT appear is engine text, which would mean an
+  # E_PARSE had been reclassified as a ferx-core feature gap.
+  expect_false(any(grepl("E_PARSE|ferx", res$unsupported)))
+  expect_match(res$unsupported, "undeclared name referenced from \\[odes\\]: NOSUCHNAME",
+               all = FALSE)
 })
 
 # -- behaviours a mutation campaign found unasserted ---------------------------

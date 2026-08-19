@@ -54,6 +54,19 @@
   TVKTP` -- the same carrier, spelled by the model. `inst/testmodels/nonmem/ode_theta_ref.ctl`
   covers the shape that has nothing to convert.
 
+  A carrier is named after the source (`KTP = TVKTP`) where that name is free,
+  which is the form ferx's own examples use and keeps the emitted `[odes]` diffable
+  against the source `$DES`. Where it is taken the name is derived from the theta's
+  *emitted* name instead: `TVCL_ODE = TVCL`. Not `CL_ODE`, which reads as "the CL
+  used in the ODE" -- that is the individual value, and distinguishing it from the
+  theta is the entire point. Not `CL_1` either: `_1` already means "state
+  disambiguated" (`central_1`) and is `.free_theta_name()`'s last resort, so a
+  third meaning on that spelling leaves a reader unable to tell a renamed
+  compartment from a renamed theta from a carrier, and `CL_1`/`V_1` are plausible
+  model variables in their own right. A numbered form is still possible if both
+  spellings are taken, and now warns: the number is positional, so it moves when
+  another carrier is added before it.
+
 * A carrier reuses an existing individual parameter only when that parameter is a
   *pure alias* of the theta. Matching on the name alone gets the arithmetic wrong:
   `frac <- central/cl` in a model that later writes `cl <- cl*exp(eta.cl)` reads
@@ -88,9 +101,42 @@
   Unlike the covariate case noted above, `[odes]` does not need a dataset for the
   engine to object: it reports `[odes]: RHS references undefined name(s)` either
   way, because thetas and etas are out of scope there and a bare name can only be
-  a state, a parameter or a covariate. So `ode_theta_ref.ctl` fails the concordance
-  corpus sweep and aborts `to_ferx(strict = TRUE)` if the carrier regresses -- but
-  only in the `engine` CI job; the engine-free PR job cannot see it.
+  a state, a parameter or a covariate.
+
+* Every name the emitted `[odes]` block references is now checked against what the
+  model declares, and an unresolved one is an `ERROR` with an `$unsupported` entry.
+  ferx does report this itself, but only where the engine runs -- and the
+  identifier-legality check beside this one tests the *grammar*, not whether
+  anything declares the name, so `KTP` passed it. Two defects reached the corpus
+  through that gap (issue #6 defects 2 and 4).
+
+  The check is possible because the set of names a ferx ODE right-hand side may
+  reference is *closed*: declared states, individual parameters, ODE-block
+  intermediates, and `TIME`/`TAFD`/`TAD`/`MACHEPS`. Not thetas, etas or sigmas --
+  and not covariates either. ferx's own message gives the remedy, which this one
+  repeats: pre-compute the covariate-dependent term in `[individual_parameters]`
+  and reference it from the ODE by that name.
+
+  No covariate list is consulted, and that is deliberate rather than an omission.
+  `.covariate_names()` *defines* a covariate as a symbol nothing else binds, and
+  rxode2's `ui$allCovs` does much the same, so both classify a name the translator
+  failed to bind as a legitimate covariate -- measured, both call the unbound `CF`
+  in the QSS TMDD model and the unbound `KTP` in `ode_theta_ref.ctl` covariates.
+  An earlier version of this check consulted them, passed the entire test suite,
+  and could not fire on either defect it was written for.
+
+  Two reports, because the remedies differ: a theta, eta or sigma needs a carrier;
+  anything else resolves to nothing at all. The first makes an eta referenced from
+  an ODE reportable for the first time -- ferx rejects it as `E_PARSE` and it was
+  previously emitted without comment.
+
+  Scoped to `[odes]` on purpose. In `[individual_parameters]` thetas *are* in
+  scope, so the set of legitimate names is far larger and a leftover carries much
+  less information.
+
+  Measured against ferx 0.3.0. 0.2.0 (the CI pin) could not be re-measured because
+  the local install was replaced, but no bundled model references a covariate from
+  `[odes]`, so nothing that translated before is affected either way.
 
 * A theta renamed only because it is ODE-referenced is no longer reported as
   shadowing an individual parameter. At the point of the rename nothing of that

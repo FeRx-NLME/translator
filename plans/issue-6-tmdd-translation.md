@@ -683,8 +683,71 @@ fixture. An undeclared-but-legal identifier passes the phase-2 legality check --
 that check tests the grammar, not whether anything declares the name -- but ferx
 does catch it: `[odes]: RHS references undefined name(s): KTP`, with or without a
 dataset, measured against 0.3.0. So the fixture fails the concordance corpus sweep
-and aborts `to_ferx(strict = TRUE)` if the carrier regresses. The gap is that
-nothing in the engine-free PR job sees it.
+and aborts `to_ferx(strict = TRUE)` if the carrier regresses.
+
+**Carrier naming.** Source name where free (`KTP = TVKTP`) -- ferx's own examples
+do this and it keeps the emitted `[odes]` diffable against `$DES`. Where taken,
+derived from the theta's *emitted* name: `TVCL_ODE = TVCL`. Not `CL_ODE`, which
+reads as the individual value; not `CL_1`, because `_1` already means "state
+disambiguated" and is `.free_theta_name()`'s last resort, and `CL_1`/`V_1` are
+plausible model variables. The numbered last resort is `TVCL_ODE_1` and warns,
+because the number is positional. Measured: ferx accepts all of these, including a
+leading underscore, so this is a readability decision, not a grammar constraint.
+
+Phase 4 caveat: `init()` needs carriers too and lives inside `[odes]`, so `_ODE`
+stays accurate there. A pk macro argument does not -- if phase 4 needs a fallback
+name on that path, either pick a block-neutral suffix then or accept two.
+
+#### The declaredness check, and the premise that was wrong
+
+Added in this phase: every name the emitted `[odes]` block references must resolve,
+or it is an `ERROR` with an `$unsupported` entry.
+
+Two wrong premises died here, in order, and both are worth recording because each
+one produced a check that looked finished.
+
+**First: checking against the covariate set is circular.** The plan said "`[odes]`
+is the unambiguous block, so check it against states, individual parameters and
+covariates". But **the covariate set is defined as the symbols nothing else
+binds**. `.covariate_names()` and rxode2's `ui$allCovs` both classify a name the
+translator failed to bind as a legitimate covariate -- measured, both call the
+unbound `CF` in `qss_tmdd.mod` and the unbound `KTP` in `ode_theta_ref.ctl`
+covariates. That version passed the entire test suite and could not fire on either
+defect it was written for.
+
+**Second: the fix for that was also wrong.** The conclusion drawn was "the
+authority must come from outside the translator", and NONMEM `$INPUT` was parsed
+(`.extract_nm_input()`) to supply it, with a `WARN`-level degradation for sources
+that have no column list. Then the engine rejected the fixture:
+
+> `[odes]: RHS references undefined name(s): WT. An ODE RHS may only reference
+> declared states, individual parameters, ODE-block intermediates, or the reserved
+> TIME/TAFD/TAD/MACHEPS variables. If one of these is a covariate, pre-compute the
+> covariate-dependent term in [individual_parameters] and reference that variable
+> here instead.`
+
+**A covariate is not in scope in `[odes]` either.** The set is closed, so there is
+no ambiguous case, no column list is needed, every leftover is an ERROR regardless
+of source format, and `.extract_nm_input()` was deleted unused. The earlier scope
+probe measured thetas, etas, sigmas and TIME and never measured a covariate --
+it tested the cases that were expected to matter.
+
+Two reports, because the remedies differ: a theta/eta/sigma needs a carrier,
+anything else needs the term pre-computed one block earlier. The first is what
+makes an eta-in-ODE reportable for the first time.
+
+Corpus false-positive rate is zero. Measured on ferx 0.3.0; 0.2.0 could not be
+re-measured (local install replaced), but no bundled model references a covariate
+from `[odes]`, so nothing that translated before changes either way.
+
+For phase 5 and beyond: extending this to `[individual_parameters]` is a much
+weaker check (thetas ARE in scope, so the legitimate set is far larger) and needs
+the same column list plus per-block scope tables. It should follow phase 5, not
+precede it, because phase 5 stops inlining and emits ODE intermediates -- which
+changes the `[odes]` declared set (see `odes_intermediates`, already read here and
+NULL until then) and makes statement order significant. Also relevant to phase 5:
+ferx emits `computed but never used` for a dead individual parameter, which is the
+diagnostic its "drop dead intermediates" requirement needs.
 
 Still open, found while doing this and out of scope here: `obs_cmt` is not
 inferred from `$MODEL COMP=(X, DEFOBS)` (the guess happens to be right in the

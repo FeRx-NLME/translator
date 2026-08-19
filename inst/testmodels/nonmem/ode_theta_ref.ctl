@@ -14,6 +14,13 @@ $PROBLEM $DES names a THETA directly, with no $PK assignment to carry it
 ;
 ; KSS is the negative case and must be left alone: it is read from $PK, which
 ; becomes [individual_parameters], where a theta IS in scope.
+;
+; A covariate reference in $DES was tried here as a false-positive guard for the
+; declaredness check and removed again: ferx does not allow one. "An ODE RHS may
+; only reference declared states, individual parameters, ODE-block intermediates,
+; or the reserved TIME/TAFD/TAD/MACHEPS variables ... pre-compute the
+; covariate-dependent term in [individual_parameters]". So the closed set is the
+; whole story in [odes], and there is no ambiguous case to guard against here.
 $INPUT ID TIME AMT DV MDV
 $DATA ode_theta_ref.csv IGNORE=@
 $SUBROUTINES ADVAN13 TOL=9

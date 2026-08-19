@@ -722,10 +722,43 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
   # (issue #6 defect 2), so the emitted reference used to be unresolvable. What
   # this test exists to pin is unchanged -- the term must not read the individual
   # parameter CL, whose value has the IIV applied. Asserted on the whole string
-  # because "central/CL" is a substring of the correct "central/CL_1".
-  expect_equal(rhs, "KA * depot - CL/V * central - central/CL_1")
+  # because "central/CL" is a substring of the correct "central/TVCL_ODE".
+  #
+  # The carrier is named off the THETA (`TVCL_ODE`), not the source name: `CL_ODE`
+  # would read as "the CL used in the ODE", which is the individual value, and
+  # telling those two apart is the whole point.
+  expect_equal(rhs, "KA * depot - CL/V * central - central/TVCL_ODE")
   ip <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
-  expect_true("CL_1=TVCL" %in% ip)
+  expect_true("TVCL_ODE=TVCL" %in% ip)
+  # No numbered fallback was needed, so no warning about one.
+  expect_false(any(grepl("had to be numbered", ir$warnings)))
+})
+
+test_that("a carrier falls back to a numbered name loudly, never silently", {
+  # Both preferred spellings taken: `CL` is a real individual parameter and
+  # `TVCL_ODE` is a model variable in its own right. The numbered name is
+  # positional -- it moves if another carrier is added before it -- so anything
+  # indexing the emitted parameters by name breaks silently unless this is said
+  # out loud.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ frac <- central/cl
+            TVCL_ODE <- v * 2
+            cl <- cl*exp(eta.cl); v <- v; ka <- ka
+            d/dt(depot)   = -ka*depot
+            d/dt(central) =  ka*depot - cl/v*central - frac + 0*TVCL_ODE
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("TVCL_ODE" %in% lhs)          # the model's own variable survives
+  # Numbered off the SUFFIXED form, so the last resort is still recognisable as a
+  # carrier. Numbering the source name would give `CL_1`, which is the spelling
+  # this naming scheme exists to avoid.
+  expect_true(any(grepl("^TVCL_ODE_[0-9]+$", lhs)))
+  expect_match(ir$warnings, "had to be numbered", all = FALSE)
 })
 
 test_that("a self-reference to a plain local resolves to the emitted name", {
@@ -1338,4 +1371,92 @@ test_that("an intermediate that survives as a parameter carries the theta", {
               vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
   # KTP is read from [individual_parameters] only, so it keeps its name.
   expect_true("KTP" %in% vapply(ir$thetas, function(t) t$name, ""))
+})
+
+
+# -- [odes] declaredness ------------------------------------------------------
+#
+# Every name the emitted [odes] block references must resolve. ferx reports this
+# itself, but only where the engine runs -- and the phase-2 legality check beside
+# it tests the GRAMMAR, not whether anything declares the name, so `KTP` passes it.
+# Two defects reached the corpus through that gap (issue #6 defects 2 and 4).
+#
+# The set of names a ferx ODE RHS may reference is CLOSED: declared states,
+# individual parameters, ODE-block intermediates and the reserved time variables.
+# Not thetas, etas or sigmas -- and not covariates either, which is what makes the
+# check possible without consulting a covariate list. That matters, because
+# `.covariate_names()` defines a covariate as a symbol nothing binds and rxode2's
+# `ui$allCovs` does much the same, so checking against either whitelists exactly the
+# names worth reporting. An earlier version did, passed the whole suite, and could
+# not fire.
+
+test_that("an eta referenced from an ODE is reported as untranslatable", {
+  # Not just a check test -- this is a real gap. An eta is out of scope in [odes]
+  # (measured on ferx 0.2.0 and 0.3.0, same as thetas and sigmas), so ferx rejects
+  # it as E_PARSE, and we used to emit it without comment. There is no carrier for
+  # it either: an eta cannot be read from [individual_parameters] into an ODE
+  # without restructuring the model, so this is reported rather than fixed.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ k <- cl/v
+            d/dt(central) = -k*central*exp(eta.cl)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references ETA_CL", all = FALSE)
+  expect_match(ir$unsupported, "theta/eta/sigma referenced from \\[odes\\]", all = FALSE)
+})
+
+test_that("a covariate referenced from an ODE is reported, not assumed valid", {
+  # This started out as the opposite test -- a covariate in [odes] was assumed
+  # legitimate and only warned about when no data-column list was available to
+  # confirm it. ferx does not allow one at all: "An ODE RHS may only reference
+  # declared states, individual parameters, ODE-block intermediates, or the reserved
+  # TIME/TAFD/TAD/MACHEPS variables ... pre-compute the covariate-dependent term in
+  # [individual_parameters]". So the set is closed, every leftover is an error, and
+  # no column list is needed to decide.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*(WT/70)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references WT", all = FALSE)
+  # The message has to carry the remedy: the term is expressible, just one block
+  # earlier, and a user told only "undeclared" would not know that.
+  expect_match(ir$warnings, "pre-computed in \\[individual_parameters\\]", all = FALSE)
+  expect_match(ir$unsupported, "undeclared name referenced from \\[odes\\]", all = FALSE)
+})
+
+test_that("TIME and the reserved ODE variables are not reported", {
+  # The closed set includes ferx's own time variables. Omitting them would make the
+  # check fire on any model with a time-dependent rate -- the kind of false positive
+  # that gets a check deleted rather than fixed.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*exp(-TIME/24)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("a carrier leaves the [odes] block fully declared", {
+  # The positive control for the check: the model that needs a carrier must come
+  # out clean, or the check and the fix disagree and one of them is wrong.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
 })
