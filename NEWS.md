@@ -38,6 +38,15 @@
 
 ## Bug fixes
 
+* **A bundled model's fitted behaviour changes.** `pkpd_ir.mod` sets
+  `A_0(4)=BL`, initialising the effect compartment to baseline. That statement
+  was being discarded without a diagnostic, so the translated model started the
+  compartment at 0 instead of `BL` and fitted different numbers from the source
+  model. The emitted `.ferx` was valid either way and no test was looking for
+  it, so nothing surfaced it. It now emits `init(EFFECT) = BL`. If you have
+  fitted a translated indirect-response model with a non-zero baseline, the
+  results change -- for the better, but they change.
+
 * The observed compartment is decided by the DV expression first, `$MODEL`'s
   `DEFOBS` second, and a positional guess only as a last resort. `DEFOBS` is
   NONMEM's default for data records with no `CMT`; it says nothing about what
