@@ -3,6 +3,7 @@
 ^CLAUDE\.md$
 ^\.github$
 ^\.git$
+^\.claude$
 ^.*\.Rproj$
 ^\.Rproj\.user$
 ^LICENSE\.md$
