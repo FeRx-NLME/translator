@@ -70,17 +70,23 @@ is `/Library/Frameworks/R.framework/...`, shared by every session. Two concurren
 installs of `ferx` or a shared dependency clobber each other, and the symptom
 (the previous paragraph) does not look like a collision.
 
-**Every push starts another ~19 minute engine build, and nothing cancels the
-superseded ones.** Four concurrent runs piled up on one branch here in fifteen
-minutes; three were testing commits already moved past. Batch your pushes, and if
-you want a specific commit's engine result before merging, let that run finish
-rather than pushing on top of it.
+**Pushing to a branch cancels that branch's in-flight CI run.** `check.yml` has a
+`concurrency:` block keyed on `github.ref`, so a rapid series of pushes leaves only
+the last commit tested. That is deliberate - four concurrent runs once piled up on
+one branch here in fifteen minutes, three of them testing commits already moved
+past - but it means that if you want a specific commit's engine result before
+merging, you have to let that run finish rather than pushing on top of it.
 
-A `concurrency:` block that cancels superseded runs per `github.ref` is proposed
-in PR #12 and is NOT on `main` as of this writing - check `.github/workflows/check.yml`
-before relying on either behaviour. Note that it deliberately does not cancel runs
-on `main`: with no required status checks, a `main` commit's engine run is the only
-thing verifying what actually landed, so those must always complete.
+Runs on `main` are never cancelled:
+
+```yaml
+cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+```
+
+With no required status checks, a `main` commit's engine run is the only thing
+verifying what actually landed, so those must always complete. A superseded branch
+run is merely wasted; a cancelled `main` run leaves a commit permanently
+unverified on the one branch where that matters.
 
 ## Known gotchas
 
