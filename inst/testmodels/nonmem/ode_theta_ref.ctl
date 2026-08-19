@@ -25,6 +25,13 @@ $INPUT ID TIME AMT DV MDV
 $DATA ode_theta_ref.csv IGNORE=@
 $SUBROUTINES ADVAN13 TOL=9
 $MODEL
+; DO NOT REORDER these two lines. The translator never reads DEFOBS -- obs_cmt
+; falls back to tail(states) -- so PERIPH is picked because it is declared LAST,
+; not because it is marked DEFOBS. The guess is right and the emitted model is
+; correct, but swapping the order would silently change which compartment is
+; observed and this fixture would go on passing while testing a different model.
+; When obs_cmt learns to read DEFOBS this becomes a free regression test: same
+; output, minus the "could not be inferred" warning.
   COMP=(CENT, DEFDOSE)
   COMP=(PERIPH, DEFOBS)
 $PK
