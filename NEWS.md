@@ -168,15 +168,50 @@
   dataset column has to be renamed. A regression test pins the existing
   case-preserving behaviour, which nothing previously covered.
 
-* The ODE state rename is resolved through a dedicated state map rather than the
-  general name map. The name map holds every parameter alias and grows as the
-  model block is walked, which made the emitted state name something nobody
-  decided: a state was renamed to a *parameter's* name whenever its raw spelling
-  happened to be an `iniDf` key (`d/dt(CENT)` became `d/dt(VC)`), and an
-  unrelated assignment written above rather than below a `d/dt` line changed
-  whether the state was renamed at all. `obs_cmt` is resolved the same way; it
-  previously read a different map from the `d/dt` target, so the two could
-  disagree and emit an `obs_cmt` naming no declared state.
+* Every ODE state -- renamed or not -- is pinned on the maps the model block is
+  parsed with, so neither an `iniDf` key that happens to share a state's name nor
+  an assignment walked earlier can rebind one. The general name map holds every
+  parameter alias and grows as the walk proceeds, which made the emitted state
+  name something nobody decided, on the declaration *and* on every reference:
+  `d/dt(CENT) = -K * VC` when a theta keyed `CENT` was labelled `VC` -- the
+  compartment amount replaced by a fixed theta, with no diagnostic and a file the
+  engine accepts -- and an ODE whose right-hand side changed depending on whether
+  `central <- 0` stood above or below the `d/dt` line. `obs_cmt` is resolved the
+  same way; it previously read a different map from the `d/dt` target, so the two
+  could disagree and emit an `obs_cmt` naming no declared state.
+
+* A state whose source name is also a model parameter's is now resolved by
+  scope -- the state inside `[odes]`, where thetas and etas are out of scope in
+  ferx too, and the parameter everywhere else -- and reported as an `ERROR`,
+  because the source cannot say which reading it meant. It was previously
+  refused outright, which left the state sharing a name with the parameter: the
+  assignment referencing it was absorbed as an ODE intermediate, dropped from
+  `[individual_parameters]` (leaving the block empty), and self-inlined to the
+  depth cap, emitting the same `exp(ETA_X)` factor fifteen times.
+
+* A symbol referenced *before* its defining assignment is now emitted under the
+  same name as one referenced after it. The alias was installed only once the
+  walk had passed the assignment, so `d/dt(central) = -cl*central*f.rac` written
+  above `f.rac <- 0.5` emitted the illegal `f.rac` verbatim beside a declared
+  `F_RAC` -- two spellings of one variable, an unparseable file, and no warning,
+  since the legality check treats every assignment target as legal by
+  construction regardless of position. Dotted local names are idiomatic nlmixr2.
+
+* A theta named after a ferx solver builtin (`TIME`, `T`, `TAFD`, `TAD`,
+  `MACHEPS`) is renamed, and an individual parameter with such a name is
+  reported. ferx-core checks its reserved list against states, individual
+  parameters and ODE intermediates alike; only states were covered. The theta
+  half was silent rather than loud: ferx resolves the bare name to the value the
+  solver injects, so `KA = TIME * exp(ETA1)` made `KA` read the integrator clock
+  and left the estimated theta unreferenced, reported only as a
+  `W_UNUSED_PARAM`.
+
+* A NONMEM sigma whose source name needs sanitising still reaches
+  `[error_model]`. `nonmem2rx` keeps sigma out of `iniDf`, so nothing bound its
+  source spelling to its emitted name and the two agreed only while both were
+  plain uppercase; once the declaration was sanitised, the error assignment
+  matched no sigma and the block was omitted entirely -- a model with no residual
+  error, and an `ERROR` misreporting the sigma as an illegal covariate.
 
 * The state sanitiser reserves every assignment target, covariate and reserved
   ODE name, not just the random-effect names. A sanitised state landing on an
