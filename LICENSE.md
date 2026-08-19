@@ -1,6 +1,6 @@
 # MIT License
 
-Copyright (c) 2026 Teun Post
+Copyright (c) 2026 the FeRx core developer team
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

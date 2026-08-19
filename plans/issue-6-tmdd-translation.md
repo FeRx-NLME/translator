@@ -629,7 +629,7 @@ matters. Sending states through `.norm()` rather than `.ferx_ident()` would
 uppercase `depot`/`central` in every ODE model in the corpus -- names users read
 and index by -- for no gain.
 
-### Phase 3 -- Theta pass-through, generalised (defect 2)
+### Phase 3 -- Theta pass-through, generalised (defect 2) -- DONE
 
 - Replace the `pk_candidates` name whitelist (`rxui_to_ir.R:103`), which covers
   only `linCmt` models and only hardcoded PK names, with a general rule: collect
@@ -639,7 +639,138 @@ and index by -- for no gain.
 - With phase 0 in place the pass-through reads `CL = TVCL`, not `CL = CL`.
 - Required before phase 4: `init()` rejects a bare theta.
 
+#### Phase 3 design notes -- what the plan got wrong
+
+**`[scaling]` does not need pass-throughs.** The bullet above lists it alongside
+`[odes]`; section 5.4 says the opposite, and 5.4 is right. Measured against both
+ferx 0.2.0 and 0.3.0, a theta is readable from `[individual_parameters]`, from
+`[scaling] y` and from `obs_scale`; it is NOT readable from a `d/dt` right-hand
+side, an ODE-block intermediate, an `init()` expression, or a pk macro argument.
+Only the second group gets a carrier. Treating `[scaling]` as out of scope would
+rename thetas and add parameters for references that were already correct.
+
+**The whitelist was not replaced.** `.PK_CANDIDATES` still drives the linCmt
+pass-through and should stay: those models have no `[odes]` block for the general
+rule to read, and the two mechanisms answer different questions -- "which pk macro
+arg is missing" versus "which emitted ODE symbol resolves to nothing".
+
+**Discovery cannot key on the theta's source name.** In any de-shadowed model the
+source name IS the individual parameter's name, so `d/dt(ABS) = -KA * ABS` beside
+`theta TVKA` and `KA = TVKA * exp(ETA_KA)` reads the parameter. Matching `KA`
+invented a second carrier for a correct reference and moved a bundled snapshot.
+The rule that works is: the theta's *current emitted* name appears in the emitted
+ODE text, OR its source name appears and nothing else declares that symbol. It
+must be recomputed each round of the de-shadow fixpoint, not accumulated -- a
+theta matches on its source name only until the rename lands.
+
+**A carrier may reuse an existing parameter only if that parameter is a pure
+alias of the theta.** `frac <- central/cl` above `cl <- cl*exp(eta.cl)` reads the
+theta; pointing it at `CL` substitutes the IIV-applied value. Both forms parse and
+both fit, so nothing catches it. Such a reference gets its own carrier.
+
+**The scope has to be applied to the emitted text, not during the walk.** An
+ODE-block intermediate that touches a state is inlined, and the inlined text was
+normalised for a different context -- `ki <- KTP*CENT` arrived as `TVKTP * CENT`.
+Resolving only the `d/dt` line also made the output depend on statement order.
+This is the same defect as the phase-2 state map, one layer further in.
+
+**nonmem2rx does not bind a theta referenced by its `$THETA` label.** `FLUX =
+KTP*A(1)` for `(0,0.2) ; KTP` leaves a free `KTP` in `lstExpr` and records the
+theta in `rxmissingvars1 <- t.KTP`. We were emitting that placeholder as
+`RXMISSINGVARS1 = TVKTP` while the reference stayed dangling. Placeholders are now
+dropped and the reference bound. `inst/testmodels/nonmem/ode_theta_ref.ctl` is the
+fixture. An undeclared-but-legal identifier passes the phase-2 legality check --
+that check tests the grammar, not whether anything declares the name -- but ferx
+does catch it: `[odes]: RHS references undefined name(s): KTP`, with or without a
+dataset, measured against 0.3.0. So the fixture fails the concordance corpus sweep
+and aborts `to_ferx(strict = TRUE)` if the carrier regresses.
+
+**Carrier naming.** Source name where free (`KTP = TVKTP`) -- ferx's own examples
+do this and it keeps the emitted `[odes]` diffable against `$DES`. Where taken,
+derived from the theta's *emitted* name: `TVCL_ODE = TVCL`. Not `CL_ODE`, which
+reads as the individual value; not `CL_1`, because `_1` already means "state
+disambiguated" and is `.free_theta_name()`'s last resort, and `CL_1`/`V_1` are
+plausible model variables. The numbered last resort is `TVCL_ODE_1` and warns,
+because the number is positional. Measured: ferx accepts all of these, including a
+leading underscore, so this is a readability decision, not a grammar constraint.
+
+Phase 4 caveat: `init()` needs carriers too and lives inside `[odes]`, so `_ODE`
+stays accurate there. A pk macro argument does not -- if phase 4 needs a fallback
+name on that path, either pick a block-neutral suffix then or accept two.
+
+#### The declaredness check, and the premise that was wrong
+
+Added in this phase: every name the emitted `[odes]` block references must resolve,
+or it is an `ERROR` with an `$unsupported` entry.
+
+Two wrong premises died here, in order, and both are worth recording because each
+one produced a check that looked finished.
+
+**First: checking against the covariate set is circular.** The plan said "`[odes]`
+is the unambiguous block, so check it against states, individual parameters and
+covariates". But **the covariate set is defined as the symbols nothing else
+binds**. `.covariate_names()` and rxode2's `ui$allCovs` both classify a name the
+translator failed to bind as a legitimate covariate -- measured, both call the
+unbound `CF` in `qss_tmdd.mod` and the unbound `KTP` in `ode_theta_ref.ctl`
+covariates. That version passed the entire test suite and could not fire on either
+defect it was written for.
+
+**Second: the fix for that was also wrong.** The conclusion drawn was "the
+authority must come from outside the translator", and NONMEM `$INPUT` was parsed
+(`.extract_nm_input()`) to supply it, with a `WARN`-level degradation for sources
+that have no column list. Then the engine rejected the fixture:
+
+> `[odes]: RHS references undefined name(s): WT. An ODE RHS may only reference
+> declared states, individual parameters, ODE-block intermediates, or the reserved
+> TIME/TAFD/TAD/MACHEPS variables. If one of these is a covariate, pre-compute the
+> covariate-dependent term in [individual_parameters] and reference that variable
+> here instead.`
+
+**A covariate is not in scope in `[odes]` either.** The set is closed, so there is
+no ambiguous case, no column list is needed, every leftover is an ERROR regardless
+of source format, and `.extract_nm_input()` was deleted unused. The earlier scope
+probe measured thetas, etas, sigmas and TIME and never measured a covariate --
+it tested the cases that were expected to matter.
+
+Two reports, because the remedies differ: a theta/eta/sigma needs a carrier,
+anything else needs the term pre-computed one block earlier. The first is what
+makes an eta-in-ODE reportable for the first time.
+
+Corpus false-positive rate is zero. Measured on ferx 0.3.0 (ferx-r tag `v0.3.0`),
+the version shipped to users; no bundled model references a covariate from
+`[odes]`, so nothing that translated before changes either way.
+
+Worth acting on separately: the `engine` CI job still pins `ferx-r@731adc9` =
+0.2.0, so it validates the translator against a build no user runs. The full suite
+passes against `v0.3.0` unchanged (`FAIL 0 | PASS 518`, engine tier included),
+which suggests the bump needs no re-baselining of the concordance references or the
+`inst/testdata/` datasets -- CLAUDE.md warns that both are tied to the pin, so that
+should be confirmed rather than assumed, and CLAUDE.md updated in the same commit.
+
+For phase 5 and beyond: extending this to `[individual_parameters]` is a much
+weaker check (thetas ARE in scope, so the legitimate set is far larger) and needs
+the same column list plus per-block scope tables. It should follow phase 5, not
+precede it, because phase 5 stops inlining and emits ODE intermediates -- which
+changes the `[odes]` declared set (see `odes_intermediates`, already read here and
+NULL until then) and makes statement order significant. Also relevant to phase 5:
+ferx emits `computed but never used` for a dead individual parameter, which is the
+diagnostic its "drop dead intermediates" requirement needs.
+
+Still open, found while doing this and out of scope here: `obs_cmt` is not
+inferred from `$MODEL COMP=(X, DEFOBS)` (the guess happens to be right in the
+fixture), and an inline scaling division in `$ERROR` (`Y = A(2)/V*(1+EPS(1))`) is
+dropped silently -- only `S1`/`S2` assignments are picked up.
+
 ### Phase 4 -- Non-symbol assignment targets (defects 3, 9, RC-C)
+
+**Branch phase 4 off `main` after phase 3 lands, NOT off the phase 3 branch.**
+Phase 3 is expected to be squash-merged, which is safe only while nothing stacks
+on it. Branching phase 4 off it recreates exactly the trap phase 2 hit: the parent
+PR's commits never become ancestors of `main`, `merge-base` stays behind, and the
+child PR's diff re-shows the parent's work as new (measured on that pair: 12 files
+/ 3353 lines instead of 6 / 1158). Phase 4 also modifies functions phase 3
+introduces (`.emitted_ode_symbols()`, `.scope_odes_to_params()`, the `[odes]`
+declaredness check), so the conflict would be semantic as well as textual.
 
 Replace the silent `next` at `rxui_to_ir.R:432` with explicit dispatch:
 
@@ -658,6 +789,88 @@ Also fix `.infer_pk_macro()` so `nonmem2rx`'s `rxf.depot.` / `rxalag.depot.`
 resolve -- match on the `RXF_` / `RXALAG_` prefix rather than a fixed name list.
 
 Regression target: `pkpd_ir.mod` must emit `init(EFFECT) = BL`. Verified valid.
+
+#### Phase 4 measurement pass (done before implementation)
+
+Measured against ferx 0.3.0 and nonmem2rx, because the phase 3 text was wrong
+about `[scaling]` and the phase 3 implementation was then wrong twice about what
+`[odes]` accepts. Nothing below is inferred from the plan or from ferx-core source
+alone.
+
+**The two init paths have DIFFERENT scope.** The table above treats them as
+interchangeable ("in `[odes]`, or `[initial_conditions]` for a pk macro"). They are
+not, and the difference decides whether phase 3's carrier machinery is needed:
+
+| reference | `init()` in `[odes]` | `[initial_conditions]` (pk macro) |
+|---|---|---|
+| constant | yes | yes |
+| individual parameter | yes | yes |
+| expression of individual parameters | yes | yes |
+| another state | yes | n/a |
+| `TIME` | yes | not measured |
+| **theta** | **no** | **yes** |
+| **eta** | **no** | **yes** |
+| **covariate** | **no** | **yes** (re-checked with the column present in data) |
+
+So `init()` in `[odes]` has exactly the closed set of a `d/dt` right-hand side, and
+the phase 3 carrier + declaredness machinery extends to it with **no rule change**
+-- `.emitted_ode_symbols()`, `.scope_odes_to_params()` and the `[odes]` check just
+need init expressions folded in, which the code comment there already anticipates.
+`[initial_conditions]` needs none of it.
+
+The covariate row was taken twice on purpose: without a dataset an unknown name is
+read as a covariate and reported valid, so the first reading proved nothing. With
+the column present in the data, `[initial_conditions] init(central) = WT` is
+genuinely accepted and `[odes] init(CENT) = WT` is genuinely rejected.
+
+**`[initial_conditions]` compartment names are not the model's state names.** It
+takes `central`, `depot` (oral models only) or a 1-based number; `init(CENT)` is
+rejected with "unknown compartment". The translator has to map, not pass through.
+
+**pk macro parameter names**, from the engine's own error text:
+`cl, v/v1, q/q2, v2, ka, f, q3, v3, lagtime/alag`. So `alag=` and `lagtime=` are
+aliases -- the plan's `alag=` is valid, and the bundled ferx examples use
+`lagtime=`. `dur=` and `rate=` are genuinely absent, as the plan says. `f=` also
+scales IV bolus/infusion doses (ferx-core #327), so it is not oral-only.
+
+**A pk macro argument must be a single declared individual parameter.** `f=TVB` (a
+theta) and `f=BL*2` (an expression) are both rejected. The plan does not mention
+this: it makes phase 3's carriers a prerequisite on the pk path too, not only for
+`[odes]`.
+
+**nonmem2rx always emits these as a PAIR** -- a helper assignment with a dotted
+name, plus the non-symbol-LHS statement that reads it:
+
+```
+A_0(4)=BL     ->  rxini.rxddta4. <- bl        +  EFFECT(0) <- rxini.rxddta4.
+F1 = THETA(3) ->  rxf.central.   <- theta3    +  f(central) <- rxf.central.
+ALAG1 = ...   ->  rxalag.central. <- theta4   +  alag(central) <- rxalag.central.
+D1 = ...      ->  rxdur.central.  <- theta5   +  dur(central)  <- rxdur.central.
+R1 = ...      ->  rxrate.central. <- theta6   +  rate(central) <- rxrate.central.
+```
+
+The regression target is reachable, but not directly: `EFFECT(0)` reads
+`rxini.rxddta4.`, not `BL`, so emitting `init(EFFECT) = BL` means resolving that
+alias chain. The plan says "Verified valid" without mentioning it. The dotted
+helper names are a third instance of the `rxmissingvars` shape already handled in
+phase 3 -- they normalise to `RXINI_RXDDTA4_`, `RXF_CENTRAL_` and so on, and must
+be consumed rather than emitted.
+
+**What ships today, both silently.** Confirmed by translating:
+
+- `pkpd_ir.mod`: no `init(...)` at all, so the effect compartment starts at 0
+  instead of `BL`. `$unsupported` is EMPTY. (The consequence for the fit was not
+  measured -- what is measured is that the initial condition is absent from the
+  emitted model and nothing reports it.)
+- A model with `F1`/`ALAG1`/`D1`/`R1`: the pk macro emits `one_cpt_iv(cl=CL, v=V)`
+  with no `f=` and no `lagtime=` **although ferx supports both**;
+  `RXALAG_CENTRAL_`, `RXDUR_CENTRAL_` and `RXRATE_CENTRAL_` are emitted as
+  meaningless individual parameters; `RXF_CENTRAL_` disappears entirely.
+  `$unsupported` is EMPTY.
+
+Note that phase 3's `[odes]` declaredness check does **not** catch either of these.
+It reports dangling references; these are silent *omissions*, which leave nothing
+dangling. Only the loud default arm catches them, which is the point of this phase.
 
 ### Phase 5 -- Ordered statements and `if` support (defects 4, 6, 8, 13, RC-A)
 

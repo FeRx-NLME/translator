@@ -88,6 +88,34 @@ verifying what actually landed, so those must always complete. A superseded bran
 run is merely wasted; a cancelled `main` run leaves a commit permanently
 unverified on the one branch where that matters.
 
+What that rule protects is the RESULT, not the run. If the `engine` job on a
+`main` run has already completed successfully and only `fast` is wedged, the
+verification is banked and cancelling the run throws nothing away -- do it, and
+free the runner. `fast` duplicates a check you can run locally; `engine` does not,
+which is the whole reason main runs are exempt from cancellation. Read
+`cancel-in-progress` as "never lose a main commit's engine result", not as "never
+touch a main run": the second reading makes you hesitate at exactly the moment
+cancelling is correct. This is not hypothetical -- a wedged `fast` sat on a main
+run for 111 minutes whose `engine` had passed in five.
+
+**A hung CI job looks identical to a slow one in `gh pr checks`.** It prints
+`pending` and nothing else, which is worth an hour if you let it be. The
+step-level view is the one that answers the question:
+
+```bash
+gh api repos/FeRx-NLME/translator/actions/runs/<run-id>/jobs \
+  --jq '.jobs[] | "== \(.name) \(.status)", (.steps[] | "   \(.name): \(.status) \(.started_at) -> \(.completed_at // "-")")'
+```
+
+The two jobs are each other's control: they run the same `setup-r-dependencies@v2`
+against different package sets, so a step that takes 63 seconds in one and 65
+minutes in the other is hung, not slow. Observed on both jobs, on the same commit,
+with the same YAML -- so it is not specific to either dependency set, and a
+dependency that succeeds in eight minutes on one run and hangs for fifty-three on
+the next is not the cause. The remedy is a re-run, not a workflow change: cancel,
+`gh run rerun <run-id>`, and the same step completes in about a minute. Suspect a
+transient in the action before you suspect the diff.
+
 ## Known gotchas
 
 **A theta that shares a name with an individual parameter shadows it** - ferx

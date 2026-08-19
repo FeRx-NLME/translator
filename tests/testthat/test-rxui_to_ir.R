@@ -837,8 +837,49 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
   }
   ir  <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
   rhs <- vapply(ir$odes, function(o) o$rhs, "")[2]
-  expect_match(rhs, "central/TVCL", fixed = TRUE)
-  expect_false(grepl("central/CL", rhs, fixed = TRUE))
+
+  # `frac` must carry the THETA's value, and it does so through a carrier
+  # parameter rather than by naming the theta: a theta is not in scope in [odes]
+  # (issue #6 defect 2), so the emitted reference used to be unresolvable. What
+  # this test exists to pin is unchanged -- the term must not read the individual
+  # parameter CL, whose value has the IIV applied. Asserted on the whole string
+  # because "central/CL" is a substring of the correct "central/TVCL_ODE".
+  #
+  # The carrier is named off the THETA (`TVCL_ODE`), not the source name: `CL_ODE`
+  # would read as "the CL used in the ODE", which is the individual value, and
+  # telling those two apart is the whole point.
+  expect_equal(rhs, "KA * depot - CL/V * central - central/TVCL_ODE")
+  ip <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
+  expect_true("TVCL_ODE=TVCL" %in% ip)
+  # No numbered fallback was needed, so no warning about one.
+  expect_false(any(grepl("had to be numbered", ir$warnings)))
+})
+
+test_that("a carrier falls back to a numbered name loudly, never silently", {
+  # Both preferred spellings taken: `CL` is a real individual parameter and
+  # `TVCL_ODE` is a model variable in its own right. The numbered name is
+  # positional -- it moves if another carrier is added before it -- so anything
+  # indexing the emitted parameters by name breaks silently unless this is said
+  # out loud.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ frac <- central/cl
+            TVCL_ODE <- v * 2
+            cl <- cl*exp(eta.cl); v <- v; ka <- ka
+            d/dt(depot)   = -ka*depot
+            d/dt(central) =  ka*depot - cl/v*central - frac + 0*TVCL_ODE
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("TVCL_ODE" %in% lhs)          # the model's own variable survives
+  # Numbered off the SUFFIXED form, so the last resort is still recognisable as a
+  # carrier. Numbering the source name would give `CL_1`, which is the spelling
+  # this naming scheme exists to avoid.
+  expect_true(any(grepl("^TVCL_ODE_[0-9]+$", lhs)))
+  expect_match(ir$warnings, "had to be numbered", all = FALSE)
 })
 
 test_that("a self-reference to a plain local resolves to the emitted name", {
@@ -1248,12 +1289,17 @@ test_that("a state whose raw name is a parameter key keeps its own name", {
 
   expect_equal(vapply(ir$odes, function(o) o$state, ""), "CENT")
   expect_equal(vapply(ir$thetas, function(t) t$name, ""), "VC")
-  # The RHS is the half that was wrong, and asserting only the two names above
-  # let it stay wrong: the declaration kept CENT while every reference to it
-  # resolved through name_map to the theta, emitting `d/dt(CENT) = -K * VC` --
-  # the compartment amount replaced by a fixed theta, no warning, engine clean.
+
+  # The declaration was the only half this test originally checked, and the
+  # REFERENCES are where the same map does the real damage: the RHS `-k * CENT`
+  # resolved CENT through `name_map` to the theta's emitted name and emitted
+  # `-K * VC`. That parses -- VC is a declared theta -- so the model runs, with
+  # the elimination term reading a fixed effect instead of the amount in the
+  # compartment. Nothing downstream distinguishes the two.
+  #
   # Inside [odes] the state wins; in $PK the same symbol still means the theta.
   expect_equal(ir$odes[[1]]$rhs, "-K * CENT")
+  expect_false(grepl("VC", ir$odes[[1]]$rhs, fixed = TRUE))
   expect_equal(ir$indiv_params[[1]]$rhs, "VC * exp(ETA1)")
   # ...and the ambiguity itself is reported, since the source cannot say which
   # reading it meant.
@@ -1701,4 +1747,395 @@ test_that("a genuinely illegal covariate is still reported", {
                                     source_format = "nonmem"))
   expect_match(ir$warnings, "covariate reference", all = FALSE)
   expect_match(ir$unsupported, "WT.KG", fixed = TRUE, all = FALSE)
+})
+
+# -- theta pass-through into [odes] -------------------------------------------
+#
+# Issue #6 defect 2. A theta is not in scope in [odes]: ferx resolves a d/dt
+# right-hand side against states, individual parameters and covariates only.
+# Measured against ferx 0.2.0 and 0.3.0, a theta IS readable from
+# [individual_parameters], `[scaling] y` and `obs_scale`, and is NOT readable
+# from a d/dt right-hand side, an ODE-block intermediate, an `init()` expression
+# or a pk macro argument. Only the second group needs a pass-through.
+
+test_that("a theta referenced from an ODE gets a pass-through parameter", {
+  # The shape with nothing to convert: the source names the theta straight in
+  # $DES (`DADT(1) = -THETA(2)*A(1)`) and never assigns it in $PK, so there is no
+  # alias for de-shadowing to turn into an individual parameter. This emitted a
+  # bare theta into [odes] -- ferx cannot resolve it -- until the pass-through was
+  # appended explicitly.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + KTP * CENT")
+  ip <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
+  expect_true("KTP=TVKTP" %in% ip)
+  # The theta itself must be renamed, or the pass-through is the `KTP = KTP`
+  # self-shadow that defect 14 is about.
+  expect_true("TVKTP" %in% vapply(ir$thetas, function(t) t$name, ""))
+  expect_match(ir$warnings, "is referenced from an ODE", all = FALSE)
+})
+
+test_that("a source-supplied alias is the pass-through, not a second one", {
+  # `KTP = THETA(2)` in $PK arrives as `KTP <- KTP` once both sides normalise.
+  # Pass 3 drops that as a self-assignment, but de-shadowed to `KTP <- TVKTP` it
+  # survives and IS the pass-through -- the form ferx's own examples use. The
+  # appended entry must stand down, or the parameter is defined twice.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(KTP <- KTP), quote(k <- K * exp(eta1)),
+              ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_equal(sum(lhs == "KTP"), 1L)
+  expect_equal(ir$indiv_params[[match("KTP", lhs)]]$rhs, "TVKTP")
+})
+
+test_that("the ODE reference does not depend on where the alias is written", {
+  # The same order dependency as the state renames, and the same cause: the ODE
+  # right-hand side was resolved through `name_map`, which grows as the statements
+  # are walked. `KTP <- KTP` above the d/dt line installed the alias in time and
+  # the reference read the parameter; the identical line below it did not, and the
+  # reference read the theta while the pass-through sat there unused.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  alias <- quote(KTP <- KTP)
+  ka    <- quote(k <- K * exp(eta1))
+  dd    <- ddt("CENT", quote(-k * CENT + KTP * CENT))
+
+  before <- suppressWarnings(rxui_to_ir(mock_ui(ini, list(alias, ka, dd))))
+  after  <- suppressWarnings(rxui_to_ir(mock_ui(ini, list(ka, dd, alias))))
+
+  expect_equal(before$odes[[1]]$rhs, "-K * CENT + KTP * CENT")
+  expect_equal(after$odes[[1]]$rhs,  before$odes[[1]]$rhs)
+})
+
+test_that("a theta read only from an individual parameter stays a theta", {
+  # The negative case, and the one that keeps the pass-through from firing on
+  # every theta in the model. KSS in the TMDD model is read from
+  # [individual_parameters], where thetas ARE in scope, so renaming it and adding
+  # a pass-through would be churn -- an extra parameter and a misleading shadow
+  # INFO for a model that was already correct.
+  ini <- rbind(theta_row("KSS", 2), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1) * KSS), ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_true("KSS" %in% vapply(ir$thetas, function(t) t$name, ""))
+  expect_false("KSS" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_false(any(grepl("KSS", ir$warnings, fixed = TRUE)))
+})
+
+test_that("a state is not mistaken for a theta reference in an ODE", {
+  # A theta NAMED CENT alongside a state CENT. `-k * CENT` in [odes] is the
+  # compartment, not the theta, so nothing here needs a carrier. The visible
+  # symptom of getting it wrong is the rename: the theta was moved to TVCENT and
+  # reported as shadowing an individual parameter that does not exist. (The ODE
+  # itself survives, because discovery is recomputed each round and the renamed
+  # theta no longer matches -- so this asserts the rename, which is what breaks.)
+  ini <- rbind(theta_row("CENT", 1), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_true("CENT" %in% vapply(ir$thetas, function(t) t$name, ""))
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT")
+  expect_false("CENT" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_false(any(grepl("referenced from an ODE", ir$warnings)))
+  expect_false(any(grepl("theta 'CENT' shares a name", ir$warnings)))
+})
+
+test_that("a theta reaching the ODE only after inlining is scoped too", {
+  # An intermediate that touches a state cannot be an individual parameter, so it
+  # is inlined into the d/dt line -- and the text that gets inlined was normalised
+  # for a different context, never against the [odes] scope. `ki <- KTP*CENT`
+  # therefore arrived as `TVKTP * CENT`: a bare theta in [odes], with the
+  # pass-through parameter defined and unreferenced beside it. This is why the
+  # scope is applied to the emitted right-hand side rather than during the walk.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ki <- KTP * CENT),
+              ddt("CENT", quote(-k * CENT + ki)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + KTP * CENT")
+  expect_false(grepl("TVKTP", ir$odes[[1]]$rhs, fixed = TRUE))
+  expect_true("KTP" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+})
+
+test_that("an intermediate that survives as a parameter carries the theta", {
+  # The other half of the same case: `ki <- KTP` has no state reference, so it
+  # becomes the individual parameter `KI = KTP` and no pass-through is needed --
+  # thetas are in scope in [individual_parameters]. What must hold either way is
+  # that no theta name reaches the ODE, and here that is achieved by the model's
+  # own intermediate rather than by anything this package adds.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ki <- KTP),
+              ddt("CENT", quote(-k * CENT + ki * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + KI * CENT")
+  expect_true("KI=KTP" %in%
+              vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
+  # KTP is read from [individual_parameters] only, so it keeps its name.
+  expect_true("KTP" %in% vapply(ir$thetas, function(t) t$name, ""))
+})
+
+
+# -- [odes] declaredness ------------------------------------------------------
+#
+# Every name the emitted [odes] block references must resolve. ferx reports this
+# itself, but only where the engine runs -- and the phase-2 legality check beside
+# it tests the GRAMMAR, not whether anything declares the name, so `KTP` passes it.
+# Two defects reached the corpus through that gap (issue #6 defects 2 and 4).
+#
+# The set of names a ferx ODE RHS may reference is CLOSED: declared states,
+# individual parameters, ODE-block intermediates and the reserved time variables.
+# Not thetas, etas or sigmas -- and not covariates either, which is what makes the
+# check possible without consulting a covariate list. That matters, because
+# `.covariate_names()` defines a covariate as a symbol nothing binds and rxode2's
+# `ui$allCovs` does much the same, so checking against either whitelists exactly the
+# names worth reporting. An earlier version did, passed the whole suite, and could
+# not fire.
+
+test_that("an eta referenced from an ODE is reported as untranslatable", {
+  # Not just a check test -- this is a real gap. An eta is out of scope in [odes]
+  # (measured on ferx 0.2.0 and 0.3.0, same as thetas and sigmas), so ferx rejects
+  # it as E_PARSE, and we used to emit it without comment. There is no carrier for
+  # it either: an eta cannot be read from [individual_parameters] into an ODE
+  # without restructuring the model, so this is reported rather than fixed.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ k <- cl/v
+            d/dt(central) = -k*central*exp(eta.cl)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references ETA_CL", all = FALSE)
+  expect_match(ir$unsupported, "theta/eta/sigma referenced from \\[odes\\]", all = FALSE)
+})
+
+test_that("a covariate referenced from an ODE is reported, not assumed valid", {
+  # This started out as the opposite test -- a covariate in [odes] was assumed
+  # legitimate and only warned about when no data-column list was available to
+  # confirm it. ferx does not allow one at all: "An ODE RHS may only reference
+  # declared states, individual parameters, ODE-block intermediates, or the reserved
+  # TIME/TAFD/TAD/MACHEPS variables ... pre-compute the covariate-dependent term in
+  # [individual_parameters]". So the set is closed, every leftover is an error, and
+  # no column list is needed to decide.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*(WT/70)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references WT", all = FALSE)
+  # The message has to carry the remedy: the term is expressible, just one block
+  # earlier, and a user told only "undeclared" would not know that.
+  expect_match(ir$warnings, "pre-computed in \\[individual_parameters\\]", all = FALSE)
+  expect_match(ir$unsupported, "undeclared name referenced from \\[odes\\]", all = FALSE)
+})
+
+test_that("TIME and the reserved ODE variables are not reported", {
+  # The closed set includes ferx's own time variables. Omitting them would make the
+  # check fire on any model with a time-dependent rate -- the kind of false positive
+  # that gets a check deleted rather than fixed.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*exp(-TIME/24)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("a carrier leaves the [odes] block fully declared", {
+  # The positive control for the check: the model that needs a carrier must come
+  # out clean, or the check and the fix disagree and one of them is wrong.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("an undeclared name spelled like a math function is still reported", {
+  # The check used to declare a list of function names on the theory that
+  # `.emitted_ode_symbols()` returns call heads. It does not -- `.collect_symbols()`
+  # recurses over `expr[-1]` -- so the list could only ever whitelist ordinary
+  # identifiers that happen to share a spelling with a function, and it did:
+  # this model reported nothing while the identical one with WT reported WT, and
+  # ferx rejected the file with "RHS references undefined name(s): MAX".
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*(MAX/70)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_match(ir$warnings, "^ERROR \\| \\[odes\\] references MAX", all = FALSE)
+  expect_match(ir$unsupported, "undeclared name referenced from \\[odes\\]: MAX",
+               all = FALSE)
+})
+
+test_that("function calls in an ODE are not reported as undeclared names", {
+  # The other half of removing that whitelist: dropping it must not start
+  # reporting the functions themselves. It cannot, because a call head is never
+  # collected -- but the check is worth pinning, since the whole list was added
+  # to prevent a false positive that could not happen.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1.0; v <- 10.0; prop.err <- 0.1; eta.cl ~ 0.09 })
+    model({ cl <- cl*exp(eta.cl); k <- cl/v
+            d/dt(central) = -k*central*exp(-TIME/24) - sqrt(abs(k))*log(1 + k)
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_false(any(grepl("\\[odes\\] references", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+
+# -- carrier / [scaling] ordering ---------------------------------------------
+
+test_that("[scaling] still resolves when the scaled variable needs a carrier", {
+  # S2 = VC, with VC referenced from the ODE and never assigned in $PK. The
+  # carrier moves the name that answers to `VC` from the theta list to the
+  # individual parameters, so [scaling] must be resolved AFTER the carrier is
+  # appended. Resolved before, the lookup found the theta renamed to TVVC and no
+  # parameter named VC, `matched` came back NULL, and [scaling] was dropped with
+  # no diagnostic -- an emitted model that predicts amounts against concentration
+  # data and validates clean, which is exactly the S2=V failure CLAUDE.md warns
+  # about with the loud half removed.
+  ini <- rbind(theta_row("VC", 10), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT/VC)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst),
+                                     scaling_hint = list("1" = "VC")))
+
+  expect_equal(ir$scaling$obs_scale, "VC")
+  expect_match(ir$warnings, "S1 = VC detected", all = FALSE)
+  # ...and it must be the carrier that answers, not the theta: a theta IS in
+  # scope in obs_scale, so pointing [scaling] at TVVC would also validate, and
+  # would silently drop the IIV-free/IIV distinction the carrier exists to keep.
+  expect_true("VC=TVVC" %in%
+              vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
+})
+
+
+# -- carrier naming and the state exclusion, case-correctly -------------------
+
+test_that("a carrier never takes the name of a ferx solver builtin", {
+  # `.deshadow_theta_names()` renames a theta off a builtin name (theta TIME ->
+  # TVTIME) because ferx resolves the bare name to the integrator's clock and the
+  # theta would be estimated and never read. The carrier then took the theta's
+  # SOURCE name as its first choice and put the collision straight back, one block
+  # lower: `TIME = TVTIME` in [individual_parameters], with the ODE term reading
+  # the clock. `builtin_params` reported it, but as a source defect -- "rename the
+  # variable in the source model" -- for a variable the translator had invented.
+  ini <- rbind(theta_row("TIME", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + TIME * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(toupper(lhs) %in% .RESERVED_ODE_NAMES))
+  # The carrier still exists and still carries the theta -- the fix is the name,
+  # not the mechanism.
+  expect_true("TVTIME_ODE=TVTIME" %in%
+              vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), ""))
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + TVTIME_ODE * CENT")
+  # ...and the translator no longer reports a collision it created itself.
+  expect_false(any(grepl("collides with a ferx solver builtin \\(", ir$warnings) &
+                   grepl("^ERROR", ir$warnings)))
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("a theta sharing a lowercase state's name is left alone", {
+  # The state exclusion compares `theta_orig`, which is always `.norm()`ed to
+  # uppercase, against the state names. Keyed on the RAW d/dt target it never
+  # matched for an nlmixr2 source, where states are lowercase: theta CENTRAL was
+  # renamed to TVCENTRAL and reported as shadowing an individual parameter that
+  # does not exist. Nothing here references the theta from the ODE -- `-central *
+  # KK` is the compartment -- so no rename and no carrier are warranted.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ CENTRAL <- 1.0; v <- 10.0; prop.err <- 0.1; eta.v ~ 0.09 })
+    model({ v  <- v*exp(eta.v)
+            kk <- CENTRAL/v
+            d/dt(central) = -central*kk
+            central ~ prop(prop.err) })
+  }
+  ir <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
+
+  expect_true("CENTRAL" %in% vapply(ir$thetas, function(t) t$name, ""))
+  expect_false("CENTRAL" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  expect_false(any(grepl("theta 'CENTRAL' shares a name", ir$warnings)))
+  expect_false(any(grepl("theta 'CENTRAL' is referenced from an ODE", ir$warnings)))
+
+  # What the spurious rename was accidentally masking, and why the exclusion
+  # cannot ship on its own. `kk <- CENTRAL/v` is an honest read of the theta in
+  # [individual_parameters] scope, but its RHS "references a state" under the
+  # case-folded comparison, so the inliner drags the text into [odes] -- the one
+  # block where CENTRAL means the compartment. Measured against ferx 0.3.0 the
+  # result validates clean and reports `W_UNUSED_PARAM: theta 'CENTRAL' ... not
+  # referenced in any model expression`: the engine read it as the state, the
+  # theta went dead, and the term became the amount squared over V. Renaming the
+  # theta hid that by moving it off the colliding spelling; nothing detected it.
+  # It is now reported, so `strict = TRUE` aborts instead of shipping the model.
+  expect_match(ir$warnings,
+               "^ERROR \\| 'central' names both an ODE state and a model parameter",
+               all = FALSE)
+  expect_match(ir$unsupported, "state/parameter source-name collision: central",
+               all = FALSE)
+})
+
+test_that("a duplicate $THETA label produces one carrier, not two", {
+  # The discovery predicate is per-theta, but duplicate labels give two thetas the
+  # same source name, and collapsing the result to names threw away which of them
+  # matched: the carrier loop tested `theta_orig[i] %in% ode_theta` and let both
+  # through. One ODE reference then defined two parameters -- the one the
+  # reference resolves to, and a dead `KTP = TVKTP` that ferx reports as
+  # `computed but never used` -- while the run simultaneously warned that ferx
+  # resolves every reference to the first of the pair.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("KTP", 0.7),
+               theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip  <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
+  expect_length(grep("is referenced from an ODE", ir$warnings), 1L)
+  # Every emitted parameter is read by something -- no orphan beside the one the
+  # ODE actually names.
+  carriers <- grep("^[^=]+=(TV|THETA_)?KTP", ip, value = TRUE)
+  expect_length(carriers, 1L)
+  expect_true(grepl(sub("=.*$", "", carriers), ir$odes[[1]]$rhs, fixed = TRUE))
+  # The duplicate itself is still reported; this changes the carrier, not that.
+  expect_match(ir$warnings, "duplicate \\$THETA label", all = FALSE)
+})
+
+test_that("scoping the ODEs does not resurrect the dropped rhs_expr field", {
+  # The inlining pass rebuilds each ode as `list(state, rhs)` and its only
+  # consumer runs earlier, so `rhs_expr` is gone by then. Writing it back in
+  # `.scope_odes_to_params()` made the field present on carrier models and absent
+  # everywhere else -- a phase-5 reader would get a correct expression from some
+  # models and NULL from the rest.
+  ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT + KTP * CENT)))
+  carried <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  plain   <- suppressWarnings(rxui_to_ir(mock_ui(
+    rbind(theta_row("K", 0.1), eta_row("eta1", 0.09, 1L)),
+    list(quote(k <- K * exp(eta1)), ddt("CENT", quote(-k * CENT))))))
+
+  # Same shape either way -- that is the assertion, not which fields there are.
+  expect_equal(names(carried$odes[[1]]), names(plain$odes[[1]]))
+  expect_false("rhs_expr" %in% names(carried$odes[[1]]))
 })
