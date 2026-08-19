@@ -332,3 +332,63 @@ test_that("the engine sweep reports non-error diagnostics without failing", {
                             finding = "E_PARSE: bad", stringsAsFactors = FALSE))
   expect_equal(fatal_for(mixed), "n.ctl -- E_PARSE: bad")
 })
+
+# -- accidental dose attributes (issue #17) -----------------------------------
+#
+# The one tier that can see this defect at all. It is invisible to every other:
+# the wrong model VALIDATES clean, `$unsupported` is empty, and no engine
+# diagnostic mentions bioavailability -- so only comparing predictions against a
+# spelling that cannot be a dose attribute separates the two readings.
+test_that("a parameter named like a dose attribute is not applied to the dose", {
+  skip_if_not_installed("rxode2")
+
+  # An ordinary elimination rate constant that happens to be called F1. In
+  # nlmixr2 bioavailability is written `f(central) <- ...`, so a bare `F1 <- `
+  # assignment is an ordinary parameter and nothing in the source asks for a
+  # dose attribute.
+  m <- function() {
+    ini({ tvv <- 50; tvf1 <- 0.1; eta.v ~ 0.04; prop.err <- 0.01 })
+    model({
+      v  <- tvv * exp(eta.v)
+      F1 <- tvf1
+      d/dt(central) <- -F1 * central
+      cp <- central / v
+      cp ~ prop(prop.err)
+    })
+  }
+  emitted <- suppressWarnings(
+    nlmixr2_to_ferx(rxode2::rxode2(m), validate = FALSE))$ferx_text
+
+  # The guard must have fired, or the rest of this test compares a model with
+  # itself and passes for the wrong reason.
+  expect_match(emitted, "F1_PAR", fixed = TRUE)
+
+  tmpl <- rbind(
+    data.frame(ID = 1L, TIME = 0,   DV = 0, EVID = 1L, AMT = 100, CMT = 1L, MDV = 1L),
+    data.frame(ID = 1L, TIME = c(0.5, 2, 8, 24), DV = 0, EVID = 0L, AMT = 0,
+               CMT = 1L, MDV = 0L))
+  data_file <- tempfile(fileext = ".csv")
+  write.csv(tmpl, data_file, row.names = FALSE, quote = FALSE)
+
+  sim_of <- function(txt) {
+    f <- tempfile(fileext = ".ferx")
+    writeLines(txt, f)
+    ferx_simulate(f, data_file, n_sim = 1L, seed = 20260819)$DV_SIM
+  }
+
+  # `KE` is the control: a name ferx cannot read as a dose attribute, and
+  # otherwise the same file. `F1` is what this package emitted before the guard.
+  fixed   <- sim_of(emitted)
+  control <- sim_of(gsub("F1_PAR", "KE", emitted, fixed = TRUE))
+  broken  <- sim_of(gsub("F1_PAR", "F1", emitted, fixed = TRUE))
+
+  # The rename changed the spelling and nothing else.
+  expect_equal(fixed, control, tolerance = 1e-10)
+
+  # The discriminating half: without the rename the engine applies the parameter
+  # a second time, as bioavailability on the dose. If this ever stops being true
+  # the test above has become a tautology and proves nothing. Measured on
+  # ferx 0.3.0: the ratio is exactly the parameter's value (0.1).
+  expect_false(isTRUE(all.equal(fixed, broken, tolerance = 1e-6)))
+  expect_equal(broken / fixed, rep(0.1, length(fixed)), tolerance = 1e-4)
+})
