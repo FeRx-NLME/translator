@@ -5,6 +5,23 @@ on:
     branches: [main]
   pull_request:
 
+# One run per ref at a time. Without this, every push to a branch starts another
+# ~19-minute engine build and none of the earlier ones stop: four concurrent runs
+# accumulated on a single branch during one afternoon's work, three of them
+# testing commits already superseded. The results of a superseded run are not
+# just wasted, they are misleading -- a green tick against a commit nobody is
+# looking at any more.
+#
+# Cancellation is deliberately NOT applied to main. There are no required status
+# checks on this repo, so the engine job is the only thing that actually
+# exercises the engine against what landed, and every commit on main needs its
+# own verified result. Cancelling a main run to start a newer one would leave the
+# older commit permanently unverified -- and on a branch where merges can land
+# unreviewed, that is the one place the signal has to be complete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
