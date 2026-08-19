@@ -42,6 +42,52 @@ R CMD check --as-cran .
 Rscript -e 'devtools::check(cran = FALSE)'
 ```
 
+## Working on a shared machine
+
+Several sessions may be working this repo at once, and they share one machine,
+one system-wide R library and one CI runner pool. Every item below is something
+that actually went wrong here, not a precaution.
+
+**A broken package install leaves a half-populated directory and a live
+`00LOCK-*`. Stop touching it. Do not clean up.** This is the counter-intuitive
+one: `R CMD INSTALL` moves the previous version into `00LOCK-<pkg>/` and restores
+it if the build fails, so the lock IS the backup. Tidying away a stale-looking
+lock, or moving the old package back yourself, destroys the thing R is about to
+restore. An empty `library/ferx` next to a `00LOCK-ferx-r` is a recoverable state
+and usually an install still running - check `pgrep -fl cargo` and the lock's
+mtime before concluding it is abandoned.
+
+**Never kill by a pattern that is not scoped to your own build.**
+`pkill -f "cargo build --release"` matches every session's build, not yours.
+`pkill -f "rustc --crate-name"` matches every Rust compile on the machine. Run
+`pgrep -fl <pattern>` first and read the list; kill a PID you captured yourself,
+or a pattern containing your own build directory. A ferx build costs 15-30
+minutes and blocks the engine test tier, so a stray kill is expensive for whoever
+started it - and you will not be told.
+
+**Announce before installing into the system-wide R library.** `.libPaths()[1]`
+is `/Library/Frameworks/R.framework/...`, shared by every session. Two concurrent
+installs of `ferx` or a shared dependency clobber each other, and the symptom
+(the previous paragraph) does not look like a collision.
+
+**Pushing to a branch cancels that branch's in-flight CI run.** `check.yml` has a
+`concurrency:` block keyed on `github.ref`, so a rapid series of pushes leaves only
+the last commit tested. That is deliberate - four concurrent runs once piled up on
+one branch here in fifteen minutes, three of them testing commits already moved
+past - but it means that if you want a specific commit's engine result before
+merging, you have to let that run finish rather than pushing on top of it.
+
+Runs on `main` are never cancelled:
+
+```yaml
+cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+```
+
+With no required status checks, a `main` commit's engine run is the only thing
+verifying what actually landed, so those must always complete. A superseded branch
+run is merely wasted; a cancelled `main` run leaves a commit permanently
+unverified on the one branch where that matters.
+
 ## Known gotchas
 
 **A theta that shares a name with an individual parameter shadows it** - ferx
