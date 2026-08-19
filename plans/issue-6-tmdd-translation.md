@@ -763,6 +763,15 @@ dropped silently -- only `S1`/`S2` assignments are picked up.
 
 ### Phase 4 -- Non-symbol assignment targets (defects 3, 9, RC-C)
 
+**Branch phase 4 off `main` after phase 3 lands, NOT off the phase 3 branch.**
+Phase 3 is expected to be squash-merged, which is safe only while nothing stacks
+on it. Branching phase 4 off it recreates exactly the trap phase 2 hit: the parent
+PR's commits never become ancestors of `main`, `merge-base` stays behind, and the
+child PR's diff re-shows the parent's work as new (measured on that pair: 12 files
+/ 3353 lines instead of 6 / 1158). Phase 4 also modifies functions phase 3
+introduces (`.emitted_ode_symbols()`, `.scope_odes_to_params()`, the `[odes]`
+declaredness check), so the conflict would be semantic as well as textual.
+
 Replace the silent `next` at `rxui_to_ir.R:432` with explicit dispatch:
 
 | `lstExpr` form | action |
