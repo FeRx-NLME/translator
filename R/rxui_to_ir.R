@@ -374,7 +374,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     scaling       = scaling,
     fit_options   = fit_opts,
     warnings      = warn,
-    unsupported   = unsp
+    unsupported   = unsp,
+    state_renames = state_map
   )
 }
 

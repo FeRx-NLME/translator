@@ -20,6 +20,14 @@
 
 ## New features
 
+* The emitted `.ferx` records ODE state renames as `# renamed: state <from> ->
+  <to>` provenance comments, and `ferx_ir` gains a `$state_renames` field. The
+  `.ferx` is the artefact that gets shared, and a reader holding only that file
+  could not otherwise map a sanitised state such as `c_RTOT` back to the
+  `$MODEL` compartment or `A(n)` index it came from. These are provenance, not
+  diagnostics: they do not count towards `# Warnings:`, and renamed thetas are
+  deliberately excluded because `TVCL` is self-evidently derived from `CL`.
+
 * `to_ferx(validate = TRUE, strict = TRUE)`. When the NONMEM `$DATA` file can be
   resolved relative to the control stream it is passed to the validator, which
   is what allows covariate references to be checked at all -- without a dataset

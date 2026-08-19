@@ -19,7 +19,8 @@ new_ferx_ir(
   scaling = list(),
   fit_options = list(),
   warnings = character(),
-  unsupported = character()
+  unsupported = character(),
+  state_renames = character()
 )
 }
 \arguments{
@@ -70,6 +71,12 @@ with \code{INFO}, \code{WARN}, or \code{ERROR}.}
 
 \item{unsupported}{Character vector of features detected in the source
 that could not be translated.}
+
+\item{state_renames}{Named character vector of ODE state renames, source
+name -> emitted name. Provenance, not a diagnostic: the emitted \code{.ferx} is
+the artefact that gets shared, and a reader holding only that file cannot
+otherwise map a sanitised state back to the source compartment it came
+from. Rendered as \verb{# renamed:} comments by \code{\link[=emit_ferx]{emit_ferx()}}.}
 }
 \value{
 A \code{ferx_ir} list.

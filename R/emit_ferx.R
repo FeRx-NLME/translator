@@ -58,6 +58,21 @@ emit_ferx <- function(ir) {
   file <- if (!is.na(ir$source_file))   ir$source_file   else "unknown"
   out  <- paste0("# Translated from ", src, ": ", file)
 
+  # State renames are provenance, not diagnostics, so they get their own line
+  # and are deliberately NOT counted as warnings -- nothing is wrong with the
+  # file. They belong in it all the same: the .ferx is what gets shared, and a
+  # reader holding only it cannot map `c_RTOT` back to the $MODEL compartment or
+  # the A(n) index it came from.
+  #
+  # States only. A renamed theta is self-describing (TVCL obviously derives from
+  # CL), so listing those would add a line to every de-shadowed model to say
+  # something a reader can already infer.
+  ren <- ir$state_renames
+  if (length(ren) > 0)
+    out <- paste0(out, "\n",
+                  paste0("# renamed: state ", names(ren), " -> ", unname(ren),
+                         collapse = "\n"))
+
   # INFO entries are notes about the translation, not defects in the artefact.
   # Counting them makes a clean model advertise "# Warnings: 3" for renames a
   # reader cannot act on, so the header counts only WARN and ERROR.

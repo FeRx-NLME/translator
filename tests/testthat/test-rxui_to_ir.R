@@ -897,8 +897,11 @@ test_that("a dotted state name is renamed at every reference site", {
   expect_equal(states, c("CENT", "c_RTOT"))
   # The reference inlined into the OTHER state's RHS is the whole point.
   expect_match(ir$odes[[1]]$rhs, "c_RTOT", fixed = TRUE)
-  # Nothing anywhere in the emitted text may still carry the dot.
-  expect_false(grepl("c.RTOT", emit_ferx(ir), fixed = TRUE))
+  # No CODE line may still carry the dot. Comment lines may and now do -- the
+  # `# renamed:` provenance line names the source spelling on purpose -- so the
+  # assertion is scoped to the lines ferx actually parses.
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("c.RTOT", code, fixed = TRUE)))
   expect_match(ir$warnings, "^INFO  \\| state 'c\\.RTOT' is not a legal ferx",
                all = FALSE)
 })
@@ -920,7 +923,10 @@ test_that("obs_cmt taken from ui$central is renamed with the state", {
   # And no guess was needed, so the guess warning must be absent -- otherwise
   # this could pass by falling through to the fallback path.
   expect_length(grep("obs_cmt could not be inferred", ir$warnings), 0L)
-  expect_false(grepl("c.RTOT", emit_ferx(ir), fixed = TRUE))
+  # Code lines only -- the `# renamed:` provenance comment names the source
+  # spelling deliberately.
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("c.RTOT", code, fixed = TRUE)))
 })
 
 test_that("obs_cmt is resolved through the state renames, not the parameter map", {
@@ -939,6 +945,34 @@ test_that("obs_cmt is resolved through the state renames, not the parameter map"
   expect_equal(ir$structural$obs_cmt, "CENT")
   # The invariant that actually matters: obs_cmt must name a declared state.
   expect_true(ir$structural$obs_cmt %in% ir$structural$states)
+})
+
+test_that("a state rename is recorded in the emitted file as provenance", {
+  # The .ferx is the artefact that gets shared. Without this line a reader
+  # holding only that file cannot map `c_RTOT` back to the $MODEL compartment or
+  # the A(n) index it came from -- the rename lived only in result$warnings,
+  # which does not travel with the file.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  # `central` is supplied so obs_cmt needs no guess: the rename is then the ONLY
+  # note the translation produces, which is what makes the warning-count
+  # assertion below meaningful rather than incidental.
+  ir  <- suppressWarnings(rxui_to_ir(c(mock_ui(ini, lst), list(central = "c.RTOT"))))
+  txt <- emit_ferx(ir)
+
+  expect_equal(ir$state_renames, c("c.RTOT" = "c_RTOT"))
+  expect_match(txt, "# renamed: state c.RTOT -> c_RTOT", fixed = TRUE)
+  # Provenance, not a diagnostic: it must not inflate the warning count, and a
+  # model whose only note is a rename must not advertise warnings at all.
+  expect_false(grepl("# Warnings:", txt, fixed = TRUE))
+})
+
+test_that("a model with no renames gets no provenance line", {
+  ini <- rbind(theta_row("t.KA", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(ka <- t.KA * exp(eta1)), ddt("depot", quote(-ka * depot)))
+  txt <- emit_ferx(suppressWarnings(rxui_to_ir(mock_ui(ini, lst))))
+  expect_false(grepl("# renamed:", txt, fixed = TRUE))
 })
 
 test_that("a state that is already legal is left alone", {
