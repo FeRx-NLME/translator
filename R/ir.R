@@ -17,14 +17,25 @@
 #'   `name` (character) and `value` (numeric).
 #' @param sigmas List of sigma entries. Each element is a list with `name`
 #'   (character), `value` (numeric), and `scale` (`"sd"` or `"var"`).
-#' @param indiv_params List of individual parameter assignments. Each element
-#'   is a list with `lhs` (character) and `rhs` (character).
+#' @param indiv_params Ordered list of statements. Each element is a list with
+#'   a `kind`: `"assign"` (`lhs`, `rhs`, both character) or `"if"` (`cond`,
+#'   character; `then`, and optionally `else_`, each a nested statement list).
+#'   An element with no `kind` is read as an `"assign"`, which is the shape this
+#'   field held before statement lists. Order is preserved exactly.
 #' @param structural List describing the structural model. Must have `type`:
 #'   `"pk_macro"` (add `pk_call` and `pk_args`) or `"ode"` (add `obs_cmt`
 #'   and `states`). May be empty during incremental construction.
-#' @param odes List of ODE entries. Each element is a list with `state`
-#'   (character) and `rhs` (character). Used only when
+#' @param odes Ordered list of statements forming the `[odes]` block. Each
+#'   element is a list with a `kind`: `"ddt"` (`state`, `rhs`), `"assign"`
+#'   (`lhs`, `rhs`) for an ODE-block intermediate, or `"if"` (`cond`, `then`,
+#'   and optionally `else_`). An element with no `kind` is read as a `"ddt"`,
+#'   which is the shape this field held before statement lists. Used only when
 #'   `structural$type == "ode"`.
+#'
+#'   Order is preserved exactly and nothing reorders it. ferx has no
+#'   use-before-def check in `[odes]`: an intermediate placed below the `d/dt`
+#'   line that reads it stays valid, reads a stale slot, and collapses the
+#'   prediction to a constant with no diagnostic.
 #' @param initial_conditions List of ODE initial-condition entries. Each element
 #'   is a list with `state` (character, an emitted state name) and `rhs`
 #'   (character, the expression). Rendered as `init(<state>) = <rhs>` inside the

@@ -44,16 +44,27 @@ multiple names, lower-triangular values.}
 \item{sigmas}{List of sigma entries. Each element is a list with \code{name}
 (character), \code{value} (numeric), and \code{scale} (\code{"sd"} or \code{"var"}).}
 
-\item{indiv_params}{List of individual parameter assignments. Each element
-is a list with \code{lhs} (character) and \code{rhs} (character).}
+\item{indiv_params}{Ordered list of statements. Each element is a list with
+a \code{kind}: \code{"assign"} (\code{lhs}, \code{rhs}, both character) or \code{"if"} (\code{cond},
+character; \code{then}, and optionally \code{else_}, each a nested statement list).
+An element with no \code{kind} is read as an \code{"assign"}, which is the shape this
+field held before statement lists. Order is preserved exactly.}
 
 \item{structural}{List describing the structural model. Must have \code{type}:
 \code{"pk_macro"} (add \code{pk_call} and \code{pk_args}) or \code{"ode"} (add \code{obs_cmt}
 and \code{states}). May be empty during incremental construction.}
 
-\item{odes}{List of ODE entries. Each element is a list with \code{state}
-(character) and \code{rhs} (character). Used only when
-\code{structural$type == "ode"}.}
+\item{odes}{Ordered list of statements forming the \verb{[odes]} block. Each
+element is a list with a \code{kind}: \code{"ddt"} (\code{state}, \code{rhs}), \code{"assign"}
+(\code{lhs}, \code{rhs}) for an ODE-block intermediate, or \code{"if"} (\code{cond}, \code{then},
+and optionally \code{else_}). An element with no \code{kind} is read as a \code{"ddt"},
+which is the shape this field held before statement lists. Used only when
+\code{structural$type == "ode"}.
+
+Order is preserved exactly and nothing reorders it. ferx has no
+use-before-def check in \verb{[odes]}: an intermediate placed below the \code{d/dt}
+line that reads it stays valid, reads a stale slot, and collapses the
+prediction to a constant with no diagnostic.}
 
 \item{initial_conditions}{List of ODE initial-condition entries. Each element
 is a list with \code{state} (character, an emitted state name) and \code{rhs}
