@@ -36,6 +36,8 @@
 - [ ] None
 
 ## Tests
+- [ ] Every new test verified to FAIL against the code it guards (break it, rerun,
+      confirm it fails) - a test that passes either way proves nothing
 - [ ] Tier 1 unit tests added / updated
 - [ ] Tier 2 integration tests added / updated
 - [ ] Tier 3 reference snapshots updated (`testthat::snapshot_accept()` run after review)

@@ -207,6 +207,27 @@ the failure mode is an absence of signal rather than a signal.
 Every new function or behaviour needs a test. Put the test in the lowest tier
 that covers it. Do not write tests at the end — write them as you build.
 
+**A fixture picked to show a behaviour must be able to show that behaviour being
+wrong.** Before adding a test, break the code it guards and confirm the test
+fails. If it still passes, the fixture cannot distinguish the two cases and the
+test proves nothing - it will sit in the suite reading as coverage.
+
+Three have shipped that way, all three through review:
+
+- `F1 = 1` cannot show bioavailability being dropped. Measured: `F1 = 1` and no
+  `F` at all give predictions identical to every printed digit, so a concordance
+  test built on it passes whether the feature works or not.
+- Bare `init(X) = TIME` cannot show drop-versus-substitute. It is the one
+  spelling where dropping the statement and substituting `TIME := 0` give the
+  same answer; `init(X) = K + TIME` is the case that separates them.
+- An omega guard starting at its own simulation truth cannot show an eta failing
+  to reach the ODE - "recovered the truth" and "never moved" are the same
+  observation. See the Tier 4 notes below.
+
+None of these were caught by review. All three would have been caught by one
+question: what would this test do if the code under it were broken? That is not
+a maxim, it is a command - run it.
+
 **Tier 1 — Unit tests** (`tests/testthat/test-*.R`, inline, no file I/O)
 
 Test the smallest unit in isolation. Use inline R objects (hand-built
@@ -308,8 +329,10 @@ prove `ETA_CL` still reaches the ODE through the derived `K20 = CL/V`. Note
 that a model's `$OMEGA` initials are often the simulation truth, which makes
 "recovered the truth" and "never moved off its start" indistinguishable - that
 assertion was a tautology until the test was changed to start `ETA_CL` away
-from the truth and additionally assert that it moved. Any new omega guard needs
-the same treatment.
+from the truth and additionally assert that it moved. This is one instance of
+the discriminating-fixture rule at the top of this section, which applies to
+every tier, not only to omega guards - scoping it to omega guards is why it
+went on to bite twice more.
 
 Theta names carry a `TV` prefix wherever the source names a theta after the
 parameter it defines (see the de-shadowing note under Known gotchas), so
