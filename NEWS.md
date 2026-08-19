@@ -38,6 +38,155 @@
 
 ## Bug fixes
 
+* A theta referenced from an ODE is now carried in by an individual parameter.
+  ferx resolves a `d/dt` right-hand side against states, individual parameters and
+  covariates only -- a theta is not in scope there -- so a `$DES` line naming a
+  theta produced an `[odes]` block ferx could not resolve (issue #6, defect 2).
+  Measured against ferx 0.2.0 and 0.3.0, a theta IS readable from
+  `[individual_parameters]`, `[scaling] y` and `obs_scale`, and is NOT readable
+  from a `d/dt` right-hand side, an ODE-block intermediate, an `init()` expression
+  or a pk macro argument; only the second group gets a carrier, so a theta read
+  from `[individual_parameters]` is left exactly as it was.
+
+  Where the source already supplies the assignment nothing is added: `KTP =
+  THETA(3)` arrives as the alias `KTP <- KTP`, which the alias filter drops as a
+  self-assignment but which theta de-shadowing turns into the surviving `KTP <-
+  TVKTP` -- the same carrier, spelled by the model. `inst/testmodels/nonmem/ode_theta_ref.ctl`
+  covers the shape that has nothing to convert.
+
+  A carrier is named after the source (`KTP = TVKTP`) where that name is free,
+  which is the form ferx's own examples use and keeps the emitted `[odes]` diffable
+  against the source `$DES`. Where it is taken the name is derived from the theta's
+  *emitted* name instead: `TVCL_ODE = TVCL`. Not `CL_ODE`, which reads as "the CL
+  used in the ODE" -- that is the individual value, and distinguishing it from the
+  theta is the entire point. Not `CL_1` either: `_1` already means "state
+  disambiguated" (`central_1`) and is `.free_theta_name()`'s last resort, so a
+  third meaning on that spelling leaves a reader unable to tell a renamed
+  compartment from a renamed theta from a carrier, and `CL_1`/`V_1` are plausible
+  model variables in their own right. A numbered form is still possible if both
+  spellings are taken, and now warns: the number is positional, so it moves when
+  another carrier is added before it.
+
+  A carrier never takes a name ferx reserves for the solver. The de-shadow pass
+  renames a theta off `TIME`/`T`/`TAFD`/`TAD`/`MACHEPS`, and the carrier used to
+  take the theta's source name back, putting the collision one block lower with
+  the ODE term reading the integrator's clock.
+
+  A duplicate `$THETA` label produces one carrier, not two. The discovery
+  predicate is per-theta and two thetas can share a source name, so collapsing
+  its result to names let both through and defined a second, dead parameter
+  beside the one the reference resolves to.
+
+  Carriers are appended before `[scaling]` is resolved, and the order is
+  load-bearing. `[scaling]` resolves `S2 = VC` by looking the name up among the
+  theta names and then among the individual parameters, and a carrier moves the
+  name that answers to `VC` from the first list to the second. Resolved first,
+  the lookup found the theta renamed to `TVVC` and no parameter named `VC`, so
+  `[scaling]` was dropped with no diagnostic -- an emitted model that predicts
+  amounts against concentration data and that the engine validates clean.
+
+* A carrier reuses an existing individual parameter only when that parameter is a
+  *pure alias* of the theta. Matching on the name alone gets the arithmetic wrong:
+  `frac <- central/cl` in a model that later writes `cl <- cl*exp(eta.cl)` reads
+  the theta, so pointing that reference at the individual parameter `CL` silently
+  substitutes the IIV-applied value. Both forms parse and both fit. Such a
+  reference now gets its own carrier (`TVCL_ODE = TVCL`).
+
+* The `[odes]` scope is applied to the emitted right-hand side rather than during
+  the walk, because that is where every path converges. An ODE-block intermediate
+  that touches a state is inlined instead of emitted, and its text was normalised
+  for a different context: `ki <- KTP*CENT` reached `[odes]` as `TVKTP * CENT`, a
+  bare theta, with the carrier defined and unreferenced beside it. Resolving the
+  `d/dt` line alone also made the result depend on statement order -- the alias
+  written above the `d/dt` bound in time, the identical line below it did not.
+
+* A theta is recognised as ODE-referenced by its *current emitted* name, or by its
+  source name when nothing else declares that symbol -- not by source name alone.
+  In any de-shadowed model the source name is the individual parameter's name, so
+  `d/dt(ABS) = -KA * ABS` beside `theta TVKA` and `KA = TVKA * exp(ETA_KA)` reads
+  the parameter, and matching on `KA` invented a second carrier for a reference
+  that was already correct. The test is recomputed each round rather than
+  accumulated, for the same reason: a theta matches on its source name only until
+  de-shadowing renames it.
+
+* nonmem2rx's `rxmissingvars` placeholders are no longer emitted. When a NONMEM
+  model names a theta by its `$THETA` label (`FLUX = KTP*A(1)` for `(0,0.2) ;
+  KTP`), nonmem2rx does not bind the symbol: it leaves a free `KTP` and records
+  the theta in `rxmissingvars1 <- t.KTP`. That produced the meaningless individual
+  parameter `RXMISSINGVARS1 = TVKTP` while the reference itself stayed dangling.
+  The placeholder is dropped and the reference bound by the carrier.
+
+  Unlike the covariate case noted above, `[odes]` does not need a dataset for the
+  engine to object: it reports `[odes]: RHS references undefined name(s)` either
+  way, because thetas and etas are out of scope there and a bare name can only be
+  a state, a parameter or a covariate.
+
+* Every name the emitted `[odes]` block references is now checked against what the
+  model declares, and an unresolved one is an `ERROR` with an `$unsupported` entry.
+  ferx does report this itself, but only where the engine runs -- and the
+  identifier-legality check beside this one tests the *grammar*, not whether
+  anything declares the name, so `KTP` passed it. Two defects reached the corpus
+  through that gap (issue #6 defects 2 and 4).
+
+  The check is possible because the set of names a ferx ODE right-hand side may
+  reference is *closed*: declared states, individual parameters, ODE-block
+  intermediates, and `TIME`/`TAFD`/`TAD`/`MACHEPS`. Not thetas, etas or sigmas --
+  and not covariates either. ferx's own message gives the remedy, which this one
+  repeats: pre-compute the covariate-dependent term in `[individual_parameters]`
+  and reference it from the ODE by that name.
+
+  No covariate list is consulted, and that is deliberate rather than an omission.
+  `.covariate_names()` *defines* a covariate as a symbol nothing else binds, and
+  rxode2's `ui$allCovs` does much the same, so both classify a name the translator
+  failed to bind as a legitimate covariate -- measured, both call the unbound `CF`
+  in the QSS TMDD model and the unbound `KTP` in `ode_theta_ref.ctl` covariates.
+  An earlier version of this check consulted them, passed the entire test suite,
+  and could not fire on either defect it was written for.
+
+* A state and a model parameter whose names differ only in case are now reported
+  as the source-name collision they are. ferx compares them case-insensitively:
+  measured against ferx 0.3.0, `d/dt(central) = -central * (CENTRAL/V)` beside
+  `states=[central]` and `theta CENTRAL` validates clean and reports
+  `W_UNUSED_PARAM` for the theta -- the engine read the ODE's `CENTRAL` as the
+  compartment, the theta went dead, and the term became the amount squared over
+  `V`. The collision only becomes visible once something drags the reference into
+  `[odes]`: `kk <- CENTRAL/v` is an honest read of the theta in
+  `[individual_parameters]` scope, but its right-hand side "references a state"
+  under the same case-folded comparison, so the inliner moves the text into the
+  one block where that spelling means something else.
+
+  No function-name whitelist is consulted either, for a simpler reason: a call
+  head is never collected. The symbol walk recurses over the *arguments* of a
+  call, so `exp(-K*CENT)` yields `K` and `CENT` and nothing else, and a list of
+  function names could only ever whitelist ordinary identifiers that happen to
+  share a spelling. One did: with `EXP`/`LOG`/`ABS`/`MIN`/`MAX`/`SIGN` and the
+  rest declared, an undeclared covariate named `MAX` passed this check while `WT`
+  was reported, and ferx rejected the file the check had just called clean.
+
+  Two reports, because the remedies differ: a theta, eta or sigma needs a carrier;
+  anything else resolves to nothing at all. The first makes an eta referenced from
+  an ODE reportable for the first time -- ferx rejects it as `E_PARSE` and it was
+  previously emitted without comment.
+
+  Scoped to `[odes]` on purpose. In `[individual_parameters]` thetas *are* in
+  scope, so the set of legitimate names is far larger and a leftover carries much
+  less information.
+
+  Measured against ferx 0.3.0 (ferx-r tag `v0.3.0`), which is the version shipped
+  to users. 0.2.0 was not re-measured; no bundled model references a covariate from
+  `[odes]`, so nothing that translated before is affected either way. The `engine`
+  CI job now pins that same build, so these measurements and the job agree.
+
+* A theta renamed only because it is ODE-referenced is no longer reported as
+  shadowing an individual parameter. At the point of the rename nothing of that
+  name is one -- the trigger predicts a carrier that is created afterwards -- so
+  the message described a collision the model never had.
+
+* A theta whose name is also an ODE state name is not treated as an ODE reference:
+  in `[odes]` the state wins. Without the exclusion the emitted ODE still came out
+  right, but the theta was renamed for a reference that was never to it.
+
+
 * Emitted identifiers are now sanitised to the ferx grammar
   (`[A-Za-z_][A-Za-z0-9_]*`). ODE state names never went through normalisation,
   so a compartment that `nonmem2rx` had renamed to `c.RTOT` -- which it does
