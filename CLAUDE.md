@@ -175,6 +175,33 @@ schedule-only are watchdogs - the ones nobody watches, whose whole purpose is to
 notice something on your behalf. A silently unregistered watchdog is worse than
 none: it reads as coverage.
 
+**After a merge, parse-check the test files before trusting the suite** - a
+conflict boundary can cut through a `test_that` block and leave it without its
+closing `})` while `R/` auto-merges cleanly and is genuinely correct. This
+happened on the #15 merge, to `test-rxui_to_ir.R`.
+
+Measured on this package, `testthat::test_local()` then halts:
+
+```
+ir: Error in parse(...) : test-ir.R:181:0: unexpected end of input
+Execution halted
+```
+
+Loud, but it *aborts the run*, so what reaches a summary line is a short or
+missing result rather than a failure. A clean auto-merge plus a suite that says
+little reads exactly like success.
+
+The pre-flight is cheap and names the file faster than a suite run does:
+
+```bash
+for f in tests/testthat/*.R R/*.R; do Rscript -e "invisible(parse('$f'))"; done
+```
+
+Then compare the test count against the previous run. `FAIL 0` on a suite that
+quietly shed several hundred tests has not gotten better, and the count is the
+only thing that notices. Same family as the `main` run-cancellation rule above:
+the failure mode is an absence of signal rather than a signal.
+
 ## Four-tier test structure
 
 Every new function or behaviour needs a test. Put the test in the lowest tier
