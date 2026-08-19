@@ -140,6 +140,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   for (k in applied) name_map[[k]] <- state_out$map[[k]]
   warn <- c(warn, unname(state_out$warnings[applied]))
 
+  # Every state, renamed or not, mapped to the name it is emitted under. Inside
+  # [odes] this map takes precedence over name_map: thetas and etas are out of
+  # scope there, so a symbol that names a state IS the state. Without this a
+  # state sharing an iniDf key had its RHS references rewritten to that
+  # PARAMETER -- `d/dt(CENT) = -K * CENT` emitted `-K * VC` for a theta keyed
+  # CENT, referencing the theta and never the compartment.
+  state_scope <- vapply(state_out$raw, function(s)
+    if (s %in% names(state_map)) state_map[[s]] else s, "")
+
   # De-shadow against the individual-parameter names the parser ACTUALLY
   # produces, by parsing first and parsing again with the corrected map. The
   # alternative -- predicting the parser's output -- has to re-implement its
@@ -154,7 +163,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # duplicate $THETA labels only one of the pair is renamed, which is exactly
   # how that happens. Re-parse and re-check until nothing new appears.
   reserved_base <- c(random_names, .covariate_names(lst, name_map))
-  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
+  # Source names of the thetas referenced from [odes]; recomputed every round.
+  ode_theta  <- character()
+  expr_out   <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map, state_scope)
   rename_why <- vector("list", length(theta_orig))
   for (round in 1:5) {
     # The linCmt passthrough invents an individual parameter for a fixed-effect
@@ -166,6 +177,49 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       cur_lhs <- c(cur_lhs,
                    theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
                               !toupper(theta_orig) %in% toupper(cur_lhs)])
+
+    # A theta referenced from [odes], where thetas are out of scope, needs an
+    # individual parameter to carry the value in. The test is whether the theta's
+    # CURRENT EMITTED name appears in the emitted ODE text -- not its source name,
+    # which is the individual parameter's name in every de-shadowed model:
+    # `d/dt(ABS) = -KA * ABS` beside `theta TVKA` and `KA = TVKA * exp(ETA_KA)`
+    # reads the parameter, and matching on the source name `KA` invented a second
+    # carrier for a reference that was already correct.
+    #
+    # Recomputed each round rather than accumulated, for the same reason: a theta
+    # matches on its source name only until de-shadowing renames it, and a set
+    # carried over from that round keeps a match that is no longer true.
+    #
+    # Listing the name in `cur_lhs` is what triggers the rename. It is not an
+    # individual parameter yet -- the next round re-parses and finds that it is,
+    # which is why this must live inside the loop.
+    #
+    # A theta whose name is also a state name is excluded: in [odes] the state
+    # wins, so the symbol is not a theta reference. Without the exclusion the ODE
+    # still comes out right -- the rename moves the theta off the state's name and
+    # the next round finds no match -- but the theta has been renamed for a
+    # reference that was never to it, and reported as shadowing something it does
+    # not shadow.
+    ode_syms  <- .emitted_ode_symbols(expr_out$odes)
+    theta_now <- vapply(theta_out$thetas, function(t) t$name, "")
+    # An ODE symbol that spells a theta's SOURCE name is a second, separate case,
+    # and the two are told apart by whether anything else declares that symbol.
+    # nonmem2rx does not bind a theta referenced by its $THETA label -- `FLUX =
+    # KTP*A(1)` for `(0,0.2) ; KTP` leaves a free `KTP` and records the theta in a
+    # `rxmissingvars` placeholder -- so the symbol reaches [odes] declared nowhere
+    # and has to be bound to a carrier. Where the same spelling IS declared it is
+    # not a theta reference: `d/dt(ABS) = -KA * ABS` beside `KA = TVKA*exp(ETA_KA)`
+    # reads the individual parameter, and treating it as a theta invented a second
+    # carrier for a reference that was already correct.
+    declared  <- toupper(c(cur_lhs, names(state_scope),
+                           vapply(expr_out$odes, function(o) o$state, ""),
+                           reserved_base))
+    free_syms <- setdiff(ode_syms, declared)
+    ode_theta <- theta_orig[(toupper(theta_now) %in% ode_syms |
+                             toupper(theta_orig) %in% free_syms) &
+                            !theta_orig %in% names(state_scope)]
+    cur_lhs   <- c(cur_lhs,
+                   ode_theta[!toupper(ode_theta) %in% toupper(cur_lhs)])
     desh <- .deshadow_theta_names(
       theta_names = vapply(theta_out$thetas, function(t) t$name, ""),
       indiv_names = cur_lhs,
@@ -188,8 +242,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # that ends up an individual parameter.
       rename_why[[i]] <- unique(c(rename_why[[i]], desh$reasons[[i]]))
     }
-    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map)
+    expr_out <- .parse_model_exprs(lst, name_map, sigma_names_norm, state_map, state_scope)
   }
+
+  # An [odes] reference is reported by the message the carrier emits, not as a
+  # shadow. The rename is real, but at the point it happens nothing named KTP is
+  # an individual parameter -- the trigger only PREDICTS one, and the prediction
+  # comes true because the carrier is appended below. Calling that a shadow tells
+  # the user their model had a collision it never had.
+  parse_lhs <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+  ode_only  <- ode_theta[!toupper(ode_theta) %in% parse_lhs]
 
   for (i in seq_along(rename_why)) {
     if (length(rename_why[[i]]) == 0L) next
@@ -198,10 +260,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       "WARN  | two thetas are named '", theta_orig[i], "' (duplicate $THETA ",
       "label) -- renamed the later one to '", final, "'. ferx would have ",
       "resolved every reference to the first and silently ignored the second."))
-    if (any(rename_why[[i]] == "shadow")) warn <- c(warn, paste0(
-      "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
-      "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
-      "an identically named individual parameter)"))
+    if (any(rename_why[[i]] == "shadow") && !theta_orig[i] %in% ode_only)
+      warn <- c(warn, paste0(
+        "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
+        "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
+        "an identically named individual parameter)"))
   }
 
   structural <- expr_out$structural
@@ -256,6 +319,48 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         }
       }
     }
+  }
+
+  # Define the passthroughs the [odes] scope now references. A theta cannot be
+  # read from a d/dt right-hand side, so `KTP * CENT` is emitted as a reference to
+  # an individual parameter named KTP and this is what defines it. Where the
+  # source already supplies the assignment the entry is skipped: `KTP = THETA(3)`
+  # arrives as the alias `KTP <- KTP`, which pass 3 drops as a self-assignment but
+  # which de-shadowing turns into the surviving `KTP <- TVKTP` -- the same
+  # passthrough, spelled by the model rather than by us. It is only the direct
+  # reference (`DADT(1) = -THETA(3)*A(1)`, no $PK line) that has nothing to
+  # convert, and that shape emitted a bare theta into [odes] until this ran.
+  if (length(ode_theta) > 0) {
+    theta_names <- vapply(theta_out$thetas, function(t) t$name, "")
+    carrier     <- character()   # emitted theta name -> parameter carrying it
+    for (i in seq_along(theta_names)) {
+      nm <- theta_orig[i]
+      if (!nm %in% ode_theta) next
+      lhs <- vapply(expr_out$indiv_params, function(p) p$lhs, "")
+      rhs <- vapply(expr_out$indiv_params, function(p) p$rhs, "")
+      # Reuse an existing parameter only when it is a PURE ALIAS of this theta.
+      # Matching on the name alone is not enough and gets the arithmetic wrong:
+      # `frac <- central/cl` in a model that later writes `cl <- cl*exp(eta.cl)`
+      # reads the theta, so pointing that reference at the individual parameter
+      # CL silently swaps in the IIV-applied value. Both forms parse.
+      hit <- which(toupper(lhs) == toupper(nm) & rhs == theta_names[i])
+      if (length(hit) > 0) {
+        carrier[theta_names[i]] <- lhs[hit[1L]]
+        next
+      }
+      # Otherwise define a new one. Its name has to dodge everything already
+      # emitted, including the individual parameter that made the reuse invalid.
+      pt <- .free_name(nm, c(lhs, theta_names, reserved_base,
+                             vapply(expr_out$odes, function(o) o$state, "")))
+      expr_out$indiv_params <- c(expr_out$indiv_params,
+                                 list(list(lhs = pt, rhs = theta_names[i])))
+      carrier[theta_names[i]] <- pt
+      warn <- c(warn, paste0(
+        "INFO  | theta '", nm, "' is referenced from an ODE, where ferx cannot ",
+        "resolve a theta -- emitting the individual parameter '", pt, " = ",
+        theta_names[i], "' to carry its value"))
+    }
+    expr_out$odes <- .scope_odes_to_params(expr_out$odes, carrier)
   }
 
   lincmt_found <- identical(structural$type, "lincmt")
@@ -584,7 +689,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
              "' -- the source name collides with another emitted name")
   }
 
-  list(map = map, warnings = warn)
+  # `raw` is every state name as the source spelled it, renamed or not. Callers
+  # need the complete set, not just the renamed subset: inside [odes] a symbol
+  # naming a state must resolve to that state even when the state kept its name.
+  list(map = map, warnings = warn, raw = raw)
 }
 
 # Pick a name that is free in `taken`, comparing case-insensitively because
@@ -837,6 +945,59 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # `if` into "the condition has length > 1" and invents a second state.
 .ddt_state <- function(lhs) as.character(lhs[[3]][[2]])[[1L]]
 
+# Point every theta reference in the emitted [odes] block at the individual
+# parameter that carries its value.
+#
+# Applied to the FINAL right-hand sides rather than during the walk, because that
+# is the only place every path converges. The d/dt line is normalised against a
+# map that could carry the substitution, but an ODE-block intermediate that
+# touches a state is inlined instead of emitted, and its text was normalised for
+# a different context -- `ki <- KTP*CENT` reached [odes] as `TVKTP * CENT`, a
+# bare theta, with the passthrough parameter sitting unreferenced beside it.
+# Rewriting the emitted string closes both paths at once.
+#
+# `carrier` maps emitted theta name -> the individual parameter carrying it.
+# Substitution is on the parsed expression, not the text: a regex for `TVKTP`
+# also matches `TVKTP2`. It is re-parsed from `rhs` rather than taken from
+# `rhs_expr`, which the inlining pass does not carry forward -- reading it gave
+# every ODE the right-hand side `NULL`.
+.scope_odes_to_params <- function(odes, carrier) {
+  carrier <- carrier[names(carrier) != unname(carrier)]
+  if (length(carrier) == 0L) return(odes)
+  lapply(odes, function(o) {
+    e <- tryCatch(str2lang(o$rhs), error = function(e) NULL)
+    if (is.null(e)) return(o)
+    e          <- .normalise_expr(e, as.list(carrier))
+    o$rhs_expr <- e
+    o$rhs      <- paste(deparse(e, width.cutoff = 500L), collapse = " ")
+    o
+  })
+}
+
+# Every name the emitted [odes] block will reference, uppercased.
+#
+# Read off the FINAL rhs strings rather than the parsed expressions, because that
+# text is exactly what ferx sees: intermediates have already been inlined, so a
+# name that was inlined away is correctly absent and a name that only appears
+# after inlining is correctly present.
+#
+# This is the set of names for which a theta is NOT in scope. Measured against
+# ferx 0.2.0: a theta can be referenced from [individual_parameters], from
+# `[scaling] y` and from `obs_scale`, but NOT from a d/dt right-hand side, an
+# ODE-block intermediate, an `init()` expression, or a pk macro argument. The
+# plan's phase-3 text lists [scaling] among the out-of-scope blocks; it is not.
+#
+# init() expressions belong in this set too and will join it when phase 4 starts
+# emitting them -- they are parsed from the same odes list.
+.emitted_ode_symbols <- function(odes) {
+  if (length(odes) == 0L) return(character())
+  syms <- unlist(lapply(odes, function(o) {
+    e <- tryCatch(str2lang(o$rhs), error = function(e) NULL)
+    if (is.null(e)) character() else .collect_symbols(e)
+  }))
+  unique(toupper(syms))
+}
+
 # Collect all symbol names (leaves) from an expression tree.
 .collect_symbols <- function(expr) {
   if (is.symbol(expr)) return(as.character(expr))
@@ -873,9 +1034,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 #'   renamed the state to CENTRAL, the same model with that line below it did
 #'   not. The state renames are decided once, before parsing, and must not
 #'   change during it.
+#' @param state_scope Named character vector covering EVERY ODE state, source
+#'   name -> emitted name. Overlaid on `name_map` when normalising an ODE
+#'   right-hand side, because thetas and etas are out of scope in `[odes]`: a
+#'   symbol that names a state must resolve to the state even when a parameter
+#'   shares its source spelling.
 #' @noRd
 .parse_model_exprs <- function(lst, name_map, sigma_names = character(),
-                               state_map = character()) {
+                               state_map = character(),
+                               state_scope = character()) {
   # Pass 1: collect assignments; handle d/dt, linCmt, tilde directly.
   all_assigns  <- list()   # list(lhs_norm, rhs_norm, rhs_expr)
   odes         <- list()
@@ -891,6 +1058,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   for (expr in lst) {
     # cmt() declarations from nonmem2rx -- skip silently
     if (is.call(expr) && identical(as.character(expr[[1]]), "cmt")) next
+
+    # nonmem2rx bookkeeping. When a NONMEM model names a theta by its $THETA
+    # label (`FLUX = KTP*A(1)` for `(0,0.2) ; KTP`), nonmem2rx does not bind the
+    # symbol -- it emits `rxmissingvars1 <- t.KTP` to record that the theta was
+    # referenced and left the reference itself dangling. The placeholder carries
+    # no information the theta does not, and emitting it produced the meaningless
+    # individual parameter `RXMISSINGVARS1 = TVKTP`. The dangling reference is
+    # bound separately, by the [odes] carrier.
+    if (.is_assignment(expr) && is.symbol(expr[[2]]) &&
+        grepl("^rxmissingvars[0-9]+$", tolower(as.character(expr[[2]])))) next
 
     if (.is_lincmt_tilde(expr)) {
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
@@ -931,7 +1108,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         state_raw     <- .ddt_state(lhs_expr)
         state         <- if (state_raw %in% names(state_map)) state_map[[state_raw]]
                          else                                 state_raw
-        rhs_expr_norm <- .normalise_expr(expr[[3]], name_map)
+        # State names win over name_map here: in [odes] thetas and etas are out
+        # of scope, so a symbol naming a state is the state, not a parameter that
+        # happens to share the source spelling. Theta references are NOT resolved
+        # here -- see .scope_odes_to_params(), which does it on the emitted text
+        # because an inlined intermediate never passes through this line.
+        ode_map <- name_map
+        for (s in names(state_scope)) ode_map[[s]] <- state_scope[[s]]
+        rhs_expr_norm <- .normalise_expr(expr[[3]], ode_map)
         rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
         odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))
         aux_vars <- c(aux_vars, toupper(state))  # ODE state vars are auxiliary

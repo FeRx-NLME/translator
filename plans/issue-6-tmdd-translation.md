@@ -629,7 +629,7 @@ matters. Sending states through `.norm()` rather than `.ferx_ident()` would
 uppercase `depot`/`central` in every ODE model in the corpus -- names users read
 and index by -- for no gain.
 
-### Phase 3 -- Theta pass-through, generalised (defect 2)
+### Phase 3 -- Theta pass-through, generalised (defect 2) -- DONE
 
 - Replace the `pk_candidates` name whitelist (`rxui_to_ir.R:103`), which covers
   only `linCmt` models and only hardcoded PK names, with a general rule: collect
@@ -638,6 +638,58 @@ and index by -- for no gain.
   definition gets a pass-through.
 - With phase 0 in place the pass-through reads `CL = TVCL`, not `CL = CL`.
 - Required before phase 4: `init()` rejects a bare theta.
+
+#### Phase 3 design notes -- what the plan got wrong
+
+**`[scaling]` does not need pass-throughs.** The bullet above lists it alongside
+`[odes]`; section 5.4 says the opposite, and 5.4 is right. Measured against both
+ferx 0.2.0 and 0.3.0, a theta is readable from `[individual_parameters]`, from
+`[scaling] y` and from `obs_scale`; it is NOT readable from a `d/dt` right-hand
+side, an ODE-block intermediate, an `init()` expression, or a pk macro argument.
+Only the second group gets a carrier. Treating `[scaling]` as out of scope would
+rename thetas and add parameters for references that were already correct.
+
+**The whitelist was not replaced.** `.PK_CANDIDATES` still drives the linCmt
+pass-through and should stay: those models have no `[odes]` block for the general
+rule to read, and the two mechanisms answer different questions -- "which pk macro
+arg is missing" versus "which emitted ODE symbol resolves to nothing".
+
+**Discovery cannot key on the theta's source name.** In any de-shadowed model the
+source name IS the individual parameter's name, so `d/dt(ABS) = -KA * ABS` beside
+`theta TVKA` and `KA = TVKA * exp(ETA_KA)` reads the parameter. Matching `KA`
+invented a second carrier for a correct reference and moved a bundled snapshot.
+The rule that works is: the theta's *current emitted* name appears in the emitted
+ODE text, OR its source name appears and nothing else declares that symbol. It
+must be recomputed each round of the de-shadow fixpoint, not accumulated -- a
+theta matches on its source name only until the rename lands.
+
+**A carrier may reuse an existing parameter only if that parameter is a pure
+alias of the theta.** `frac <- central/cl` above `cl <- cl*exp(eta.cl)` reads the
+theta; pointing it at `CL` substitutes the IIV-applied value. Both forms parse and
+both fit, so nothing catches it. Such a reference gets its own carrier.
+
+**The scope has to be applied to the emitted text, not during the walk.** An
+ODE-block intermediate that touches a state is inlined, and the inlined text was
+normalised for a different context -- `ki <- KTP*CENT` arrived as `TVKTP * CENT`.
+Resolving only the `d/dt` line also made the output depend on statement order.
+This is the same defect as the phase-2 state map, one layer further in.
+
+**nonmem2rx does not bind a theta referenced by its `$THETA` label.** `FLUX =
+KTP*A(1)` for `(0,0.2) ; KTP` leaves a free `KTP` in `lstExpr` and records the
+theta in `rxmissingvars1 <- t.KTP`. We were emitting that placeholder as
+`RXMISSINGVARS1 = TVKTP` while the reference stayed dangling. Placeholders are now
+dropped and the reference bound. `inst/testmodels/nonmem/ode_theta_ref.ctl` is the
+fixture. An undeclared-but-legal identifier passes the phase-2 legality check --
+that check tests the grammar, not whether anything declares the name -- but ferx
+does catch it: `[odes]: RHS references undefined name(s): KTP`, with or without a
+dataset, measured against 0.3.0. So the fixture fails the concordance corpus sweep
+and aborts `to_ferx(strict = TRUE)` if the carrier regresses. The gap is that
+nothing in the engine-free PR job sees it.
+
+Still open, found while doing this and out of scope here: `obs_cmt` is not
+inferred from `$MODEL COMP=(X, DEFOBS)` (the guess happens to be right in the
+fixture), and an inline scaling division in `$ERROR` (`Y = A(2)/V*(1+EPS(1))`) is
+dropped silently -- only `S1`/`S2` assignments are picked up.
 
 ### Phase 4 -- Non-symbol assignment targets (defects 3, 9, RC-C)
 
