@@ -38,6 +38,21 @@
 
 ## Bug fixes
 
+* **An ordinary parameter named like a ferx dose attribute is renamed.** ferx
+  reads an `[individual_parameters]` name of the form `F{n}`, `D{n}`, `R{n}`,
+  `ALAG{n}`, `LAGTIME{n}` (compartment `n` >= 1), or a bare `F`, `ALAG` or
+  `LAGTIME`, as a dose attribute and applies it to the dose in addition to
+  whatever the source model does with it. The emitted file validated clean,
+  `$unsupported` was empty, and no engine diagnostic mentioned bioavailability,
+  so every prediction was wrong by exactly the parameter's value with nothing to
+  notice it -- measured at a factor of ten on the reported model. Such names are
+  now renamed (`F1` becomes `F1_PAR`), every reference follows, and a `WARN`
+  says what ferx would have done with the original. NONMEM sources are largely
+  protected by NONMEM's own reservation of these names in `$PK`; nlmixr2 and
+  Monolix reserve nothing, which is where this was reported from. No bundled
+  model was affected, so no snapshot changed. Deliberate translation of a
+  genuine `F1`/`ALAG1` remains unimplemented (#16).
+
 * **A bundled model's fitted behaviour changes.** `pkpd_ir.mod` sets
   `A_0(4)=BL`, initialising the effect compartment to baseline. That statement
   was being discarded without a diagnostic, so the translated model started the
