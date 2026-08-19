@@ -912,6 +912,45 @@ Constraints, all verified in 5.4:
 
 Regression target: defect 8's model must emit `if (SEX == 1) { ... }`.
 
+#### Phase 5 measurement pass (done before implementation)
+
+Measured against ferx 0.3.0 with the CLI at `maxiter = 0`, because the phase
+text asserts two things the engine has to actually do and the plan has been
+wrong three times already about what `[odes]` accepts.
+
+**`if`/`else` inside `[odes]` parses AND branches.** This is the linchpin: 5.4
+records that unknown function names are accepted and silently evaluate to the
+identity, so "it validates" would not have been evidence. The discriminating
+test is a conditional whose two arms give different answers, run with the
+condition forced each way against a control with the branch hardcoded:
+
+```
+[odes]
+  CT = CENTRAL / V
+  if (<cond>) { SCL = 1.0 } else { SCL = 0.25 }
+  d/dt(CENTRAL) = -KE * CENTRAL * SCL
+
+TIME      cond true (SCL=1)  cond false (SCL=0.25)  no `if`, hardcoded 1.0
+ 0.5           1.902459             1.975156              1.902459
+ 2.0           1.637462             1.902459              1.637462
+24.0           0.181450             1.097625              0.181450
+```
+
+The true arm equals the hardcoded control to every printed digit and the false
+arm does not, so both arms are really evaluated and the condition really
+selects. Braces on both arms; `else` on the same line as the closing brace.
+
+**ODE-block intermediates in source order validate alongside the `if`.** The
+same model declares `CT`, `BB`, `FB` above the `d/dt` line that reads them and
+reports `ok -- no errors (0 warning(s))`. Note this is NOT independent evidence
+that the order is right: 5.4 records that `[odes]` has no use-before-def check
+and that the wrong order stays valid while collapsing `PRED` to a constant. The
+order constraint has to be honoured by construction, not confirmed by the
+validator.
+
+**Consequence for 5b.** Both halves of the phase-5 target output are expressible
+today, so nothing here needs a ferx-core change.
+
 ### Phase 6 -- Error model and readout (defects 5, 10, 11, 12, 15, RC-E)
 
 **6a. Structural classification.** Decompose `Y = ...` into terms and classify
