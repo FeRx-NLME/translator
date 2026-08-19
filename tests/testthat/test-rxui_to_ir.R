@@ -1664,6 +1664,55 @@ test_that("a state initial condition is translated, not reported as a gap", {
   expect_length(ir$unsupported, 0L)
 })
 
+test_that("an init referencing a solver builtin ferx rejects is dropped", {
+  # An init expression has a NARROWER scope than a d/dt right-hand side. Measured
+  # against ferx 0.3.0: MACHEPS and TIME resolve there, T / TAFD / TAD do not,
+  # and the engine says so -- "may only reference declared states (0 at init
+  # time), individual parameters, or the MACHEPS constant". Treating the whole
+  # of .RESERVED_ODE_NAMES as free let this through the scope guard and emitted
+  # a file the engine then refused, which is the outcome the guard exists to
+  # prevent.
+  for (nm in c("TAD", "TAFD")) {
+    ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+    lst <- list(quote(k <- t.TK * exp(eta1)),
+                bquote(EFFECT(0) <- .(as.name(nm))),
+                quote(d/dt(EFFECT) <- -k * EFFECT))
+    ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                      source_format = "nonmem"))
+    expect_length(ir$initial_conditions, 0L)
+    expect_match(ir$warnings, "does not resolve inside an init expression",
+                 all = FALSE, info = nm)
+  }
+})
+
+test_that("an init referencing MACHEPS is emitted", {
+  # The other half: MACHEPS does resolve there, so narrowing the allowlist must
+  # not have narrowed it past what ferx accepts.
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)), quote(EFFECT(0) <- MACHEPS),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 1L)
+})
+
+test_that("an init referencing TIME is dropped even though ferx accepts it", {
+  # The ONE place this deliberately does not mirror the engine. ferx accepts
+  # `init(X) = TIME` -- by accident, since a bare TIME is an AST node rather
+  # than a variable and the undefined-name check never sees it -- and then reads
+  # it as 0, because model time at init is zero by definition. Measured by
+  # forward simulation: `init = TIME + 50` and `init = 0 + 50` give identical
+  # PRED, and `init = TIME` gives PRED 0 throughout. Emitting it would produce a
+  # model that differs from the source with nothing to show for it.
+  ini <- rbind(theta_row("t.TK", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.TK * exp(eta1)), quote(EFFECT(0) <- TIME),
+              quote(d/dt(EFFECT) <- -k * EFFECT))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_length(ir$initial_conditions, 0L)
+  expect_match(ir$warnings, "always zero at initialisation", all = FALSE)
+})
+
 test_that("an init referencing a theta is dropped with a scope explanation", {
   # Measured against the engine: `init(X) = TVBL` is an E_PARSE naming TVBL
   # undefined, because a theta is not in scope inside an init expression. Emit
