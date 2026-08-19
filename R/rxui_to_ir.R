@@ -756,6 +756,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
           state, ") = ", ic$rhs, "'. ferx accepts a bare TIME here and reads it ",
           "as 0 (ferx-core#994), so the emitted model matches the source; the ",
           "substitution is done here so the file does not depend on that."))
+        # And say it AT THE LINE, not only in the header block. `K + 0` reads as
+        # a translator bug to anyone who does not know why it is there, and the
+        # header warning is twenty lines away and does not travel with the eye.
+        # CLAUDE.md asks for the comment "at the exact location in the .ferx
+        # output where the unsupported feature would have appeared"; this is
+        # that. Deliberately NOT solved by folding `K + 0` to `K`: the unfolded
+        # form is itself evidence that something was zeroed here, and the
+        # artefact is what gets run, shared and diffed months later, while
+        # result$warnings is not.
+        ic$note <- "TIME replaced with 0 -- model time is zero at initialisation"
       }
       if (length(out_of_scope) > 0) {
         warn <- c(warn, paste0(
@@ -768,7 +778,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
           "carry it over."))
         next
       }
-      init_conds <- c(init_conds, list(list(state = state, rhs = ic$rhs)))
+      init_conds <- c(init_conds, list(list(state = state, rhs = ic$rhs,
+                                            note = ic$note)))
       warn <- c(warn, paste0(
         "INFO  | initial condition for '", state, "' emitted as 'init(", state,
         ") = ", ic$rhs, "'."))

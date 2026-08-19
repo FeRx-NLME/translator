@@ -1723,6 +1723,24 @@ test_that("TIME in a COMPOUND init is substituted, not grounds for dropping", {
   d <- mk(quote(50))
   expect_equal(d$initial_conditions[[1]]$rhs, "50")
   expect_length(grep("replaced with 0", d$warnings), 0L)
+
+  # The substitution is annotated AT THE LINE, not only in the header block.
+  # `K + 0` reads as a translator bug to anyone who does not know why, and the
+  # header warning is twenty lines away. Verified separately that ferx accepts a
+  # comment inside [odes], so this cannot make a valid file invalid.
+  # Anchored on the STATEMENT, not on the text: the header WARNING block quotes
+  # `init(EFFECT) = K + 0` too, so a plain fixed match finds two lines and the
+  # assertion silently tests the wrong one.
+  odes <- strsplit(emit_ferx(b), "\n")[[1]]
+  i <- grep("^\\s*init\\(EFFECT\\)", odes)
+  expect_length(i, 1L)
+  expect_match(odes[i - 1], "TIME replaced with 0")
+
+  # ... and an untouched init carries no note.
+  odes_d <- strsplit(emit_ferx(d), "\n")[[1]]
+  j <- grep("^\\s*init\\(EFFECT\\)", odes_d)
+  expect_length(j, 1L)
+  expect_false(grepl("^\\s*#", odes_d[j - 1]))
 })
 
 test_that("an init referencing TIME is dropped even though ferx accepts it", {

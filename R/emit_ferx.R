@@ -151,8 +151,14 @@ emit_ferx <- function(ir) {
   # init() directives lead, so a reader sees each compartment's starting value
   # before its rate of change -- and because ferx parses them as [odes] lines,
   # they belong in this block rather than a section of their own.
-  init  <- vapply(ir$initial_conditions,
-                  function(x) paste0("  init(", x$state, ") = ", x$rhs), "")
+  init <- unlist(lapply(ir$initial_conditions, function(x) {
+    line <- paste0("  init(", x$state, ") = ", x$rhs)
+    # A per-line note goes ABOVE the line it explains. The header warning block
+    # is the index; this is the annotation a reader needs where they are.
+    if (!is.null(x$note) && nzchar(x$note)) c(paste0("  # ", x$note), line)
+    else                                    line
+  }))
+  if (is.null(init)) init <- character()
   lines <- vapply(ir$odes,
                   function(o) paste0("  d/dt(", o$state, ") = ", o$rhs), "")
   paste0("[odes]\n", paste(c(init, lines), collapse = "\n"))
