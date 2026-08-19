@@ -314,16 +314,22 @@ test_that("a strict abort leaves no output file behind", {
   skip_if_not_installed("nonmem2rx")
   dir <- tmp_ctl_dir()
   ctl <- file.path(dir, "bad.ctl")
-  # $MODEL names a compartment that collides with an $ERROR variable, so
-  # nonmem2rx prefixes it to `c.RTOT` and the emitted state identifier carries a
-  # dot that ferx cannot parse (issue #6, defect 1).
+  # $DES references a name that is defined nowhere -- not a theta, not a state,
+  # not a $PK variable, not a data column. `[odes]` rejects undefined names
+  # outright (it does not even fall back to reading them as covariates), so this
+  # is invalid for a reason no phase of the translator can remove: the SOURCE is
+  # broken, there is nothing to translate correctly.
+  #
+  # It used to use a dotted state name (`c.RTOT`, issue #6 defect 1), which
+  # stopped failing the moment that defect was fixed. The subject under test is
+  # the validate-before-write ordering, so it must not rest on a live defect.
   writeLines(c(
-    "$PROBLEM dotted state", "$INPUT ID TIME AMT DV MDV",
+    "$PROBLEM undefined name in DES", "$INPUT ID TIME AMT DV MDV",
     "$DATA d.csv IGNORE=@", "$SUBROUTINES ADVAN13 TOL=9",
-    "$MODEL", "  COMP=(CENT, DEFDOSE, DEFOBS)", "  COMP=(RTOT)",
+    "$MODEL", "  COMP=(CENT, DEFDOSE, DEFOBS)",
     "$PK", "  KEL = THETA(1)*EXP(ETA(1))", "  VC = THETA(2)",
-    "$DES", "  DADT(1) = -KEL*A(1)", "  DADT(2) = -KEL*A(2)",
-    "$ERROR", "  RTOT = A(2)", "  Y = A(1)/VC*(1+EPS(1))",
+    "$DES", "  DADT(1) = -KEL*A(1)*NOSUCHNAME",
+    "$ERROR", "  Y = A(1)/VC*(1+EPS(1))",
     "$THETA (0,0.05) (0,3)", "$OMEGA 0.09", "$SIGMA 0.04", "$EST METHOD=1"), ctl)
   writeLines("ID,TIME,AMT,DV,MDV\n1,0,100,0,1", file.path(dir, "d.csv"))
   out <- file.path(dir, "out.ferx")

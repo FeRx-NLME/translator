@@ -847,3 +847,481 @@ test_that("the invariant covers individual parameters the linCmt passthrough add
   expect_match(ir$unsupported, "name collision", all = FALSE)
   for (nm in clash) expect_match(ir$unsupported, nm, all = FALSE)
 })
+
+# -- identifier sanitisation --------------------------------------------------
+
+test_that(".ferx_ident maps any name onto the ferx grammar", {
+  # Illegal characters become underscores.
+  expect_equal(.ferx_ident("c.RTOT"), "c_RTOT")
+  expect_equal(.ferx_ident("A-B+C"), "A_B_C")
+  expect_equal(.ferx_ident("has space"), "has_space")
+  # Case is preserved -- .norm() is where uppercasing happens.
+  expect_equal(.ferx_ident("central"), "central")
+  # A leading digit cannot be substituted away, and an empty name has nothing
+  # to substitute; both need a prefix instead.
+  expect_equal(.ferx_ident("2CPT"), "X_2CPT")
+  expect_equal(.ferx_ident(""), "X")
+  # Whatever goes in, a legal identifier comes out.
+  for (nm in c("c.RTOT", "A-B+C", "2CPT", "", "_x", "9", "..", "a b c"))
+    expect_true(.is_ferx_ident(.ferx_ident(nm)), info = nm)
+})
+
+test_that(".is_ferx_ident matches the ferx grammar", {
+  expect_true(all(.is_ferx_ident(c("A", "_a", "A1", "a_B_9"))))
+  expect_false(any(.is_ferx_ident(c("c.RTOT", "1A", "", "a-b", "a b"))))
+})
+
+test_that(".norm is .ferx_ident plus the uppercase convention", {
+  # The old .norm() substituted only the dot. Anything it used to do it must
+  # still do, or every emitted name changes at once.
+  expect_equal(.norm("t.CL"), "T_CL")
+  expect_equal(.norm("central"), "CENTRAL")
+  expect_equal(.norm("c.RTOT"), "C_RTOT")
+  # ...and it now also covers the characters the dot rule missed.
+  expect_equal(.norm("2CPT"), "X_2CPT")
+})
+
+test_that("a dotted state name is renamed at every reference site", {
+  # nonmem2rx prefixes `c.` onto a compartment whose name collides with a
+  # variable, and the result appeared in four places: obs_cmt=, states=[...],
+  # the d/dt target, and inlined into other ODE right-hand sides. Renaming the
+  # declaration alone leaves the references pointing at nothing.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("CENT", quote(-kel * CENT - `c.RTOT`)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$structural$states, c("CENT", "c_RTOT"))
+  states <- vapply(ir$odes, function(o) o$state, "")
+  expect_equal(states, c("CENT", "c_RTOT"))
+  # The reference inlined into the OTHER state's RHS is the whole point.
+  expect_match(ir$odes[[1]]$rhs, "c_RTOT", fixed = TRUE)
+  # No CODE line may still carry the dot. Comment lines may and now do -- the
+  # `# renamed:` provenance line names the source spelling on purpose -- so the
+  # assertion is scoped to the lines ferx actually parses.
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("c.RTOT", code, fixed = TRUE)))
+  expect_match(ir$warnings, "^INFO  \\| state 'c\\.RTOT' is not a legal ferx",
+               all = FALSE)
+})
+
+test_that("obs_cmt taken from ui$central is renamed with the state", {
+  # `ui$central` is a separate, RAW channel for the observed compartment -- it
+  # bypasses the odes entirely, so it needs its own translation. Every other
+  # test reaches obs_cmt through the tail(state_names) guess, which is already
+  # sanitised, leaving this branch unexercised: a mutation that dropped the
+  # lookup emitted `obs_cmt=c.RTOT` beside `states=[c_RTOT]` and the whole suite
+  # still passed.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  ui  <- c(mock_ui(ini, lst), list(central = "c.RTOT"))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(ir$structural$obs_cmt, "c_RTOT")
+  # And no guess was needed, so the guess warning must be absent -- otherwise
+  # this could pass by falling through to the fallback path.
+  expect_length(grep("obs_cmt could not be inferred", ir$warnings), 0L)
+  # Code lines only -- the `# renamed:` provenance comment names the source
+  # spelling deliberately.
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("c.RTOT", code, fixed = TRUE)))
+})
+
+test_that("obs_cmt is resolved through the state renames, not the parameter map", {
+  # The previous test cannot separate the two maps: `c.RTOT` is a key in both
+  # and they agree on it. Here they disagree. `ui$central` names a state whose
+  # raw spelling is also an iniDf key, so resolving through `name_map` rewrites
+  # obs_cmt to the THETA's emitted name -- producing an obs_cmt that names no
+  # state at all, which ferx rejects with
+  # `E_PARSE: Observable compartment 'VC' not in states [...]`.
+  ini <- rbind(theta_row("CENT", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("VC", NA_character_)
+  lst <- list(quote(k <- CENT * exp(eta1)), ddt("CENT", quote(-k * CENT)))
+  ui  <- c(mock_ui(ini, lst), list(central = "CENT"))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(ir$structural$obs_cmt, "CENT")
+  # The invariant that actually matters: obs_cmt must name a declared state.
+  expect_true(ir$structural$obs_cmt %in% ir$structural$states)
+})
+
+test_that("a state rename is recorded in the emitted file as provenance", {
+  # The .ferx is the artefact that gets shared. Without this line a reader
+  # holding only that file cannot map `c_RTOT` back to the $MODEL compartment or
+  # the A(n) index it came from -- the rename lived only in result$warnings,
+  # which does not travel with the file.
+  ini <- rbind(theta_row("t.KEL", 0.05), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(kel <- t.KEL * exp(eta1)),
+              ddt("c.RTOT", quote(-kel * `c.RTOT`)))
+  # `central` is supplied so obs_cmt needs no guess: the rename is then the ONLY
+  # note the translation produces, which is what makes the warning-count
+  # assertion below meaningful rather than incidental.
+  ir  <- suppressWarnings(rxui_to_ir(c(mock_ui(ini, lst), list(central = "c.RTOT"))))
+  txt <- emit_ferx(ir)
+
+  expect_equal(ir$state_renames, c("c.RTOT" = "c_RTOT"))
+  expect_match(txt, "# renamed: state c.RTOT -> c_RTOT", fixed = TRUE)
+  # Provenance, not a diagnostic: it must not inflate the warning count, and a
+  # model whose only note is a rename must not advertise warnings at all.
+  expect_false(grepl("# Warnings:", txt, fixed = TRUE))
+})
+
+test_that("a model with no renames gets no provenance line", {
+  ini <- rbind(theta_row("t.KA", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(ka <- t.KA * exp(eta1)), ddt("depot", quote(-ka * depot)))
+  txt <- emit_ferx(suppressWarnings(rxui_to_ir(mock_ui(ini, lst))))
+  expect_false(grepl("# renamed:", txt, fixed = TRUE))
+})
+
+test_that("a state that is already legal is left alone", {
+  # A rename is a user-visible change to a name they index by. Only names that
+  # must change may change -- `depot`/`central` are legal ferx identifiers and
+  # uppercasing them buys nothing.
+  ini <- rbind(theta_row("t.KA", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(ka <- t.KA * exp(eta1)),
+              ddt("depot", quote(-ka * depot)),
+              ddt("central", quote(ka * depot)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), c("depot", "central"))
+  expect_length(grep("state '", ir$warnings), 0L)
+})
+
+test_that("two states that sanitise to the same name are disambiguated", {
+  # `.ferx_ident()` is not injective: distinct illegal names can collapse onto
+  # one legal one, which would silently merge two compartments.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)),
+              ddt("A.B", quote(-k * `A.B`)),
+              ddt("A-B", quote(-k * `A-B`)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  states <- vapply(ir$odes, function(o) o$state, "")
+  expect_length(unique(states), 2L)
+  expect_true(all(.is_ferx_ident(states)))
+  # Each RHS must reference its OWN state, not the one it collided with.
+  for (o in ir$odes) expect_match(o$rhs, o$state, fixed = TRUE)
+})
+
+test_that("an already-legal state keeps its name against a sanitised collider", {
+  # Processing in source order let an ILLEGAL name claim the spelling of a
+  # legal one that appeared later: `A.B` sanitised to `A_B` and displaced the
+  # existing `A_B` to `A_B_1`, renaming the one name in the pair that was
+  # already fine. The legal name has first claim.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)),
+              ddt("A.B", quote(-k * `A.B`)),
+              ddt("A_B", quote(-k * A_B)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  states <- vapply(ir$odes, function(o) o$state, "")
+  # Source order is preserved in the odes; the legal name is untouched.
+  expect_equal(states, c("A_B_1", "A_B"))
+  expect_length(grep("state 'A_B' renamed", ir$warnings), 0L)
+  # Each RHS still references its own state.
+  for (o in ir$odes) expect_match(o$rhs, o$state, fixed = TRUE)
+})
+
+test_that("a state colliding with an eta name is renamed, not the eta", {
+  ini <- rbind(theta_row("t.K", 1), eta_row("ETA1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(ETA1)), ddt("eta1", quote(-k * eta1)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # The eta keeps its name; the state gives way. Critically, the eta reference
+  # in [individual_parameters] must NOT have been rewritten along with it.
+  expect_equal(vapply(ir$omegas, function(o) o$names, ""), "ETA1")
+  expect_match(ir$indiv_params[[1]]$rhs, "exp(ETA1)", fixed = TRUE)
+  expect_false(toupper(ir$odes[[1]]$state) == "ETA1")
+})
+
+test_that("state renaming does not rename thetas -- one owner per collision", {
+  # `.deshadow_theta_names()` is the single owner of theta naming (CLAUDE.md).
+  # Reserving theta names in the state sanitiser too made two owners for one
+  # collision: a state `central` beside a theta labelled CENTRAL got renamed to
+  # `central_1` while the theta was independently renamed, churning both names.
+  ini <- rbind(theta_row("th1", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("CENTRAL", NA_character_)
+  lst <- list(quote(cl <- th1 * exp(eta1)), ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), "central")
+  expect_length(grep("state 'central'", ir$warnings), 0L)
+})
+
+test_that("a covariate whose name is illegal is reported, never renamed", {
+  # ferx matches covariates to data columns by exact name, case included, so a
+  # rename cannot fix an illegal covariate -- it only moves the failure from
+  # E_PARSE to E_MISSING_COVARIATE. It has to be said out loud instead.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * `WT.BASE` * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| covariate reference", all = FALSE)
+  expect_match(ir$unsupported, "covariate name is not a legal ferx identifier",
+               all = FALSE)
+  expect_match(ir$unsupported, "WT.BASE", all = FALSE, fixed = TRUE)
+  # It must reach the artefact, not only the result object.
+  expect_match(emit_ferx(ir), "# WARNING: covariate reference")
+})
+
+test_that("covariate case is preserved exactly as written", {
+  # ferx matches data columns case-SENSITIVELY (ferx-core datareader.rs uses
+  # case-insensitive matching only for the standard columns). nonmem2rx keeps
+  # the $INPUT case for data items while lowercasing assigned variables, and a
+  # covariate is absent from name_map so .normalise_expr() leaves it alone --
+  # which is how this works today. Nothing tested it, so a blanket uppercase
+  # pass over emitted symbols would have broken every covariate silently.
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * (Wt/70) * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$indiv_params[[1]]$rhs, "Wt/70", fixed = TRUE)
+  expect_false(grepl("WT/70", ir$indiv_params[[1]]$rhs, fixed = TRUE))
+  # A legal covariate is not reported as a problem.
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+})
+
+test_that("the emitted state name does not depend on statement order", {
+  # The d/dt target used to be resolved through `name_map`, which
+  # .parse_model_exprs() keeps extending as it walks -- every ordinary
+  # assignment installs an alias. So an unrelated `central <- 0` written ABOVE
+  # d/dt(central) renamed the state to CENTRAL, and the same model with that
+  # line BELOW did not. The renames are decided once, before parsing, and the
+  # declaration reads only those.
+  #
+  # The RHS is asserted, not only the state. Comparing `o$state` alone passed
+  # while the equations still differed: the declaration was already read from
+  # the pre-parse decision, but the references were not, so `central <- 0`
+  # standing above rebound the state's key mid-walk and emitted
+  # `d/dt(central_1) = -K * CENTRAL` -- a derivative that reads the constant
+  # individual parameter and never its own compartment, which ferx validates
+  # clean.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  ode <- function(l) {
+    o <- suppressWarnings(rxui_to_ir(mock_ui(ini, l)))$odes
+    vapply(o, function(x) paste0("d/dt(", x$state, ") = ", x$rhs), "")
+  }
+  above <- ode(list(quote(k <- t.K * exp(eta1)), quote(central <- 0),
+                    ddt("central", quote(-k * central))))
+  below <- ode(list(quote(k <- t.K * exp(eta1)),
+                    ddt("central", quote(-k * central)), quote(central <- 0)))
+  expect_equal(above, below)
+  # and the surviving equation is the right one -- the state, not the constant.
+  expect_equal(above, "d/dt(central_1) = -K * central_1")
+})
+
+test_that("a state whose raw name is a parameter key keeps its own name", {
+  # Same root cause, different symptom: `name_map` holds every iniDf key, so a
+  # state that merely happened to share one was renamed to that PARAMETER's
+  # emitted name -- a theta keyed CENT and labelled VC turned d/dt(CENT) into
+  # d/dt(VC), silently making the compartment the theta. The sanitiser had
+  # decided no such rename.
+  ini <- rbind(theta_row("CENT", 1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("VC", NA_character_)
+  lst <- list(quote(k <- CENT * exp(eta1)), ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$odes, function(o) o$state, ""), "CENT")
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), "VC")
+  # The RHS is the half that was wrong, and asserting only the two names above
+  # let it stay wrong: the declaration kept CENT while every reference to it
+  # resolved through name_map to the theta, emitting `d/dt(CENT) = -K * VC` --
+  # the compartment amount replaced by a fixed theta, no warning, engine clean.
+  # Inside [odes] the state wins; in $PK the same symbol still means the theta.
+  expect_equal(ir$odes[[1]]$rhs, "-K * CENT")
+  expect_equal(ir$indiv_params[[1]]$rhs, "VC * exp(ETA1)")
+  # ...and the ambiguity itself is reported, since the source cannot say which
+  # reading it meant.
+  expect_match(ir$unsupported, "state/parameter source-name collision: CENT",
+               all = FALSE, fixed = TRUE)
+})
+
+test_that("a sanitised state never swallows an individual parameter", {
+  # The worst failure this review found, because ferx accepts the result. When a
+  # sanitised state lands on an assignment target, that assignment is absorbed
+  # into aux_vars, dropped from [individual_parameters], and its references
+  # resolve to the state: `A_B = K * exp(ETA1)` beside `d/dt(A.B) = -A_B * A.B`
+  # emitted `d/dt(A_B) = -A_B * A_B` -- the amount squared, rate constant and
+  # IIV gone -- and validated clean.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(A_B <- t.K * exp(eta1)), ddt("A.B", quote(-A_B * `A.B`)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("A_B" %in% lhs)                       # the parameter survives
+  expect_false(identical(ir$odes[[1]]$state, "A_B")) # the state gave way
+  # and the IIV is still wired to something
+  expect_match(paste(vapply(ir$indiv_params, function(p) p$rhs, ""), collapse = " "),
+               "ETA1", fixed = TRUE)
+})
+
+# NOTE: the state/individual-parameter invariant in rxui_to_ir() has no test
+# because I could not construct an input that reaches it. Once the sanitiser
+# reserves every assignment target in `lst`, a state can no longer be renamed
+# onto an individual parameter, and the parameters that appear later (the linCmt
+# passthrough) only exist for models with no ODEs. It is kept as defence in
+# depth -- ferx is silent about this collision and the symptom is a deleted
+# parameter -- but it is unasserted, and a test that merely built the colliding
+# IR by hand would assert the constructor, not the guard.
+
+test_that("a symbol referenced before its assignment gets the emitted name", {
+  # The alias used to be installed only once the walk had passed the assignment,
+  # so a forward reference was emitted EXACTLY as written -- two spellings of one
+  # variable, `f.rac` illegal at every reference site and `F_RAC` declared beside
+  # it. Nothing reported it either: .unmapped_symbols() subtracts assignment
+  # targets regardless of position, so the leaked name was filtered out of the
+  # legality check as "assigned, therefore legal by construction".
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * exp(eta1)),
+              ddt("central", quote(-cl * central * `f.rac`)),
+              quote(f.rac <- 0.5))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(ir$odes[[1]]$rhs, "-CL * central * F_RAC")
+  expect_true("F_RAC" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  code <- grep("^\\s*#", strsplit(emit_ferx(ir), "\n")[[1]], invert = TRUE, value = TRUE)
+  expect_false(any(grepl("f.rac", code, fixed = TRUE)))
+})
+
+test_that("the order-independent alias does not override an iniDf binding", {
+  # Seeding every assignment target up front must not disturb de-shadowing: in
+  # `cl <- cl * exp(eta.cl)` the RHS `cl` is the THETA and the following
+  # `k20 <- cl/v` is the individual parameter, and only the mid-walk rebinding
+  # tells them apart. The seed therefore skips names the map already holds.
+  ini <- rbind(theta_row("cl", 1), theta_row("v", 10), eta_row("eta.cl", 0.09, 1L))
+  lst <- list(quote(cl <- cl * exp(eta.cl)), quote(v <- v), quote(k20 <- cl / v),
+              ddt("central", quote(-k20 * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_match(ir$indiv_params[[match("CL", lhs)]]$rhs, "exp(ETA_CL)", fixed = TRUE)
+  # the theta was renamed away, and K20 reads the individual parameter
+  expect_equal(ir$indiv_params[[match("K20", lhs)]]$rhs, "CL/V")
+})
+
+test_that("a theta named after a ferx solver builtin is renamed", {
+  # The quietest of the three theta failures. ferx does not reject `theta TIME`
+  # -- it resolves the bare name to the value the solver injects, so KA reads the
+  # integrator clock, the theta is declared and estimated and never referenced,
+  # and the only diagnostic is a W_UNUSED_PARAM that explains none of it.
+  ini <- rbind(theta_row("t.KA", 0.1), eta_row("eta1", 0.09, 1L))
+  ini$label <- c("TIME", NA_character_)
+  lst <- list(quote(ka <- t.KA * exp(eta1)), ddt("depot", quote(-ka * depot)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), "TVTIME")
+  expect_equal(ir$indiv_params[[1]]$rhs, "TVTIME * exp(ETA1)")
+  expect_match(ir$warnings, "collides with a ferx solver builtin", all = FALSE)
+  # Every name in the list, not just TIME -- T and TAD are ordinary $DES and
+  # $PK variable names, so the whole set has to be covered.
+  for (nm in .RESERVED_ODE_NAMES) {
+    i2 <- rbind(theta_row("t.KA", 0.1), eta_row("eta1", 0.09, 1L))
+    i2$label <- c(nm, NA_character_)
+    r2 <- suppressWarnings(rxui_to_ir(mock_ui(i2, lst)))
+    expect_false(toupper(r2$thetas[[1]]$name) %in% .RESERVED_ODE_NAMES, info = nm)
+  }
+})
+
+test_that("an individual parameter named after a builtin is reported", {
+  # It cannot be renamed the way a theta can -- the name is the source's, and
+  # [scaling] and [error_model] reference it by that name -- so it is reported.
+  # ferx-core rejects the model outright, but names no source variable.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(TAD <- t.K * exp(eta1)), ddt("depot", quote(-TAD * depot)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| TAD names both an individual parameter",
+               all = FALSE)
+  expect_match(ir$unsupported, "individual parameter collides with a ferx builtin",
+               all = FALSE)
+  expect_match(emit_ferx(ir), "# WARNING: TAD names both an individual parameter")
+})
+
+test_that("a sigma whose source name needs sanitising still reaches the error model", {
+  # nonmem2rx keeps sigma out of iniDf, so nothing bound its source spelling to
+  # its emitted name: the declaration and the eps reference in $ERROR agreed only
+  # while both were plain uppercase. Once the declaration was sanitised the two
+  # diverged, pass 3 found no sigma in the error assignment, and the file came
+  # out with `sigma EPS_1` declared and NO [error_model] block at all -- a model
+  # with no residual error and not one word about it.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  sig <- matrix(0.04, 1, 1, dimnames = list("eps.1", "eps.1"))
+  ui  <- c(mock_ui(ini, list(quote(k <- t.K * exp(eta1)),
+                             ddt("cent", quote(-k * cent)),
+                             quote(y <- cent * (1 + `eps.1`)))),
+           list(sigma = sig))
+  ir  <- suppressWarnings(rxui_to_ir(ui))
+
+  expect_equal(vapply(ir$sigmas, function(s) s$name, ""), "EPS_1")
+  expect_length(ir$error_model, 1L)
+  expect_equal(ir$error_model[[1]]$params, "EPS_1")
+  # and the sigma is not misreported as an illegal covariate on the way through
+  expect_length(grep("covariate reference", ir$warnings), 0L)
+})
+
+test_that("a non-scalar ui$central does not abort the translation", {
+  # is.character() is TRUE for character(0) and for length 2, so both reached an
+  # `if` that errors ("argument is of length zero" / "the condition has length
+  # > 1") on a model that previously translated.
+  ini <- rbind(theta_row("t.K", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(eta1)), ddt("cent", quote(-k * cent)))
+  for (v in list(character(0), c("a", "b"))) {
+    ui <- c(mock_ui(ini, lst), list(central = v))
+    expect_no_error(suppressWarnings(rxui_to_ir(ui)))
+  }
+})
+
+test_that(".ferx_ident maps NA to a legal identifier", {
+  # nzchar(NA) is TRUE and gsub/sub pass NA through, so NA slipped past both
+  # guards and out of a function documented to return a legal identifier for
+  # any input.
+  expect_true(.is_ferx_ident(.ferx_ident(NA_character_)))
+  expect_false(is.na(.ferx_ident(NA_character_)))
+})
+
+test_that("an illegal free symbol is reported even when it normalises to a known name", {
+  # The check used to run on the covariate set, which is classified by
+  # NORMALISED name: a raw `c.RTOT` beside an eta named `c_RTOT` normalises to
+  # a known `C_RTOT` and was filtered out as "not a covariate" -- while
+  # .normalise_expr(), which matches raw keys, still emitted `c.RTOT` verbatim.
+  ini <- rbind(theta_row("t.K", 1), eta_row("c_RTOT", 0.09, 1L))
+  lst <- list(quote(k <- t.K * `c.RTOT` * exp(c_RTOT)),
+              ddt("central", quote(-k * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$unsupported, "not a legal ferx identifier", all = FALSE)
+  expect_match(ir$unsupported, "c.RTOT", all = FALSE, fixed = TRUE)
+})
+
+test_that("a state whose source name is also a parameter name is scope-resolved", {
+  # Both deparse to the same symbol, so the source cannot say which is meant and
+  # the collision has to be reported. What it must NOT do is corrupt the model:
+  # refusing the rename left the state sharing a name with the eta, so the
+  # assignment referencing it was absorbed into aux_vars, dropped from
+  # [individual_parameters] -- the block came out EMPTY -- and self-inlined to
+  # the depth cap, emitting exp(ETA_X) fifteen times.
+  ini <- rbind(theta_row("t.K", 1), eta_row("ETA_X", 0.09, 1L))
+  lst <- list(quote(k <- t.K * exp(ETA_X)), ddt("ETA_X", quote(-k * ETA_X)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_match(ir$warnings, "^ERROR \\| 'ETA_X' names both an ODE state and a",
+               all = FALSE)
+  expect_match(ir$unsupported, "state/parameter source-name collision",
+               all = FALSE)
+
+  # Resolved by scope, which is how ferx itself reads them: inside [odes] the
+  # bare name is the state (etas are out of scope there), outside it the eta.
+  expect_equal(ir$odes[[1]]$state, "ETA_X_1")
+  expect_equal(ir$odes[[1]]$rhs, "-K * ETA_X_1")
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("K" %in% lhs)
+  expect_match(ir$indiv_params[[match("K", lhs)]]$rhs, "exp(ETA_X)", fixed = TRUE)
+  # One exp(), not the depth-cap cascade.
+  expect_equal(lengths(regmatches(ir$odes[[1]]$rhs,
+                                  gregexpr("exp(", ir$odes[[1]]$rhs, fixed = TRUE))),
+               0L)
+})

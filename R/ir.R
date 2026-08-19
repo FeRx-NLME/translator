@@ -37,6 +37,11 @@
 #'   with `INFO`, `WARN`, or `ERROR`.
 #' @param unsupported Character vector of features detected in the source
 #'   that could not be translated.
+#' @param state_renames Named character vector of ODE state renames, source
+#'   name -> emitted name. Provenance, not a diagnostic: the emitted `.ferx` is
+#'   the artefact that gets shared, and a reader holding only that file cannot
+#'   otherwise map a sanitised state back to the source compartment it came
+#'   from. Rendered as `# renamed:` comments by [emit_ferx()].
 #'
 #' @return A `ferx_ir` list.
 #'
@@ -69,7 +74,8 @@ new_ferx_ir <- function(
   scaling       = list(),
   fit_options   = list(),
   warnings      = character(),
-  unsupported   = character()
+  unsupported   = character(),
+  state_renames = character()
 ) {
   structure(
     list(
@@ -87,7 +93,8 @@ new_ferx_ir <- function(
       scaling       = scaling,
       fit_options   = fit_options,
       warnings      = warnings,
-      unsupported   = unsupported
+      unsupported   = unsupported,
+      state_renames = state_renames
     ),
     class = "ferx_ir"
   )

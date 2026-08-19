@@ -170,12 +170,22 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
 
 # -- corpus-wide sweep (engine-free, runs on every PR) ------------------------
 
-# Translates every bundled model once and asserts two things the engine cannot
-# check for us: that nothing crashes, and that no theta shadows an individual
-# parameter. A theta sharing a name with an individual parameter shadows it in
-# every ferx block where thetas are in scope, so the individual definition is
-# written and never read -- silently, with no diagnostic from
-# ferx_model_validate(). $unsupported is printed as a gap table, not failed.
+# Translates every bundled model once and asserts three things: that nothing
+# crashes, that no theta shadows an individual parameter, and that every emitted
+# name is a legal ferx identifier.
+#
+# The first two the engine cannot check for us. A theta sharing a name with an
+# individual parameter shadows it in every ferx block where thetas are in scope,
+# so the individual definition is written and never read -- silently, with no
+# diagnostic from ferx_model_validate(). $unsupported is printed as a gap table,
+# not failed.
+#
+# The identifier check the engine WOULD catch, but only for whichever model
+# happens to be validated, and only as an E_PARSE that says nothing about which
+# name is at fault. Asserting it here names the model and the identifier, and it
+# runs without ferx installed. Covariates are deliberately excluded: they must
+# keep the case and spelling of the data column, so an illegal one is reported
+# as unsupported rather than renamed.
 #
 # The engine half of this sweep (validate each emitted .ferx, fail on
 # error-severity diagnostics) lives in test-concordance.R behind the ferx gate.
@@ -187,6 +197,7 @@ test_that("every bundled model translates, without a shadowing theta", {
 
   crashed   <- character()
   offenders <- character()
+  illegal   <- character()
   gaps      <- character()
 
   for (m in models) {
@@ -203,6 +214,27 @@ test_that("every bundled model translates, without a shadowing theta", {
     )
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
+
+    # Tokenise the EMITTED TEXT, not the IR's declaration fields. An illegal
+    # name is accepted where it is declared -- `ode(states=[c.RTOT])` parses --
+    # and rejected at every reference, so a declaration-only check inspects the
+    # half that works. Enumerating IR fields also silently misses whichever
+    # channel is added next: reading the artefact cannot.
+    txt   <- emit_ferx(ir)
+    lines <- strsplit(txt, "\n")[[1]]
+    lines <- lines[!grepl("^\\s*#", lines)]        # comments carry source names
+    toks  <- unique(unlist(regmatches(
+      lines, gregexpr("[A-Za-z_][A-Za-z0-9_.]*", lines))))
+    bad <- setdiff(unique(toks[!.is_ferx_ident(toks)]), c("true", "false"))
+    # A name the translator already reported as untranslatable is not a silent
+    # leak -- covariates in particular must keep the data column's exact
+    # spelling, so an illegal one is declared unsupported rather than renamed.
+    bad <- bad[!vapply(bad,
+                       function(b) any(grepl(b, ir$unsupported, fixed = TRUE)),
+                       logical(1))]
+    if (length(bad) > 0)
+      illegal <- c(illegal, paste0(basename(m), ": ", paste(bad, collapse = ", ")))
+
     if (length(ir$unsupported) > 0)
       gaps <- c(gaps, paste0(basename(m), " -- ", ir$unsupported))
   }
@@ -216,4 +248,5 @@ test_that("every bundled model translates, without a shadowing theta", {
 
   expect_equal(crashed, character())
   expect_equal(offenders, character())
+  expect_equal(illegal, character())
 })
