@@ -21,7 +21,16 @@
   ferx-r's own NEWS heading reads `0.3.0.9000` -- so identify this engine by SHA
   and not by version. The stale version is upstream breakage this pin did not
   cause (ferx-r#296); what changed here is that it became consequential, this
-  being the first breaking parser change to ride under a released version number. No re-baseline of the concordance reference omegas or the
+  being the first breaking parser change to ride under a released version number.
+
+  No concordance reference omega and no bundled dataset moved. One concordance
+  TEST did have to change: the dose-attribute guard's discriminating half asserted
+  that the un-renamed spelling still simulates and comes back scaled by exactly
+  the parameter's value, which was the silent-wrong hazard. Under the new engine
+  that spelling is a parse error instead, so the assertion now pins the rejection.
+  The property under test is unchanged; only the consequence moved, from
+  silent-wrong to loud. That test now requires the pinned engine and fails against
+  anything older, which is correct for the concordance tier. No re-baseline of the concordance reference omegas or the
   bundled datasets was needed.
 
   `engine-pin-drift.yml` now compares the pin against ferx-r's **main HEAD**
