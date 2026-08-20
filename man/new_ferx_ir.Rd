@@ -80,7 +80,11 @@ rather than emitting a file the engine rejects.}
 
 \item{error_model}{List of error model entries. Each element is a list
 with \code{dv} (character), \code{type} (\code{"proportional"}, \code{"additive"}, or
-\code{"combined"}), and \code{params} (character vector of parameter names).}
+\code{"combined"}), and \code{params} (character vector of parameter names). An entry
+may additionally carry \code{cmt} (integer, rendered as \code{CMT=N: DV ~ ...}) or
+\code{cond} (character, rendered as an \code{if}/\verb{else if} chain whose last entry
+omits \code{cond} and becomes the \verb{else} ferx requires). The three forms are
+mutually exclusive within one list.}
 
 \item{error_suggestion}{Character vector of comment lines rendered where the
 \verb{[error_model]} block would have gone, when the source error expression
@@ -88,7 +92,11 @@ could not be translated. The block itself is omitted so the engine rejects
 the file rather than accepting a guess; these lines carry the source
 expression and a plausible reading the user can uncomment after checking it.}
 
-\item{scaling}{List with \code{obs_scale} (numeric or \code{NULL}).}
+\item{scaling}{List describing the observation readout. At most one of
+\code{obs_scale} (numeric or character, the NONMEM \code{S1}/\code{S2} scale), \code{y} (a
+Form C readout expression as a single string) or \code{per_cmt} (a list of
+\code{list(cmt =, expr =)} entries rendered as \code{y[CMT=N] = ...}). \code{obs_scale}
+cannot be combined with either readout: ferx applies it on top of them.}
 
 \item{fit_options}{List with named elements such as \code{method}, \code{maxiter},
 \code{covariance}, and (when IOV is present) \code{iov_column}.}

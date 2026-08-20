@@ -168,6 +168,41 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
   expect_length(result$unsupported, 0L)
 })
 
+test_that("TMDD with a FLAG dispatch: Form C readout + selected error model", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("qss_tmdd.mod")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  # The three halves of defect 5, asserted rather than left to the snapshot: a
+  # snapshot records whatever is emitted, including a silently dropped dispatch.
+  expect_match(result$ferx_text, "y = if (FLAG == 2) c_RTOT else CENT/VC",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "if (FLAG == 2) { DV ~ proportional(EPS2) }",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "else { DV ~ proportional(EPS1) }", fixed = TRUE)
+  # Defects 12 and 15: both inferences the readout replaces are gone. obs_scale
+  # would double-scale every prediction, obs_cmt is ignored.
+  expect_no_match(result$ferx_text, "obs_scale", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
+  # Defect 6: the indicators are consumed, not left dead in the parameter block.
+  expect_no_match(result$ferx_text, "W1", fixed = TRUE)
+})
+
+test_that("PKPD with a CMT dispatch: per-CMT readout + per-CMT error model", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("pkpd_cmt.mod")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  # ferx does not expose CMT as a covariate, so this source cannot use Form C --
+  # measured, `Model references covariate(s) not found in data: CMT`.
+  expect_match(result$ferx_text, "y[CMT=1] = CENT/VC", fixed = TRUE)
+  expect_match(result$ferx_text, "y[CMT=2] = PD", fixed = TRUE)
+  expect_match(result$ferx_text, "CMT=1: DV ~ proportional(EPS1)", fixed = TRUE)
+  # The two endpoints carry different error TYPES, which ferx allows per branch.
+  expect_match(result$ferx_text, "CMT=2: DV ~ additive(EPS2)", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
+})
+
 # -- corpus-wide sweep (engine-free, runs on every PR) ------------------------
 
 # Translates every bundled model once and asserts three things: that nothing
@@ -309,4 +344,256 @@ test_that("every bundled model translates, without a shadowing theta", {
   expect_equal(crashed, character())
   expect_equal(offenders, character())
   expect_equal(illegal, character())
+})
+
+test_that("a covariate conditional in $PK does not block a $ERROR dispatch", {
+  skip_if_not_installed("nonmem2rx")
+  # The ordinary shape of a PKPD model: a covariate effect on a PK parameter
+  # AND a two-endpoint error model. Both are conditionals, and the readout
+  # divides by the parameter the covariate acts on, so the $PK conditional sits
+  # inside the readout's backward closure. Treating every conditional there as
+  # part of the dispatch reads SEX beside FLAG and fails the whole model on
+  # "more than one column"; only the FLAG conditionals select an endpoint.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "cov_disp.mod")
+  writeLines(c(
+    "$PROBLEM covariate effect plus endpoint dispatch",
+    "$INPUT ID TIME AMT EVID MDV CMT SEX FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  IF (SEX.EQ.1) VC = THETA(2)*THETA(3)",
+    "  KCP = THETA(4)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  PERIF = A(2)",
+    "  IPRED = CONC",
+    "  IF (FLAG.EQ.2) IPRED = PERIF",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  IF (FLAG.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1) + W2*EPS(2))",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.1, 1.2, 3.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "y = if (FLAG == 2) PERI else CENT/VC",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "if (FLAG == 2) { DV ~ proportional(EPS2) }",
+               fixed = TRUE)
+  # The covariate conditional stays where it belongs, referencing the theta it
+  # was written against, and `y` reads VC as an ordinary individual parameter.
+  expect_match(result$ferx_text, "if (SEX == 1) { VC = THETA2 * THETA3 }",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "  VC = THETA2\n", fixed = TRUE)
+  expect_no_match(result$ferx_text, "more than one column", fixed = TRUE)
+})
+
+test_that("a non-dispatch conditional on the readout is reported, not silently dropped", {
+  skip_if_not_installed("nonmem2rx")
+  # A clamp on the prediction. It defines a name the readout must resolve per
+  # case, and it is not an equality test, so no dispatch can be built from it.
+  # Before this phase it reached the generic "nothing reads it, so it has no
+  # effect and is dropped" INFO -- which is wrong twice over: it does have an
+  # effect in NONMEM, and it is not dead. Nothing else about the output changes,
+  # so the report is the whole of the fix.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "clamped.mod")
+  writeLines(c(
+    "$PROBLEM clamped readout",
+    "$INPUT ID TIME AMT EVID MDV CMT FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  IPRED = CONC",
+    "  IF (CONC.LT.0.0) IPRED = 0",
+    "  W1 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1))",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  blocked <- grep("^ERROR .*\\$ERROR block is conditional", result$warnings, value = TRUE)
+  expect_length(blocked, 1L)
+  expect_match(blocked, "CONC < 0", fixed = TRUE)
+  expect_match(blocked, "not a `<column> == <number>` test", fixed = TRUE)
+  # Reported, not acted on: no readout is emitted and the pre-6b path runs, so
+  # the engine still gets the file it would have got before. Anchored on the
+  # section header, because the ERROR text itself reaches the file as a
+  # `# WARNING:` comment and names `[scaling]` inside it.
+  expect_no_match(result$ferx_text, "\n[scaling]\n", fixed = TRUE)
+  expect_match(result$ferx_text, "ode(obs_cmt=CENT, states=[CENT, PERI])",
+               fixed = TRUE)
+})
+
+test_that("an unexpressible endpoint reports once, names the right sigma, and keeps the readout", {
+  skip_if_not_installed("nonmem2rx")
+  # A clean FLAG dispatch where only the FLAG == 2 endpoint carries a scaled
+  # sigma. Before this the model fell back to the single-endpoint path and
+  # produced TWO ERRORs: the per-case one, and a second that re-diagnosed the
+  # un-substituted `Y` and reported "`EPS1` is weighted by `IPRED * W1` ... an
+  # indicator-weighted ... error model". EPS1 is fine, EPS2 is the problem, and
+  # "indicator-weighted" is what this phase had just resolved. The file also
+  # carried a single-endpoint `DV ~ combined(EPS1, EPS2)` suggestion, which is
+  # the wrong SHAPE for a model that needs one entry per endpoint.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "gap.mod")
+  writeLines(c(
+    "$PROBLEM one endpoint not expressible",
+    "$INPUT ID TIME AMT EVID MDV CMT FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  PERIF = A(2)",
+    "  IPRED = CONC",
+    "  IF (FLAG.EQ.2) IPRED = PERIF",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  IF (FLAG.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1)) + W2*EPS(2)*THETA(3)",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  errs <- grep("^ERROR", result$warnings, value = TRUE)
+  expect_length(errs, 1L)
+  expect_match(errs, "the endpoint for FLAG == 2", fixed = TRUE)
+  expect_match(errs, "`EPS2` is weighted by `THETA3`", fixed = TRUE)
+  # The prediction named is eps-free.
+  expect_match(errs, "the prediction `PERI`", fixed = TRUE)
+  # The epsilon that is FINE is not blamed, and the indicator complaint this
+  # phase resolved is not raised.
+  expect_no_match(errs, "EPS1` is weighted", fixed = TRUE)
+
+  # The readout is emitted for real and is complete.
+  expect_match(result$ferx_text, "\n[scaling]\n  y = if (FLAG == 2) PERI else CENT/VC",
+               fixed = TRUE)
+  # The error model is a dispatch-shaped comment with one marked gap.
+  expect_match(result$ferx_text, "#   if (FLAG == 2) { DV ~ ??? }", fixed = TRUE)
+  expect_match(result$ferx_text, "#   else { DV ~ proportional(EPS1) }", fixed = TRUE)
+  expect_no_match(result$ferx_text, "combined(EPS1, EPS2)", fixed = TRUE)
+  # ferx still rejects the file, which is what keeps this loud.
+  expect_no_match(result$ferx_text, "\n[error_model]\n", fixed = TRUE)
+})
+
+test_that("a per-CMT gap emits keyed y[CMT=N] plus a keyed suggestion, wherever it falls", {
+  skip_if_not_installed("nonmem2rx")
+  # The per-CMT partial path had no pipeline coverage at all, and the unit
+  # fixtures for it both put the failing endpoint FIRST. Here CMT == 2 is seen
+  # first, so the broken endpoint (CMT == 1, a scaled sigma) is the LAST listed
+  # value -- the position that used to send the whole model back to the
+  # single-endpoint path and bring back both the two-ERROR report and a
+  # `DV ~ combined(...)` suggestion of the wrong shape.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "pcgap.mod")
+  writeLines(c(
+    "$PROBLEM per-CMT dispatch, last listed endpoint unexpressible",
+    "$INPUT ID TIME AMT EVID MDV CMT DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PD)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  RESP = A(2)",
+    "  IPRED = CONC",
+    "  IF (CMT.EQ.2) IPRED = RESP",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (CMT.EQ.1) W1 = 1",
+    "  IF (CMT.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W2*EPS(2)) + W1*EPS(1)*THETA(3)",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  errs <- grep("^ERROR", result$warnings, value = TRUE)
+  expect_length(errs, 1L)
+  expect_match(errs, "the endpoint for CMT == 1", fixed = TRUE)
+  expect_match(errs, "`EPS1` is weighted by `THETA3`", fixed = TRUE)
+
+  # Both readouts emitted and keyed; ferx checks per-CMT coverage against the
+  # data, so an incomplete set is rejected by name rather than silently.
+  expect_match(result$ferx_text, "  y[CMT=1] = CENT/VC", fixed = TRUE)
+  expect_match(result$ferx_text, "  y[CMT=2] = PD", fixed = TRUE)
+  # The suggestion keeps its CMT keys and marks only the endpoint that failed.
+  expect_match(result$ferx_text, "#   CMT=1: DV ~ ???", fixed = TRUE)
+  expect_match(result$ferx_text, "#   CMT=2: DV ~ proportional(EPS2)", fixed = TRUE)
+  expect_no_match(result$ferx_text, "combined(", fixed = TRUE)
+  # The indicators are consumed, not left dead in the parameter block.
+  expect_no_match(result$ferx_text, "W1", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
 })

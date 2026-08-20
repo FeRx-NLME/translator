@@ -2803,3 +2803,412 @@ test_that("sigma declarations are reordered to the roles the error model needs",
   expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), per_cmt)),
                c("EPS1", "EPS2"))
 })
+
+# -- Phase 6b: endpoint dispatch (issue #6 defects 5, 12, 15) -----------------
+
+test_that("constant folding removes exactly the identities substitution creates", {
+  f <- function(s) deparse1(.fold_consts(str2lang(s)))
+  # The shape that matters: an indicator substituted to 1 and 0 leaves
+  # `X * (1 + 1*0 + 0*0)`, and only folding turns that back into the readout.
+  expect_equal(f("X * (1 + 1*0 + 0*0)"), "X")
+  expect_equal(f("A/B * (1 + 1*EPS1 + 0*EPS2)"), "A/B * (1 + EPS1)")
+  expect_equal(f("x + 0 * z"), "x")
+  expect_equal(f("x^1"), "x")
+  expect_equal(f("2*3 + x"), "6 + x")
+  # Precedence survives dropping the `(` node, because deparse() re-parenthesises
+  # from the tree. If it did not, `(a + b) * c` would emit as `a + b * c`.
+  expect_equal(f("(a + b) * c"), "(a + b) * c")
+  # NOT an algebra system: nothing here may rewrite terms that substitution did
+  # not create. Widening a $ERROR heuristic is how this issue happened.
+  expect_equal(f("x - x"), "x - x")
+  expect_equal(f("2 * x + 3 * x"), "2 * x + 3 * x")
+})
+
+test_that("inlining resolves a chain and reports a cycle instead of truncating it", {
+  defs <- list(IPRED = quote(CTOT), CTOT = quote(CENT/VC))
+  expect_equal(deparse1(.inline_defs(quote(IPRED * (1 + EPS1)), defs)),
+               "CENT/VC * (1 + EPS1)")
+  # A name with no definition is left alone -- that is how a covariate survives.
+  expect_equal(deparse1(.inline_defs(quote(FLAG + 1), defs)), "FLAG + 1")
+  # The predecessor, .inline_aux_vars(), gave up at depth 30 and returned the
+  # PARTLY inlined expression, so a cycle reached the file as an undefined name
+  # with no diagnostic. NULL makes the caller report it.
+  expect_null(.inline_defs(quote(A), list(A = quote(B), B = quote(A))))
+})
+
+# A captured conditional as pass 2d builds it: the condition already normalised.
+cnd <- function(txt, ...) {
+  arms <- list(...)
+  list(kind = "if", cond = str2lang(txt), pos = 0L,
+       then = lapply(arms, function(a) list(lhs = a[[1]], rhs = str2lang(a[[2]]))),
+       else_ = NULL)
+}
+
+test_that("only a single-column equality dispatch is read as one", {
+  ok <- .dispatch_conditions(list(cnd("FLAG == 2", c("IPRED", "RTOT")),
+                                  cnd("FLAG == 1", c("W1", "1"))))
+  expect_equal(ok$col, "FLAG")
+  expect_equal(unlist(ok$values), c(2, 1))
+
+  # No conditionals at all is single-endpoint, not a failure: `why` is NULL and
+  # the caller falls through to the pre-6b path unchanged.
+  expect_null(.dispatch_conditions(list())$why)
+
+  # Two columns: the cases are no longer mutually exclusive, so the enumeration
+  # would emit a model for a combination it never evaluated.
+  expect_match(.dispatch_conditions(list(cnd("FLAG == 2", c("A", "1")),
+                                         cnd("CMT == 2",  c("B", "1"))))$why,
+               "more than one column")
+  # An inequality has the same problem: `FLAG >= 1` and `FLAG >= 2` overlap.
+  expect_match(.dispatch_conditions(list(cnd("FLAG >= 1", c("A", "1"))))$why,
+               "not a `<column> == <number>` test")
+  nested <- cnd("FLAG == 2", c("A", "1"))
+  nested$then <- list(cnd("FLAG == 1", c("B", "1")))
+  expect_match(.dispatch_conditions(list(nested))$why, "nested")
+})
+
+# The reporter's $ERROR block, as pass 2d hands it to .build_endpoints().
+tmdd_chain <- function() list(
+  list(kind = "assign", lhs = "CTOT",  rhs = quote(CENT/VC), pos = 1L),
+  list(kind = "assign", lhs = "RTOT",  rhs = quote(c_RTOT),  pos = 2L),
+  list(kind = "assign", lhs = "IPRED", rhs = quote(CTOT),    pos = 3L),
+  cnd("FLAG == 2", c("IPRED", "RTOT")),
+  list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+  list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+  cnd("FLAG == 1", c("W1", "1")),
+  cnd("FLAG == 2", c("W2", "1")))
+
+tmdd_aux <- c("CENT", "TISS", "C_RTOT", "CTOT", "RTOT", "IPRED", "EPS1", "EPS2")
+
+test_that("an indicator-weighted Y resolves to one error model per endpoint", {
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1 + W2 * EPS2)),
+                         tmdd_chain(), c("EPS1", "EPS2"),
+                         tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  expect_equal(ep$col, "FLAG")
+  expect_length(ep$cases, 3L)          # FLAG == 2, FLAG == 1, fall-through
+
+  expect_equal(ep$cases[[1]]$value, 2)
+  expect_equal(deparse1(ep$cases[[1]]$pred), "c_RTOT")
+  expect_equal(ep$cases[[1]]$type, "proportional")
+  expect_equal(ep$cases[[1]]$params, "EPS2")
+
+  expect_equal(ep$cases[[2]]$value, 1)
+  expect_equal(deparse1(ep$cases[[2]]$pred), "CENT/VC")
+  expect_equal(ep$cases[[2]]$params, "EPS1")
+
+  # With every indicator 0 the source computes Y = IPRED: an observation with no
+  # residual error. That is the source declaring its own dispatch exhaustive,
+  # and it is why the last listed case has to become the `else`.
+  expect_true(is.na(ep$cases[[3]]$type))
+  expect_equal(deparse1(ep$cases[[3]]$pred), "CENT/VC")
+})
+
+test_that("an [odes] intermediate in the readout is rejected, not emitted", {
+  # Measured on ferx 0.3.0: `y = CT` where CT is an [odes] intermediate
+  # validates as VALID with no data and dies with E_MISSING_COVARIATE the moment
+  # a data file is present -- ferx resolves the name inside [odes] and reads it
+  # as a covariate everywhere else. So the check has to be ours.
+  chain <- list(list(kind = "assign", lhs = "IPRED", rhs = quote(CT), pos = 1L),
+                cnd("FLAG == 1", c("W1", "1")))
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1)), chain,
+                         "EPS1", c(tmdd_aux, "CT"), c("CENT", "TISS", "c_RTOT"))
+  expect_match(ep$why, "CT")
+  expect_match(ep$why, "resolves inside [odes] but not in [scaling] y", fixed = TRUE)
+})
+
+test_that("the last dispatched case becomes the else when the fall-through has none", {
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1 + W2 * EPS2)),
+                         tmdd_chain(), c("EPS1", "EPS2"),
+                         tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  out <- .assemble_endpoints(ep, c("CENT", "TISS", "c_RTOT"))
+  expect_equal(out$readout$kind, "expr")
+  expect_equal(out$readout$y, "if (FLAG == 2) c_RTOT else CENT/VC")
+  expect_length(out$error_model, 2L)
+  expect_equal(out$error_model[[1]]$cond, "FLAG == 2")
+  expect_equal(out$error_model[[1]]$params, "EPS2")
+  # ferx REQUIRES a terminating bare `else`; a NULL cond is how the emitter
+  # knows which entry that is.
+  expect_null(out$error_model[[2]]$cond)
+  expect_equal(out$error_model[[2]]$params, "EPS1")
+  expect_length(grep("exhaustive", out$warnings), 1L)
+})
+
+test_that("a fall-through that IS an error model is kept as the else", {
+  # `W1 = 1` by default, cleared for FLAG == 2. Nothing has to be assumed
+  # exhaustive here, so no assumption is announced.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 1, pos = 2L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 3L),
+    cnd("FLAG == 2", c("W1", "0"), c("W2", "1")))
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2), chain,
+                         c("EPS1", "EPS2"), tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  out <- .assemble_endpoints(ep, c("CENT", "TISS", "c_RTOT"))
+  expect_equal(out$error_model[[1]]$cond, "FLAG == 2")
+  expect_equal(out$error_model[[1]]$type, "additive")
+  expect_null(out$error_model[[2]]$cond)
+  expect_equal(out$error_model[[2]]$type, "proportional")
+  expect_length(out$warnings, 0L)
+  # One readout for both endpoints, so no branching `y`.
+  expect_equal(out$readout$y, "CENT/VC")
+})
+
+test_that("a CMT dispatch emits y[CMT=N] and CMT=N: bodies, ordered by compartment", {
+  # ferx does not expose CMT as a covariate -- measured, `Model references
+  # covariate(s) not found in data (case-sensitive): CMT` -- so Form C cannot
+  # dispatch on it and this path is required, not a stylistic alternative.
+  chain <- tmdd_chain()
+  chain[[4]]$cond <- quote(CMT == 3)
+  chain[[7]]$cond <- quote(CMT == 1)
+  chain[[8]]$cond <- quote(CMT == 3)
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1 + W2 * EPS2)), chain,
+                         c("EPS1", "EPS2"), tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  out <- .assemble_endpoints(ep, c("CENT", "TISS", "c_RTOT"))
+  expect_equal(out$readout$kind, "per_cmt")
+  expect_equal(vapply(out$readout$entries, function(e) e$cmt, 0L), c(1L, 3L))
+  expect_equal(vapply(out$readout$entries, function(e) e$expr, ""),
+               c("CENT/VC", "c_RTOT"))
+  expect_equal(vapply(out$error_model, function(e) e$cmt, 0L), c(1L, 3L))
+  expect_equal(vapply(out$error_model, function(e) e$params, ""), c("EPS1", "EPS2"))
+  # No entry is invented for compartment 2, and the omission is announced --
+  # ferx rejects the fit naming it if the data observes it.
+  expect_length(grep("compartment\\(s\\) 2", out$warnings), 1L)
+})
+
+test_that("a CMT fall-through error model is expanded over the compartments no condition named", {
+  # `IPRED = CONC` by default, `RESP` for CMT 2, one error model throughout.
+  # The default really does apply to every other compartment, so naming them is
+  # exact rather than a guess -- and it has to be done, because y[CMT=N] has no
+  # `else` and ferx requires an entry for every observed CMT.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    cnd("CMT == 2", c("IPRED", "PD")))
+  ep <- .build_endpoints(quote(IPRED * (1 + EPS1)), chain, "EPS1",
+                         c("CENT", "PD", "IPRED", "EPS1"), c("CENT", "PD"))
+  out <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_equal(vapply(out$readout$entries, function(e) e$cmt, 0L), c(1L, 2L))
+  expect_equal(vapply(out$readout$entries, function(e) e$expr, ""),
+               c("CENT/VC", "PD"))
+  # One error model for both, so it stays single-endpoint rather than being
+  # split into identical CMT=N: lines.
+  expect_length(out$error_model, 1L)
+  expect_null(out$error_model[[1]]$cmt)
+  expect_length(out$warnings, 0L)
+})
+
+test_that("a single dispatched value with no fall-through model has no else to emit", {
+  # ferx requires a terminating bare `else`, and there is only one branch to
+  # give it. Reported rather than emitted as an unconditional model, which would
+  # apply EPS1 to observations the source excluded from it.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    cnd("FLAG == 1", c("W1", "1")))
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1)), chain, "EPS1",
+                         tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  out <- .assemble_endpoints(ep, c("CENT", "TISS", "c_RTOT"))
+  expect_match(out$why, "no branch could serve as the `else`", fixed = TRUE)
+})
+
+test_that("an epsilon with a zero coefficient is dropped from that endpoint", {
+  # Normally folding removes these first: substituting `W2 = 0` leaves
+  # `0 * EPS2`, which collapses to `0` and takes EPS2 out of the expression
+  # entirely. This is the shape that survives folding -- `.fold_consts()`
+  # deliberately has no `x - x` rule -- so it is the only way to reach the
+  # guard. Without it EPS2 reaches the classifier with coefficient 0, which is
+  # neither 1 nor the prediction, and the whole endpoint is reported
+  # untranslatable over a term the source had already cancelled.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    cnd("FLAG == 1", c("W1", "1")))
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + EPS2 - EPS2), chain,
+                         c("EPS1", "EPS2"), tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  expect_null(ep$why)
+  expect_equal(ep$cases[[1]]$type, "proportional")
+  expect_equal(ep$cases[[1]]$params, "EPS1")
+  expect_equal(deparse1(ep$cases[[1]]$pred), "CENT/VC")
+})
+
+test_that("the classifier reports its reason as a field, and names an eps-free prediction", {
+  # `reason` exists so phase 6b can place the explanation in a message naming the
+  # ENDPOINT. Deriving it by stripping the prefix off `warnings` would be string
+  # surgery on a sentence.
+  r <- .classify_error_assignment(quote(F + EPS1 * THETA4), "EPS1")
+  expect_true(is.na(r$type))
+  expect_match(r$reason, "`EPS1` is weighted by `THETA4`", fixed = TRUE)
+  expect_match(r$warnings, r$reason, fixed = TRUE)
+  # The prediction SHOWN is eps-free. `pred` is the raw expression -- zeroing
+  # happens inside the evaluator -- so deparsing it printed the epsilon terms
+  # back and the message read "neither 1 nor the prediction `F + EPS1 * THETA4`".
+  expect_match(r$reason, "the prediction `F`", fixed = TRUE)
+  expect_no_match(r$reason, "the prediction `F + EPS1", fixed = TRUE)
+})
+
+test_that("one unexpressible endpoint yields a readout plus a marked suggestion", {
+  # A clean FLAG dispatch where only the FLAG == 2 endpoint carries a scaled
+  # sigma. The readout is derived per case and independently of the error model,
+  # so it is complete here -- emitting it leaves only the branch a human has to
+  # write. Bailing on the whole dispatch instead sent the model down the
+  # single-endpoint path, which re-diagnosed the UN-substituted `Y` and blamed
+  # EPS1, the epsilon that was fine.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "PERIF", rhs = quote(PERI),    pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("FLAG == 2", c("IPRED", "PERIF")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("FLAG == 1", c("W1", "1")),
+    cnd("FLAG == 2", c("W2", "1")))
+  aux <- c("CENT", "PERI", "CONC", "PERIF", "IPRED", "EPS1", "EPS2")
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, c("CENT", "PERI"))
+  # FLAG == 2 first in source order, so it is cases[[1]].
+  expect_true(is.na(ep$cases[[1]]$type))
+  expect_match(ep$cases[[1]]$why, "the endpoint for FLAG == 2", fixed = TRUE)
+  expect_match(ep$cases[[1]]$why, "`EPS2` is weighted by `THETA3`", fixed = TRUE)
+  expect_equal(ep$cases[[2]]$type, "proportional")
+
+  out <- .assemble_endpoints(ep, c("CENT", "PERI"))
+  # The readout is emitted for real, and it is the complete one.
+  expect_equal(out$readout$y, "if (FLAG == 2) PERI else CENT/VC")
+  expect_null(out$error_model)
+  expect_match(out$why, "FLAG == 2", fixed = TRUE)
+  expect_true(all(grepl("^\\s*#", out$suggestion)))
+  expect_true(any(grepl("if (FLAG == 2) { DV ~ ??? }", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("# <- Y = PERI + EPS2 * THETA3", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("else { DV ~ proportional(EPS1) }", out$suggestion, fixed = TRUE)))
+})
+
+test_that("a failed endpoint is never folded into the else ferx requires", {
+  # The `else` takes no condition, so a gap placed there could not say which
+  # endpoint it belonged to. The last listed case is the one that gets folded in
+  # when the fall-through has no model, so it is the one that must have worked.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 3L),
+    cnd("FLAG == 1", c("W1", "1")),
+    cnd("FLAG == 2", c("W2", "1")))
+  aux <- c("CENT", "IPRED", "EPS1", "EPS2")
+  # EPS2 (FLAG == 2, the LAST listed case) is the scaled one.
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, "CENT")
+  out <- .assemble_endpoints(ep, "CENT")
+  expect_null(out$suggestion)
+  expect_null(out$readout)
+  expect_match(out$why, "the endpoint for FLAG == 2", fixed = TRUE)
+})
+
+test_that("a per-CMT dispatch with a gap keeps its CMT=N keys", {
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "PERIF", rhs = quote(PERI),    pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "PERIF")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PERI", "CONC", "PERIF", "IPRED", "EPS1", "EPS2")
+  ep  <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                          chain, c("EPS1", "EPS2"), aux, c("CENT", "PERI"))
+  out <- .assemble_endpoints(ep, c("CENT", "PERI"))
+  expect_equal(out$readout$kind, "per_cmt")
+  expect_true(any(grepl("CMT=1: DV ~ proportional(EPS1)", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("CMT=2: DV ~ ???", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("# <- Y = PERI + EPS2 * THETA3", out$suggestion, fixed = TRUE)))
+})
+
+test_that("a per-CMT gap in the LAST listed compartment is still expressible", {
+  # The "never fold a failed case into the `else`" guard is a Form C concern:
+  # per-CMT has no `else`, every entry carries its own key, so a gap in the last
+  # listed compartment is as expressible as one anywhere else. Applying the guard
+  # to both paths sent exactly this model back to the single-endpoint path, which
+  # is where the two-ERROR report and the wrong-shaped `combined()` suggestion
+  # came from.
+  #
+  # Both fixtures written for the gap put the failure FIRST, so neither could
+  # show this. The position is the whole point of this one.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "RESP",  rhs = quote(PD),      pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "RESP")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PD", "CONC", "RESP", "IPRED", "EPS1", "EPS2")
+  # CMT == 2 is seen first, so CMT == 1 is the LAST listed value -- and it is the
+  # one carrying the scaled sigma.
+  ep <- .build_endpoints(quote(IPRED * (1 + W2 * EPS2) + W1 * EPS1 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, c("CENT", "PD"))
+  expect_equal(unlist(lapply(ep$cases[1:2], function(c) c$value)), c(2, 1))
+  expect_true(is.na(ep$cases[[2]]$type))
+
+  out <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_false(is.null(out$suggestion))
+  expect_equal(out$readout$kind, "per_cmt")
+  expect_true(any(grepl("CMT=1: DV ~ ???", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("CMT=2: DV ~ proportional(EPS2)", out$suggestion, fixed = TRUE)))
+
+  # Form C keeps the guard: there the last branch becomes the bare `else`, which
+  # takes no condition, so a gap placed there could not name its endpoint.
+  ep$col <- "FLAG"
+  for (i in seq_along(ep$cases)) ep$cases[[i]]$why <-
+    sub("CMT", "FLAG", ep$cases[[i]]$why %||% NA_character_)
+  ep$cases[[1]]$why <- NULL
+  ep$cases[[3]]$why <- NULL
+  out_c <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_null(out_c$suggestion)
+  expect_match(out_c$why, "FLAG == 1", fixed = TRUE)
+})
+
+test_that("every failing endpoint is reported, not only the first", {
+  # Two gaps in the file and one named in the console is a reader filling in the
+  # branch they were told about and being surprised by the other.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 3L),
+    list(kind = "assign", lhs = "W3", rhs = 1, pos = 4L),
+    cnd("FLAG == 1", c("W1", "1"), c("W3", "0")),
+    cnd("FLAG == 2", c("W2", "1"), c("W3", "0")))
+  aux <- c("CENT", "IPRED", "EPS1", "EPS2")
+  # FLAG 1 and 2 both scale their sigma; the fall-through keeps a clean EPS1.
+  ep <- .build_endpoints(
+    quote(IPRED + W1 * EPS1 * THETA3 + W2 * EPS2 * THETA3 + W3 * EPS1),
+    chain, c("EPS1", "EPS2"), aux, "CENT")
+  out <- .assemble_endpoints(ep, "CENT")
+  expect_length(out$why, 2L)
+  expect_match(out$why[[1]], "FLAG == 1", fixed = TRUE)
+  expect_match(out$why[[2]], "FLAG == 2", fixed = TRUE)
+  expect_equal(sum(grepl("DV ~ ???", out$suggestion, fixed = TRUE)), 2L)
+})
+
+test_that("every failing endpoint is reported on the per-CMT path too", {
+  # The per-CMT and Form C returns are separate call sites with the same
+  # expression in them, so one test cannot guard both -- reverting only the
+  # per-CMT one left the suite green.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "RESP",  rhs = quote(PD),      pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "RESP")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PD", "CONC", "RESP", "IPRED", "EPS1", "EPS2")
+  # BOTH endpoints scale their sigma.
+  ep <- .build_endpoints(
+    quote(IPRED + W1 * EPS1 * THETA3 + W2 * EPS2 * THETA3),
+    chain, c("EPS1", "EPS2"), aux, c("CENT", "PD"))
+  out <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_length(out$why, 2L)
+  expect_true(any(grepl("CMT == 2", out$why, fixed = TRUE)))
+  expect_true(any(grepl("CMT == 1", out$why, fixed = TRUE)))
+  expect_equal(sum(grepl("DV ~ ???", out$suggestion, fixed = TRUE)), 2L)
+})

@@ -2,6 +2,22 @@
 
 ## Breaking changes
 
+* `[scaling] obs_scale` and `ode(obs_cmt=...)` are no longer emitted alongside a
+  `y` readout (issue #6, defects 15 and 12). ferx applies `obs_scale` on TOP of
+  the readout rather than instead of it, which validates clean while moving
+  every prediction -- by up to 11.37 units on the reporter's model -- and
+  ignores `obs_cmt` entirely once `y` is present. `validate_ferx_ir()` now
+  rejects an IR carrying both. `ferx_ir$scaling` gains `y` and `per_cmt`, and
+  an `error_model` entry may carry `cmt` or `cond`. Only models whose `$ERROR`
+  dispatches between endpoints are affected; every other model's output is
+  unchanged.
+
+* Warning text changed for untranslatable `$ERROR` expressions. The prediction
+  named in "neither 1 nor the prediction ..." is now the expression with its
+  epsilons zeroed, as the words say -- it previously printed the epsilon terms
+  back, so the message named a "prediction" containing a sigma. Code matching
+  on that message text needs updating; `result$warnings` structure is unchanged.
+
 * The `sigma` declarations in `[parameters]` are now emitted in the order the
   `[error_model]` consumes them, rather than in `$SIGMA` order. ferx binds a
   single-endpoint error model's sigmas POSITIONALLY from the declaration order
@@ -36,6 +52,31 @@
   the check.
 
 ## New features
+
+* A NONMEM `$ERROR` block that dispatches between two endpoints is now
+  translated instead of being reduced to one of them (issue #6, defect 5). The
+  readout chain -- `CTOT = A(1)/VC`, `IPRED = CTOT`, `IF (FLAG.EQ.2) IPRED =
+  RTOT` -- is rebuilt into a `[scaling]` readout, and the indicator structure of
+  `Y = IPRED*(1 + W1*EPS(1) + W2*EPS(2))` into one error model per endpoint. A
+  source switching on `CMT` emits `y[CMT=N]` and `CMT=N: DV ~ ...`; a source
+  switching on any other column emits a Form C `y = if (...) ... else ...` and a
+  covariate-selected `[error_model]`. The two forms are not interchangeable:
+  ferx does not expose `CMT` to the covariate scope, so Form C cannot dispatch
+  on it. The conditions must be equality tests on ONE column; anything else is
+  reported rather than guessed at, and the pre-existing single-endpoint path
+  runs unchanged, so no existing model's output moves.
+
+* An endpoint a dispatch cannot express no longer sinks the whole translation.
+  The `[scaling]` readout is derived per endpoint and independently of the error
+  model, so it is emitted in full; the `[error_model]` becomes a commented block
+  in the same dispatch shape with the one branch that needs a human marked
+  `DV ~ ???` beside the source expression. ferx still rejects the file for the
+  missing block, so nothing is silently accepted, but the mechanical half of the
+  work is done. The report also names the endpoint and the epsilon actually at
+  fault: previously such a model fell back to the single-endpoint path, which
+  re-diagnosed the un-substituted `Y`, blamed whichever epsilon the indicators
+  touched first, and suggested a single-endpoint `combined()` model of the wrong
+  shape entirely.
 
 * NONMEM `$ERROR` expressions are classified by STRUCTURE rather than by counting
   epsilons (issue #6, defects 10 and 11). The coefficient of each epsilon decides

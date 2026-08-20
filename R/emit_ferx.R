@@ -35,7 +35,7 @@ emit_ferx <- function(ir) {
     if (length(ir$diffusion)     > 0) .emit_diffusion_section(ir),
     if (length(ir$error_model)   > 0) .emit_error_model_section(ir)
     else if (length(ir$error_suggestion) > 0) paste(ir$error_suggestion, collapse = "\n"),
-    if (!is.null(ir$scaling$obs_scale)) .emit_scaling_section(ir),
+    if (length(ir$scaling) > 0) .emit_scaling_section(ir),
     if (length(ir$fit_options)   > 0) .emit_fit_options_section(ir)
   )
 
@@ -240,7 +240,11 @@ emit_ferx <- function(ir) {
     paste0("  pk ", s$pk_call, "(", args_str, ")")
   } else {
     states_str <- paste(s$states, collapse = ", ")
-    paste0("  ode(obs_cmt=", s$obs_cmt, ", states=[", states_str, "])")
+    # `obs_cmt` is omitted when a `y` readout carries the observation instead.
+    # ferx ignores it silently in that case, so leaving it in would state a
+    # compartment choice the file no longer makes.
+    obs <- if (is.null(s$obs_cmt)) "" else paste0("obs_cmt=", s$obs_cmt, ", ")
+    paste0("  ode(", obs, "states=[", states_str, "])")
   }
   paste0("[structural_model]\n", body)
 }
@@ -267,17 +271,47 @@ emit_ferx <- function(ir) {
   paste0("[diffusion]\n", paste(lines, collapse = "\n"))
 }
 
+# Three shapes, chosen by what the entries carry, not by a mode flag:
+# a plain single-endpoint list, a per-compartment `CMT=N:` list, and a
+# covariate-selected if/else chain. The last entry of a selected chain is the
+# bare `else` ferx requires "so every observation maps to an error model", and
+# it is marked by a NULL `cond`.
 .emit_error_model_section <- function(ir) {
-  lines <- vapply(ir$error_model, function(e) {
-    paste0("  ", e$dv, " ~ ", e$type, "(", paste(e$params, collapse = ", "), ")")
-  }, "")
+  dv <- function(e) paste0(e$dv, " ~ ", e$type, "(",
+                           paste(e$params, collapse = ", "), ")")
+  has <- function(f) any(vapply(ir$error_model,
+                                function(e) !is.null(e[[f]]), logical(1)))
+  lines <- if (has("cmt")) {
+    vapply(ir$error_model, function(e) paste0("  CMT=", e$cmt, ": ", dv(e)), "")
+  } else if (has("cond")) {
+    vapply(seq_along(ir$error_model), function(i) {
+      e <- ir$error_model[[i]]
+      if (is.null(e$cond)) paste0("  else { ", dv(e), " }")
+      else paste0(if (i == 1L) "  if (" else "  else if (", e$cond, ") { ",
+                  dv(e), " }")
+    }, "")
+  } else {
+    vapply(ir$error_model, function(e) paste0("  ", dv(e)), "")
+  }
   paste0("[error_model]\n", paste(lines, collapse = "\n"))
 }
 
 .emit_scaling_section <- function(ir) {
-  val <- ir$scaling$obs_scale
-  out <- if (is.character(val)) val else .fmt_num(val)
-  paste0("[scaling]\n  obs_scale = ", out)
+  sc <- ir$scaling
+  lines <- character()
+  # `[[` not `$`: on a list `$` partial-matches, so `sc$y` would return the
+  # per-CMT entries for a model that has only those.
+  if (!is.null(sc[["y"]]))
+    lines <- c(lines, paste0("  y = ", sc[["y"]]))
+  if (length(sc[["per_cmt"]]) > 0)
+    lines <- c(lines, vapply(sc[["per_cmt"]], function(e)
+      paste0("  y[CMT=", e$cmt, "] = ", e$expr), ""))
+  if (!is.null(sc[["obs_scale"]])) {
+    val <- sc[["obs_scale"]]
+    lines <- c(lines, paste0("  obs_scale = ",
+                             if (is.character(val)) val else .fmt_num(val)))
+  }
+  paste0("[scaling]\n", paste(lines, collapse = "\n"))
 }
 
 .emit_fit_options_section <- function(ir) {

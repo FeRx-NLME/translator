@@ -474,3 +474,120 @@ test_that("sigma declaration order follows the error roles, and is load-bearing"
                             emitted, fixed = TRUE))
   expect_equal(arg_swapped, correct, tolerance = 1e-9)
 })
+
+# ===========================================================================
+# ENDPOINT DISPATCH (Tier 4, issue #6 defect 5)
+# The readout and the error model both branch per observation. Neither is
+# visible to a snapshot -- a dropped dispatch still emits a valid file that
+# fits -- so this is the tier that can tell a working one from a lost one.
+# ===========================================================================
+
+# A forward evaluation, not a fit: `maxiter = 0` makes PRED a deterministic
+# function of the theta initials, so two models differing only in their readout
+# are directly comparable. PRED is used rather than IPRED because it is eta-free;
+# a different readout changes the EBEs, so IPRED would differ for reasons that
+# have nothing to do with the branch selected.
+.eval_only <- function(txt) sub("covariance = true", "covariance = false",
+                                sub("maxiter = \\d+", "maxiter = 0", txt))
+
+.write_tmp <- function(txt) {
+  f <- tempfile(fileext = ".ferx")
+  writeLines(txt, f)
+  f
+}
+
+.pred_of <- function(txt, data) {
+  fit <- suppressWarnings(ferx_fit(.write_tmp(txt), data = data))
+  list(pred = fit$sdtab$PRED, cmt = fit$sdtab$CMT, ofv = fit$ofv)
+}
+
+test_that("a FLAG dispatch evaluates both readouts and selects on FLAG", {
+  txt  <- .eval_only(suppressWarnings(
+    nm_to_ferx(system.file("testmodels/nonmem/qss_tmdd.mod",
+                           package = "ferxtranslate")))$ferx_text)
+  data <- .conc_data("qss_tmdd_dispatch.csv")
+  expect_true(nzchar(data))
+  expect_match(txt, "y = if (FLAG == 2) c_RTOT else CENT/VC", fixed = TRUE)
+
+  base <- .pred_of(txt, data)
+  # Each branch hardcoded for every row. CMT and FLAG are correlated in this
+  # dataset by construction, so CMT indexes the rows the FLAG condition selects.
+  conc <- .pred_of(sub("y = if \\(FLAG == 2\\) c_RTOT else CENT/VC",
+                       "y = CENT/VC", txt), data)
+  rtot <- .pred_of(sub("y = if \\(FLAG == 2\\) c_RTOT else CENT/VC",
+                       "y = c_RTOT", txt), data)
+  a <- base$cmt == 1L
+  b <- base$cmt == 3L
+  expect_true(any(a) && any(b))
+
+  expect_equal(max(abs(base$pred[a] - conc$pred[a])), 0)
+  expect_equal(max(abs(base$pred[b] - rtot$pred[b])), 0)
+  # The wrong-branch controls. Without them the two zeros above are equally
+  # consistent with the engine evaluating one arm for every row.
+  expect_gt(max(abs(base$pred[b] - conc$pred[b])), 1)
+  expect_gt(max(abs(base$pred[a] - rtot$pred[a])), 1)
+
+  # FLAG, not CMT, is what selects. Inverting FLAG while leaving CMT alone must
+  # move every prediction; if the engine were keying on CMT -- or ignoring the
+  # condition -- this would change nothing, and the assertions above would pass
+  # just the same on a dataset where the two agree.
+  d <- utils::read.csv(data)
+  d$FLAG <- ifelse(d$FLAG == 1L, 2L, 1L)
+  flipped <- tempfile(fileext = ".csv")
+  utils::write.csv(d, flipped, row.names = FALSE, quote = FALSE)
+  expect_gt(max(abs(base$pred - .pred_of(txt, flipped)$pred)), 1)
+})
+
+test_that("a CMT dispatch evaluates both readouts and selects on CMT", {
+  txt  <- .eval_only(suppressWarnings(
+    nm_to_ferx(system.file("testmodels/nonmem/pkpd_cmt.mod",
+                           package = "ferxtranslate")))$ferx_text)
+  data <- .conc_data("pkpd_cmt_dispatch.csv")
+  expect_true(nzchar(data))
+  expect_match(txt, "y[CMT=1] = CENT/VC", fixed = TRUE)
+  expect_match(txt, "y[CMT=2] = PD", fixed = TRUE)
+
+  base <- .pred_of(txt, data)
+  one  <- "  y\\[CMT=1\\] = CENT/VC\n  y\\[CMT=2\\] = PD"
+  conc <- .pred_of(sub(one, "  y = CENT/VC", txt), data)
+  resp <- .pred_of(sub(one, "  y = PD", txt), data)
+  a <- base$cmt == 1L
+  b <- base$cmt == 2L
+  expect_true(any(a) && any(b))
+
+  expect_equal(max(abs(base$pred[a] - conc$pred[a])), 0)
+  expect_equal(max(abs(base$pred[b] - resp$pred[b])), 0)
+  expect_gt(max(abs(base$pred[b] - conc$pred[b])), 1)
+  expect_gt(max(abs(base$pred[a] - resp$pred[a])), 1)
+})
+
+test_that("the per-endpoint sigma names bind, so the branch mapping is load-bearing", {
+  # Measured on 0.3.0: per-CMT and covariate-selected error models resolve their
+  # sigma BY NAME, unlike the single-endpoint form, which consumes them
+  # positionally and discards the names (ferx-core#1001). So swapping the two
+  # names between branches must move the OFV -- and if it does not, the mapping
+  # this phase derives is decorative and a transposed one would ship green.
+  for (m in c("qss_tmdd.mod", "pkpd_cmt.mod")) {
+    txt  <- .eval_only(suppressWarnings(
+      nm_to_ferx(system.file(file.path("testmodels/nonmem", m),
+                             package = "ferxtranslate")))$ferx_text)
+    data <- .conc_data(sub("\\.mod$", "_dispatch.csv", m))
+    # Line-scoped: EPS1 <-> EPS2 inside the [error_model] block and nowhere else,
+    # so the [parameters] declarations keep their values and only the mapping
+    # moves.
+    ln  <- strsplit(txt, "\n")[[1]]
+    blk <- which(ln == "[error_model]")
+    end <- which(!nzchar(ln) & seq_along(ln) > blk)[1]
+    rng <- (blk + 1L):(end - 1L)
+    # Only the sigma NAMES. chartr() over the whole line also flipped the
+    # `FLAG == 2` condition, which turns `if (FLAG == 2) EPS2 else EPS1` into
+    # `if (FLAG == 1) EPS1 else EPS2` -- the same model spelled backwards, and
+    # an unmoved OFV that reads as "the names do not bind".
+    ln[rng] <- gsub("EPS_TMP_", "EPS",
+                    gsub("EPS2", "EPS_TMP_1",
+                         gsub("EPS1", "EPS_TMP_2", ln[rng])))
+    swapped <- paste(ln, collapse = "\n")
+    expect_false(identical(swapped, txt), label = paste(m, "swap changed the text"))
+    expect_gt(abs(.pred_of(txt, data)$ofv - .pred_of(swapped, data)$ofv), 1e-6)
+  }
+})

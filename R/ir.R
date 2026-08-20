@@ -47,13 +47,21 @@
 #'   `state` (character) and `value` (numeric).
 #' @param error_model List of error model entries. Each element is a list
 #'   with `dv` (character), `type` (`"proportional"`, `"additive"`, or
-#'   `"combined"`), and `params` (character vector of parameter names).
+#'   `"combined"`), and `params` (character vector of parameter names). An entry
+#'   may additionally carry `cmt` (integer, rendered as `CMT=N: DV ~ ...`) or
+#'   `cond` (character, rendered as an `if`/`else if` chain whose last entry
+#'   omits `cond` and becomes the `else` ferx requires). The three forms are
+#'   mutually exclusive within one list.
 #' @param error_suggestion Character vector of comment lines rendered where the
 #'   `[error_model]` block would have gone, when the source error expression
 #'   could not be translated. The block itself is omitted so the engine rejects
 #'   the file rather than accepting a guess; these lines carry the source
 #'   expression and a plausible reading the user can uncomment after checking it.
-#' @param scaling List with `obs_scale` (numeric or `NULL`).
+#' @param scaling List describing the observation readout. At most one of
+#'   `obs_scale` (numeric or character, the NONMEM `S1`/`S2` scale), `y` (a
+#'   Form C readout expression as a single string) or `per_cmt` (a list of
+#'   `list(cmt =, expr =)` entries rendered as `y[CMT=N] = ...`). `obs_scale`
+#'   cannot be combined with either readout: ferx applies it on top of them.
 #' @param fit_options List with named elements such as `method`, `maxiter`,
 #'   `covariance`, and (when IOV is present) `iov_column`.
 #' @param warnings Character vector of diagnostic messages, each prefixed
@@ -173,27 +181,74 @@ validate_ferx_ir <- function(ir) {
       cli::cli_abort(
         "structural$states must be a non-empty character vector when structural$type is {.val ode}."
       )
+    # `obs_cmt` is required UNLESS a [scaling] readout carries the observation.
+    # ferx ignores obs_cmt once `y` is present, so demanding one there would
+    # force the IR to state a compartment choice the file does not make.
+    has_y <- !is.null(ir$scaling[["y"]]) || length(ir$scaling[["per_cmt"]]) > 0
     # length must be checked, not just type. is.character() is TRUE for
     # character(0) and for a length-2 vector, and both then reach the `%in%`
     # below, whose `if` aborts with "argument is of length zero" / "the
     # condition has length > 1" -- a base-R error naming neither field. This is
     # the same trap rxui_to_ir() records for `ui$central`; it must not be
     # reintroduced in the exported validator.
-    if (is.null(ir$structural$obs_cmt) || !is.character(ir$structural$obs_cmt) ||
-        length(ir$structural$obs_cmt) != 1L)
+    if (!has_y &&
+        (is.null(ir$structural$obs_cmt) || !is.character(ir$structural$obs_cmt) ||
+         length(ir$structural$obs_cmt) != 1L))
       cli::cli_abort(
-        "structural$obs_cmt must be a character scalar when structural$type is {.val ode}."
+        "structural$obs_cmt must be a character scalar when structural$type is {.val ode} and no [scaling] readout is emitted."
       )
     # ferx rejects an observable compartment that is not a declared state
     # (E_PARSE: Observable compartment 'CENT' not in states). Emitted, it
     # produced only INFO-level warnings and an empty $unsupported -- the
     # translation looked clean and the engine refused the file.
-    if (!ir$structural$obs_cmt %in% ir$structural$states)
+    if (!is.null(ir$structural$obs_cmt) &&
+        !ir$structural$obs_cmt %in% ir$structural$states)
       cli::cli_abort(c(
         "structural$obs_cmt {.val {ir$structural$obs_cmt}} is not one of structural$states.",
         i = "States are {.val {ir$structural$states}}.",
         x = "ferx rejects this with {.code E_PARSE: Observable compartment not in states}."
       ))
+  }
+
+  # A readout and `obs_scale` must never appear together. ferx applies the scale
+  # on TOP of the readout expression: measured on 0.3.0 the file validates clean
+  # and every prediction moves by up to 11.37 units, with no diagnostic from the
+  # engine. That is the whole of defect 15, and it is cheap to make impossible.
+  # `[[` throughout, never `$`. On a list `$` partial-matches, so
+  # `list(per_cmt = ...)$y` returned the per-CMT entries and this guard fired on
+  # every per-CMT model. Renaming the field away from the `y` prefix fixes the
+  # collision; using `[[` means the next field added cannot recreate it.
+  if ((!is.null(ir$scaling[["y"]]) || length(ir$scaling[["per_cmt"]]) > 0) &&
+      !is.null(ir$scaling[["obs_scale"]]))
+    cli::cli_abort(c(
+      "scaling carries both a `y` readout and `obs_scale`.",
+      x = "ferx applies obs_scale on top of the readout, silently double-scaling every prediction."
+    ))
+  if (!is.null(ir$scaling[["y"]]) && length(ir$scaling[["per_cmt"]]) > 0)
+    cli::cli_abort("scaling carries both a plain `y` and a per-CMT `y[CMT=N]` readout.")
+
+  # An `[error_model]` is single-endpoint, per-compartment, or covariate-selected
+  # -- never a mixture, which ferx has no grammar for. A selected chain must end
+  # in the bare `else` ferx requires "so every observation maps to an error
+  # model"; without it the engine rejects the block, and the emitter derives the
+  # `else` from a NULL `cond`, so a chain missing one would emit `else if` and
+  # stop.
+  if (length(ir$error_model) > 0) {
+    has <- function(f) vapply(ir$error_model,
+                              function(e) !is.null(e[[f]]), logical(1))
+    if (any(has("cmt")) && any(has("cond")))
+      cli::cli_abort("error_model mixes per-CMT and covariate-selected entries.")
+    if (any(has("cmt")) && !all(has("cmt")))
+      cli::cli_abort("error_model mixes per-CMT entries with unkeyed ones.")
+    if (any(has("cond"))) {
+      if (!all(has("cond")[-length(ir$error_model)]))
+        cli::cli_abort("only the LAST covariate-selected error_model entry may omit `cond`.")
+      if (has("cond")[length(ir$error_model)])
+        cli::cli_abort(c(
+          "a covariate-selected error_model must end with an unconditional entry.",
+          x = "ferx requires a terminating `else` so every observation maps to an error model."
+        ))
+    }
   }
 
   .validate_ir_names(ir)

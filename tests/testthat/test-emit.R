@@ -440,3 +440,63 @@ test_that("a suggestion is not rendered alongside a real [error_model]", {
   expect_match(txt, "\\[error_model\\]\n  DV ~ proportional\\(EPS1\\)")
   expect_no_match(txt, "could not translate")
 })
+
+# -- Phase 6b: endpoint dispatch ---------------------------------------------
+
+# An ODE IR carrying whatever readout/error shape the test needs. Built by hand
+# because the two blocks under test are chosen by the SHAPE of the entries, and
+# a pipeline fixture can only produce whichever shape the translator happens to
+# emit for the model it was given.
+disp_ir <- function(scaling, error_model, obs_cmt = NULL) {
+  new_ferx_ir(
+    source_format = "nonmem", source_file = "m.mod",
+    thetas = list(list(name = "TVCL", init = 1, lower = 0, upper = 10)),
+    sigmas = list(list(name = "EPS1", value = 0.04, scale = "sd"),
+                  list(name = "EPS2", value = 0.09, scale = "sd")),
+    indiv_params = list(list(lhs = "CL", rhs = "TVCL")),
+    structural = list(type = "ode", states = c("CENT", "PD"), obs_cmt = obs_cmt),
+    odes = list(list(kind = "ddt", state = "CENT", rhs = "-CL * CENT"),
+                list(kind = "ddt", state = "PD",   rhs = "-CL * PD")),
+    scaling = scaling, error_model = error_model)
+}
+
+test_that("a covariate-selected [error_model] renders as if / else if / else", {
+  txt <- emit_ferx(disp_ir(
+    list(y = "if (FLAG == 2) PD else CENT"),
+    list(list(dv = "DV", type = "proportional", params = "EPS2", cond = "FLAG == 2"),
+         list(dv = "DV", type = "additive",     params = "EPS1", cond = "FLAG == 3"),
+         list(dv = "DV", type = "proportional", params = "EPS1"))))
+  expect_match(txt, paste0(
+    "\\[error_model\\]\n",
+    "  if \\(FLAG == 2\\) \\{ DV ~ proportional\\(EPS2\\) \\}\n",
+    "  else if \\(FLAG == 3\\) \\{ DV ~ additive\\(EPS1\\) \\}\n",
+    "  else \\{ DV ~ proportional\\(EPS1\\) \\}"))
+  expect_match(txt, "\\[scaling\\]\n  y = if \\(FLAG == 2\\) PD else CENT")
+})
+
+test_that("a per-CMT [error_model] and readout render with CMT=N keys", {
+  txt <- emit_ferx(disp_ir(
+    list(per_cmt = list(list(cmt = 1L, expr = "CENT/VC"),
+                        list(cmt = 2L, expr = "PD"))),
+    list(list(dv = "DV", type = "proportional", params = "EPS1", cmt = 1L),
+         list(dv = "DV", type = "additive",     params = "EPS2", cmt = 2L))))
+  expect_match(txt, paste0("\\[error_model\\]\n",
+                           "  CMT=1: DV ~ proportional\\(EPS1\\)\n",
+                           "  CMT=2: DV ~ additive\\(EPS2\\)"))
+  expect_match(txt, "\\[scaling\\]\n  y\\[CMT=1\\] = CENT/VC\n  y\\[CMT=2\\] = PD")
+})
+
+test_that("obs_cmt is omitted from ode() when a readout carries the observation", {
+  # ferx ignores obs_cmt once `y` is present -- measured, PRED identical to every
+  # digit with and without it -- so leaving it in states a compartment choice the
+  # file no longer makes.
+  with_y <- emit_ferx(disp_ir(list(y = "CENT"), list(
+    list(dv = "DV", type = "proportional", params = "EPS1"))))
+  expect_match(with_y, "  ode(states=[CENT, PD])", fixed = TRUE)
+  expect_no_match(with_y, "obs_cmt", fixed = TRUE)
+
+  # The control: without a readout the same IR still emits it.
+  without <- emit_ferx(disp_ir(list(obs_scale = "CL"), list(
+    list(dv = "DV", type = "proportional", params = "EPS1")), obs_cmt = "CENT"))
+  expect_match(without, "  ode(obs_cmt=CENT, states=[CENT, PD])", fixed = TRUE)
+})
