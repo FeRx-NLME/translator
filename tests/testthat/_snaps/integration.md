@@ -117,8 +117,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: ode_warfarin.ctl
-      # Warnings: 1 -- run result$warnings for details
-      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
         theta TVCL(0.134, 0.001, 10.0)
@@ -302,8 +300,6 @@
       cat(norm_snap(result$ferx_text))
     Output
       # Translated from nonmem: pk_1cmt_oral.mod
-      # Warnings: 1 -- run result$warnings for details
-      # WARNING: obs_cmt could not be inferred -- guessed 'CENTRAL', verify in [structural_model]
       
       [parameters]
         theta TVKA(0.1, 0.0, 1e15)

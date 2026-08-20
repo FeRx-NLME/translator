@@ -568,24 +568,79 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       }
     }
 
+    # 3. $PK's `S<n>`, when the source scales exactly one compartment. `S<n>` is
+    #    keyed by NONMEM compartment number and exists to convert that
+    #    compartment's amount to the data's scale, so a model that scales one
+    #    compartment has named the one it observes.
+    #
+    #    Below DEFOBS deliberately: DEFOBS states which compartment is observed,
+    #    while this infers it from what the scaling is FOR. Above the guess just
+    #    as deliberately -- measured on a 3-compartment model with `S2 = V` and
+    #    PERIPH declared last, the guess took PERIPH and then dropped [scaling]
+    #    because the scaled compartment was not the observed one. The two
+    #    warnings stated the contradiction and neither acted on it.
+    #
+    #    Not circular with the [scaling] lookup below: obs_idx flows one way into
+    #    scaling_hint[[obs_idx]], and when this tier fires that key is the one
+    #    that supplied the index.
+    if (is.null(obs_cmt) && length(scaling_hint) == 1L) {
+      s_idx <- suppressWarnings(as.integer(names(scaling_hint)[1L]))
+      # More than one scaled compartment identifies none, so this tier is not
+      # reached at all; a single one still has to be a compartment that exists.
+      if (!is.na(s_idx) && s_idx >= 1L && s_idx <= length(state_names)) {
+        obs_cmt     <- state_names[[s_idx]]
+        obs_cmt_num <- s_idx
+        warn <- c(warn, paste0(
+          "INFO  | no DV compartment and no $MODEL DEFOBS, so the observed ",
+          "compartment was taken from $PK's S", s_idx, " -- '", obs_cmt,
+          "' is the only compartment the source scales."))
+      }
+    }
+
     if (is.null(obs_cmt)) {
-      obs_cmt <- tryCatch(ui$central, error = function(e) NULL)
       # length must be checked, not just type: is.character() is TRUE for
       # character(0) and for a length-2 vector, and both then reached an `if`
       # that aborts ("argument is of length zero" / "the condition has length > 1")
       # on a model that previously translated.
-      if (is.null(obs_cmt) || !is.character(obs_cmt) || length(obs_cmt) != 1L) {
-        # state_names already carries the sanitised names, so the guess needs no
-        # translation -- but ui$central is raw and does.
+      central <- tryCatch(ui$central, error = function(e) NULL)
+      if (!is.null(central) && is.character(central) && length(central) == 1L) {
+        # Through the state declaration map for the same reason the d/dt target
+        # is: name_map would resolve a state name that happens to be a parameter
+        # key to the parameter. `state_decl` covers every state, not only the
+        # renamed ones, so an identity entry answers here rather than falling
+        # through. state_names is already sanitised; ui$central is raw.
+        obs_cmt <- if (central %in% names(state_decl)) state_decl[[central]]
+                   else                                central
+      } else if (length(state_names) == 1L) {
+        # A one-state model is not a guess -- `tail()` and "the only
+        # compartment" are the same answer, and there is nothing for the user to
+        # verify. Separated from the tier below deliberately, or the commonest
+        # ODE shape in pharmacometrics is handed an ERROR about an ambiguity it
+        # does not have.
+        obs_cmt     <- state_names[[1L]]
+        obs_cmt_num <- 1L
+      } else {
         obs_cmt <- tail(state_names, 1)
-        warn <- c(warn, paste0("WARN  | obs_cmt could not be inferred -- guessed '",
-                               obs_cmt, "', verify in [structural_model]"))
-      } else if (obs_cmt %in% names(state_decl)) {
-        # Through the state declaration map for the same reason the d/dt target is:
-        # name_map would resolve a state name that happens to be a parameter key to
-        # the parameter. `state_decl` covers every state, not only the renamed
-        # ones, so an identity entry answers here rather than falling through.
-        obs_cmt <- state_decl[[obs_cmt]]
+        # ERROR, not WARN, and on the unsupported list: every tier above reads
+        # something the source actually says, and this one reads declaration
+        # order. It picks the wrong compartment the moment the observed one is
+        # not declared last, and the consequence -- predicting the wrong state,
+        # and losing [scaling] with it -- is silent in the numbers.
+        # `unsupported` is the field a user reads as an action list, which is
+        # what this is.
+        #
+        # It does not block. The entry is reported, not fatal, so a model that
+        # genuinely cannot say which compartment it observes still translates
+        # and still validates; it stops claiming the answer was inferred.
+        warn <- c(warn, paste0(
+          "ERROR | no compartment could be inferred for the observation: the ",
+          "$ERROR block names none, $MODEL declares no DEFOBS, and $PK scales ",
+          "no single compartment. Guessed '", obs_cmt, "' because it is ",
+          "declared last, which is position and not evidence -- set obs_cmt in ",
+          "[structural_model] yourself."))
+        unsp <- c(unsp, paste0(
+          "observed compartment not identified by the source -- obs_cmt guessed '",
+          obs_cmt, "' from declaration order"))
       }
     }
     structural$states  <- state_names

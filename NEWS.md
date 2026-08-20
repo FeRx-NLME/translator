@@ -2,6 +2,14 @@
 
 ## Breaking changes
 
+* A model that identifies no observed compartment now reports an `ERROR` and a
+  `result$unsupported` entry rather than a `WARN` (issue #6, phase 6c). The
+  guess itself is unchanged -- the last declared state -- but it is declaration
+  order, not evidence, and `unsupported` is the field a user reads as an action
+  list. It does not block: the file is still emitted and still validates. A
+  one-compartment model is exempt, since `tail(states)` and "the only
+  compartment" are the same answer.
+
 * `[scaling] obs_scale` and `ode(obs_cmt=...)` are no longer emitted alongside a
   `y` readout (issue #6, defects 15 and 12). ferx applies `obs_scale` on TOP of
   the readout rather than instead of it, which validates clean while moving
@@ -52,6 +60,17 @@
   the check.
 
 ## New features
+
+* `obs_cmt` is now inferred from `$PK`'s `S<n>` when the `$ERROR` block names no
+  compartment and `$MODEL` declares no `DEFOBS` (issue #6, phase 6c). `S<n>` is
+  keyed by NONMEM compartment number and exists to put that compartment's amount
+  on the data's scale, so a source scaling exactly one compartment has named the
+  one it observes. Previously the cascade fell through to the last declared
+  state: measured on a 3-compartment model with `S2 = V` and `PERIPH` declared
+  last, it took `PERIPH` and then dropped `[scaling]` as well, because the
+  scaled compartment was not the one it had decided was observed. A source that
+  scales several compartments identifies none, so the inference declines rather
+  than taking the lowest number, and `DEFOBS` still outranks it.
 
 * A NONMEM `$ERROR` block that dispatches between two endpoints is now
   translated instead of being reduced to one of them (issue #6, defect 5). The
