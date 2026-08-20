@@ -320,7 +320,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # PK theta with no assignment of its own, so those names must be
     # de-shadowed too -- otherwise it emits the self-shadowing `V = V` this
     # function exists to prevent.
-    cur_lhs <- vapply(expr_out$indiv_params, function(p) p$lhs, "")
+    cur_lhs <- .ip_names(expr_out$indiv_params)
     if (identical(expr_out$structural$type, "lincmt"))
       cur_lhs <- c(cur_lhs,
                    theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
@@ -370,7 +370,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # reads the individual parameter, and treating it as a theta invented a second
     # carrier for a reference that was already correct.
     declared  <- toupper(c(cur_lhs, names(state_decl),
-                           vapply(expr_out$odes, function(o) o$state, ""),
+                           .ode_states(expr_out$odes),
                            reserved_base))
     free_syms <- setdiff(ode_syms, declared)
     # Kept as INDICES, and converted to names only where names are what is
@@ -394,7 +394,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # (The current theta names need not be listed -- .deshadow_theta_names()
       # already folds them into `taken`.)
       reserved    = c(reserved_base,
-                      vapply(expr_out$odes, function(o) o$state, ""))
+                      .ode_states(expr_out$odes))
     )
     if (!any(!is.na(desh$map))) break
     for (i in seq_along(theta_out$thetas)) {
@@ -416,7 +416,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # an individual parameter -- the trigger only PREDICTS one, and the prediction
   # comes true because the carrier is appended below. Calling that a shadow tells
   # the user their model had a collision it never had.
-  parse_lhs <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+  parse_lhs <- toupper(.ip_names(expr_out$indiv_params))
   ode_only  <- ode_theta[!toupper(ode_theta) %in% parse_lhs]
 
   for (i in seq_along(rename_why)) {
@@ -463,7 +463,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     for (i in seq_along(theta_names)) {
       nm <- theta_orig[i]
       if (!i %in% ode_theta_i) next
-      lhs <- vapply(expr_out$indiv_params, function(p) p$lhs, "")
+      lhs <- .ip_names(expr_out$indiv_params)
       rhs <- vapply(expr_out$indiv_params, function(p) p$rhs, "")
       # Reuse an existing parameter only when it is a PURE ALIAS of this theta.
       # Matching on the name alone is not enough and gets the arithmetic wrong:
@@ -478,7 +478,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # Otherwise define a new one, dodging everything already emitted -- including
       # the individual parameter that made the reuse invalid.
       taken <- c(lhs, theta_names, reserved_base,
-                 vapply(expr_out$odes, function(o) o$state, ""))
+                 .ode_states(expr_out$odes))
       pt    <- .carrier_name(nm, theta_names[i], taken)
       expr_out$indiv_params <- c(expr_out$indiv_params,
                                  list(list(lhs = pt, rhs = theta_names[i])))
@@ -503,7 +503,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   structural <- expr_out$structural
   obs_cmt_num <- NA_integer_
   if (identical(structural$type, "ode")) {
-    state_names <- vapply(expr_out$odes, function(o) o$state, "")
+    state_names <- .ode_states(expr_out$odes)
     obs_cmt     <- NULL
 
     # WHICH COMPARTMENT IS OBSERVED, in order of authority.
@@ -594,7 +594,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 
   scaling <- list()
   if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
-    state_names_uc <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
+    state_names_uc <- toupper(.ode_states(expr_out$odes))
     # Prefer the NONMEM compartment NUMBER when $MODEL gave us one. `S2 = V` is
     # keyed by compartment number, so resolving the number by looking the guessed
     # name back up in the state list just re-derives the guess -- and picked the
@@ -613,11 +613,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         # which is precisely the S2=V failure CLAUDE.md warns about.
         norm_svar      <- .norm(svar)
         theta_names_uc <- toupper(vapply(theta_out$thetas, function(t) t$name, ""))
-        indiv_lhs_uc   <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+        indiv_lhs_uc   <- toupper(.ip_names(expr_out$indiv_params))
         matched <- if (norm_svar %in% theta_names_uc) {
           vapply(theta_out$thetas, function(t) t$name, "")[match(norm_svar, theta_names_uc)]
         } else if (norm_svar %in% indiv_lhs_uc) {
-          vapply(expr_out$indiv_params, function(p) p$lhs, "")[match(norm_svar, indiv_lhs_uc)]
+          .ip_names(expr_out$indiv_params)[match(norm_svar, indiv_lhs_uc)]
         } else NULL
         if (!is.null(matched)) {
           scaling <- list(obs_scale = matched)
@@ -658,7 +658,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # The LHS is the PK name as written in the source (theta_orig) and the RHS
     # the possibly de-shadowed theta, so a passthrough reads `V = TVV` and never
     # the self-shadowing `V = V`.
-    existing_lhs  <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
+    existing_lhs  <- toupper(.ip_names(expr_out$indiv_params))
     theta_names   <- vapply(theta_out$thetas, function(t) t$name, "")
     for (i in seq_along(theta_names)) {
       pk_name <- theta_orig[i]
@@ -688,7 +688,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # the very `V = V` self-shadow the passthrough comment says it prevents.
   final_clash <- intersect(
     toupper(vapply(theta_out$thetas, function(t) t$name, "")),
-    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")))
+    toupper(.ip_names(expr_out$indiv_params)))
   if (length(final_clash) > 0) {
     warn <- c(warn, paste0(
       "ERROR | could not give theta(s) ", paste(final_clash, collapse = ", "),
@@ -717,8 +717,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # grow a second one.
   init_conds <- list()
   if (length(expr_out$init_conds) > 0) {
-    ip_names <- toupper(vapply(expr_out$indiv_params, function(p) p$lhs, ""))
-    st_names <- toupper(vapply(expr_out$odes, function(o) o$state, ""))
+    ip_names <- toupper(.ip_names(expr_out$indiv_params))
+    st_names <- toupper(.ode_states(expr_out$odes))
     for (ic in expr_out$init_conds) {
       state <- if (ic$state_raw %in% names(state_decl)) state_decl[[ic$state_raw]]
                else                                     ic$state_raw
@@ -823,9 +823,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # passed the entire suite, and could not fire on either defect it was written for.
   if (length(expr_out$odes) > 0) {
     ode_declared <- toupper(c(
-      vapply(expr_out$odes, function(o) o$state, ""),
-      vapply(expr_out$indiv_params, function(p) p$lhs, ""),
-      names(expr_out$odes_intermediates),   # NULL until phase 5 emits them
+      .ode_states(expr_out$odes),
+      .ip_names(expr_out$indiv_params),
+      # ODE-block intermediates, including any declared inside a conditional --
+      # a name assigned in a branch is declared as much as a top-level one, and
+      # reporting it as undeclared is a false positive that aborts a correct
+      # translation under the default `strict = TRUE`.
+      .stmt_declared(expr_out$odes, "ddt", "assign"),
       # No function whitelist belongs here. `.collect_symbols()` recurses over
       # `expr[-1]`, so a call head is never collected -- `exp(-K*CENT)` yields
       # K and CENT and nothing else -- and a list of function names could only
@@ -875,7 +879,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # but says nothing about which source variable is at fault; `TAD` and `T` are
   # ordinary $PK and $DES variable names in NONMEM.
   builtin_params <- intersect(
-    toupper(vapply(expr_out$indiv_params, function(p) p$lhs, "")),
+    toupper(.ip_names(expr_out$indiv_params)),
     .RESERVED_ODE_NAMES)
   if (length(builtin_params) > 0) {
     warn <- c(warn, paste0(
@@ -931,7 +935,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # intermediate called `F1` is inlined away, so it is simply not in this list and
   # the user is not warned about a parameter they will not see.
   dose_out <- .deconflict_dose_attr_names(
-    vapply(expr_out$indiv_params, function(p) p$lhs, ""),
+    .ip_names(expr_out$indiv_params),
     # `reserved_base` rather than a fresh `random_names` list: it is what the
     # carrier path already reserves (random effects AND covariate names), and
     # this is the third naming authority in the file. The other two are passed
@@ -941,7 +945,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # could land on a data column, where the declared parameter wins and the
     # covariate silently becomes unreferenceable.
     taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
-              vapply(expr_out$odes, function(o) o$state, ""),
+              .ode_states(expr_out$odes),
               reserved_base, .RESERVED_ODE_NAMES))
 
   if (length(dose_out$map) > 0L) {
@@ -963,14 +967,34 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # this code. obs_scale is reachable only through NONMEM `S1 = <param>`, which
     # needs a raw control stream rather than a mock UI; the same `.rewrite_syms()`
     # call is exercised by the [individual_parameters] cross-reference test.
-    expr_out$indiv_params <- lapply(expr_out$indiv_params, function(p) {
+    # Statement-aware since phase 5b: a conditional has no `lhs`/`rhs` of its
+    # own, and `dose_out$map[[NULL]]` aborts rather than returning nothing --
+    # measured, on a model carrying both a $PK conditional and an `F1`. Its
+    # branches declare and read names like any other statement, so they need the
+    # same rename.
+    rn <- function(sts) lapply(sts, function(p) {
+      if (identical(.stmt_kind(p, "assign"), "if")) {
+        p$cond <- .rewrite_syms(p$cond, dose_out$map)
+        p$then <- rn(p$then)
+        if (length(p$else_) > 0) p$else_ <- rn(p$else_)
+        return(p)
+      }
       if (!is.null(dose_out$map[[p$lhs]])) p$lhs <- dose_out$map[[p$lhs]]
       p$rhs <- .rewrite_syms(p$rhs, dose_out$map)
       p
     })
-    expr_out$odes <- lapply(expr_out$odes, function(o) {
-      o$rhs <- .rewrite_syms(o$rhs, dose_out$map); o
+    expr_out$indiv_params <- rn(expr_out$indiv_params)
+    rn_ode <- function(sts) lapply(sts, function(o) {
+      if (identical(.stmt_kind(o, "ddt"), "if")) {
+        o$cond <- .rewrite_syms(o$cond, dose_out$map)
+        o$then <- rn_ode(o$then)
+        if (length(o$else_) > 0) o$else_ <- rn_ode(o$else_)
+        return(o)
+      }
+      o$rhs <- .rewrite_syms(o$rhs, dose_out$map)
+      o
     })
+    expr_out$odes <- rn_ode(expr_out$odes)
     init_conds <- lapply(init_conds, function(x) {
       x$rhs <- .rewrite_syms(x$rhs, dose_out$map); x
     })
@@ -979,6 +1003,62 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                                    map = dose_out$map)
     if (is.character(scaling$obs_scale))
       scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, dose_out$map)
+  }
+
+  # Drop $ERROR scaffolding from [individual_parameters] (issue #6 defect 6).
+  #
+  # `W1 = 0` / `W2 = 0` are indicator variables that exist only to weight the two
+  # EPS terms in `Y = IPRED*(1 + W1*EPS1 + W2*EPS2)`. They are not individual
+  # parameters, and no reachability rule evicts them: they reference nothing, so
+  # they never enter `aux_vars`, and nothing in [odes] reads them, so they are not
+  # backward-reachable either. They reach the block through pass 3's default --
+  # everything not auxiliary becomes an individual parameter.
+  #
+  # The rule is deliberately narrow: BOTH unreferenced by anything emitted AND
+  # referenced by the error/readout expression. The broader "drop every unused
+  # individual parameter" is tempting and wrong for this phase -- it would change
+  # output for models unrelated to this issue, and ferx already reports those as
+  # W_UNUSED_PARAM rather than mis-fitting them.
+  #
+  # Phase 6 is what turns these into endpoint selection; until then they are
+  # dropped rather than emitted dead, and the drop is announced so the
+  # information is not lost silently.
+  if (length(expr_out$error_refs) > 0 && length(expr_out$indiv_params) > 0) {
+    sym_of <- function(x) {
+      e <- tryCatch(str2lang(x), error = function(e) NULL)
+      if (is.null(e)) character() else .collect_symbols(e)
+    }
+    used <- toupper(c(
+      .emitted_ode_symbols(expr_out$odes),
+      .ip_refs(expr_out$indiv_params),
+      unlist(lapply(init_conds, function(x) sym_of(x$rhs))),
+      if (is.character(scaling$obs_scale)) sym_of(scaling$obs_scale),
+      unlist(structural$pk_args)))
+
+    # Per STATEMENT, not per name. `.ip_names()` walks into branches, so a
+    # conditional contributes as many names as it assigns and a name-indexed
+    # logical would misalign with the statement list the moment one appears --
+    # silently deleting the wrong statement. Only a plain assignment is
+    # droppable anyway: a conditional is scaffolding or it is not, as a whole.
+    drop <- vapply(expr_out$indiv_params, function(p) {
+      if (identical(.stmt_kind(p, "assign"), "if")) return(FALSE)
+      toupper(p$lhs) %in% expr_out$error_refs && !toupper(p$lhs) %in% used
+    }, logical(1))
+    ip_names <- vapply(expr_out$indiv_params, function(p)
+      if (identical(.stmt_kind(p, "assign"), "if")) "" else p$lhs, "")
+    if (any(drop)) {
+      warn <- c(warn, paste0(
+        "INFO  | ", paste(ip_names[drop], collapse = ", "),
+        if (sum(drop) == 1L) " is" else " are",
+        " read only by the $ERROR expression, so ", if (sum(drop) == 1L) "it is"
+        else "they are", " $ERROR scaffolding rather than ",
+        if (sum(drop) == 1L) "an individual parameter" else "individual parameters",
+        " -- dropped from [individual_parameters], where ferx would have reported ",
+        if (sum(drop) == 1L) "it" else "them",
+        " as computed but never used. Endpoint selection built on ",
+        if (sum(drop) == 1L) "it" else "them", " is not translated yet (#6 defect 5)."))
+      expr_out$indiv_params <- expr_out$indiv_params[!drop]
+    }
   }
 
   # CLAUDE.md: every translation warning is emitted at translation time so the
@@ -1598,8 +1678,8 @@ bound_name <- function(entries, raw) {
 # rather than as a translation gap because reaching it means the translator
 # broke its own contract, not that the source model used something ferx lacks.
 .assert_state_param_disjoint <- function(odes, indiv_params) {
-  clash <- intersect(toupper(vapply(odes, function(o) o$state, "")),
-                     toupper(vapply(indiv_params, function(p) p$lhs, "")))
+  clash <- intersect(toupper(.ode_states(odes)),
+                     toupper(.ip_names(indiv_params)))
   if (length(clash) > 0)
     stop("internal error: ", paste(clash, collapse = ", "),
          " names both an ODE state and an individual parameter after parsing. ",
@@ -1842,7 +1922,11 @@ bound_name <- function(entries, raw) {
 # leaves a reader unable to tell the three apart. It is only reached here as
 # .free_name()'s fallback when `<name>_PAR` is itself taken.
 .deconflict_dose_attr_names <- function(lhs, taken = character()) {
-  bad <- which(.is_dose_attr_name(lhs))
+  # One decision per NAME, not per occurrence. A name assigned both at the top
+  # level and inside a conditional branch appears twice in the declared set, and
+  # renaming it twice consumed a second candidate (`F1_PAR` then `F1_PAR_1`) and
+  # reported it twice, for one parameter.
+  bad <- which(.is_dose_attr_name(lhs) & !duplicated(toupper(lhs)))
   if (length(bad) == 0L) return(list(map = list(), warnings = character()))
 
   map  <- list()
@@ -2097,20 +2181,27 @@ bound_name <- function(entries, raw) {
 .scope_odes_to_params <- function(odes, carrier) {
   carrier <- carrier[names(carrier) != unname(carrier)]
   if (length(carrier) == 0L) return(odes)
-  lapply(odes, function(o) {
-    e <- tryCatch(str2lang(o$rhs), error = function(e) NULL)
-    if (is.null(e)) return(o)
-    e     <- .normalise_expr(e, as.list(carrier))
-    # Only `rhs` is written. The inlining pass rebuilds each ode as
-    # `list(state, rhs)` and its one consumer runs before this, so `rhs_expr` is
-    # already gone by the time we get here -- setting it would put the field back
-    # on carrier models and leave it NULL on every other one, and a phase-5
-    # reader would get a correct expression from some models and nothing from
-    # the rest.
-    o$rhs <- paste(deparse(e, width.cutoff = 500L), collapse = " ")
+  rw <- function(x) {
+    e <- tryCatch(str2lang(x), error = function(e) NULL)
+    if (is.null(e)) return(x)
+    paste(deparse(.normalise_expr(e, as.list(carrier)), width.cutoff = 500L),
+          collapse = " ")
+  }
+  # A conditional carries a carrier reference in its condition as readily as in
+  # an arm, and an unrewritten one names a theta that [odes] cannot resolve.
+  scope <- function(sts) lapply(sts, function(o) {
+    if (identical(.stmt_kind(o, "ddt"), "if")) {
+      o$cond <- rw(o$cond)
+      o$then <- scope(o$then)
+      if (length(o$else_) > 0) o$else_ <- scope(o$else_)
+      return(o)
+    }
+    o$rhs <- rw(o$rhs)
     o
   })
+  scope(odes)
 }
+
 
 # Every name the emitted [odes] block will reference, uppercased.
 #
@@ -2129,11 +2220,20 @@ bound_name <- function(entries, raw) {
 # emitting them -- they are parsed from the same odes list.
 .emitted_ode_symbols <- function(odes) {
   if (length(odes) == 0L) return(character())
-  syms <- unlist(lapply(odes, function(o) {
-    e <- tryCatch(str2lang(o$rhs), error = function(e) NULL)
+  txt <- function(x) {
+    e <- tryCatch(str2lang(x), error = function(e) NULL)
     if (is.null(e)) character() else .collect_symbols(e)
+  }
+  # Since phase 5b the block also holds intermediates and conditionals. A
+  # conditional contributes its condition AND both arms: a name read only inside
+  # a branch is still referenced by the emitted block, and missing it would let
+  # the declaredness check pass on a file that names something undeclared.
+  walk <- function(sts) unlist(lapply(sts, function(o) {
+    if (identical(.stmt_kind(o, "ddt"), "if"))
+      c(txt(o$cond), walk(o$then), walk(o$else_))
+    else txt(o$rhs)
   }))
-  unique(toupper(syms))
+  unique(toupper(walk(odes)))
 }
 
 # Collect all symbol names (leaves) from an expression tree.
@@ -2223,9 +2323,78 @@ bound_name <- function(entries, raw) {
   # Variables known to hold structural-model outputs (linCmt, ODE states).
   # Propagated forward; used in pass 2 to classify auxiliaries.
   init_conds <- list()
+  conditionals <- list()
   aux_vars <- toupper(sigma_names)  # eps1, eps2, ...
 
+  # Source position, stamped on every record this pass produces.
+  #
+  # `all_assigns` and `odes` are separate lists, so without an index the order of
+  # an intermediate RELATIVE to the d/dt line that reads it is unrecoverable once
+  # the walk ends -- and that order is a correctness property with a silent
+  # failure: [odes] has no use-before-def check, so an intermediate emitted below
+  # its consumer stays valid, reads a stale slot, and collapses the prediction to
+  # a constant. `pkpd_ir.mod` already interleaves them (`C2`/`EFF` sit between
+  # DADT(3) and DADT(4)), so this is not hypothetical.
+  pos <- 0L
+
+  # -- capturing a source conditional ------------------------------------------
+  #
+  # Until now an `if` matched no branch in this loop and fell off the end,
+  # discarded with no diagnostic. Defect 4 (a $DES conditional leaving `cf`
+  # undefined) and defect 8 (an $PK covariate effect vanishing) are the same
+  # missing branch seen from two blocks.
+  #
+  # The map SNAPSHOT travels with the statement rather than the normalised text
+  # alone. Which block a conditional belongs to is not known until the
+  # reachability partition runs, and the two blocks resolve an ambiguous name
+  # differently -- inside [odes] a name that is both a state and a parameter is
+  # the state, everywhere else it is the parameter. Re-normalising later against
+  # the FINAL `name_map` is the trap the assignment branch documents (de-shadowing
+  # rebinds names mid-parse), but re-normalising against the map as it stood AT
+  # CAPTURE is exact, and it is what lets the partition apply `state_ode_pins`
+  # only to the statements that actually land in [odes].
+  capture_arm <- function(b) {
+    if (is.null(b)) return(NULL)
+    stmts <- if (is.call(b) && identical(as.character(b[[1]])[1L], "{"))
+               as.list(b)[-1L] else list(b)
+    out <- list()
+    for (st in stmts) {
+      if (is.call(st) && identical(as.character(st[[1]])[1L], "if")) {
+        out <- c(out, list(capture_if(st)))
+        next
+      }
+      # Only a plain assignment is translatable inside a branch. Anything else
+      # is reported rather than dropped -- silently discarding it is how the
+      # whole `if` used to disappear.
+      if (!.is_assignment(st) || !is.symbol(st[[2]])) {
+        warnings <<- c(warnings, paste0(
+          "ERROR | statement inside a conditional is not a plain assignment (",
+          paste(deparse(st, width.cutoff = 500L), collapse = " "),
+          ") -- it is dropped, and the conditional it belongs to will not ",
+          "reproduce the source model."))
+        next
+      }
+      lhs_raw  <- as.character(st[[2]])
+      lhs_norm <- .norm(lhs_raw)
+      snap <- name_map
+      if (!lhs_raw %in% names(snap)) snap[lhs_raw] <- lhs_norm
+      # Bind the name for statements that FOLLOW the conditional, exactly as the
+      # top-level assignment branch does; a branch-local variable is still a
+      # binding as far as later references are concerned.
+      if (!lhs_raw %in% names(state_pins)) name_map[lhs_raw] <<- lhs_norm
+      out <- c(out, list(list(kind = "assign", lhs = lhs_norm,
+                              rhs_raw = st[[3]], map = snap)))
+    }
+    out
+  }
+  capture_if <- function(e) {
+    list(kind = "if", cond_raw = e[[2]], map = name_map,
+         then  = capture_arm(e[[3]]),
+         else_ = if (length(e) >= 4L) capture_arm(e[[4]]) else NULL)
+  }
+
   for (expr in lst) {
+    pos <- pos + 1L
     # cmt() declarations from nonmem2rx -- skip silently
     if (is.call(expr) && identical(as.character(expr[[1]]), "cmt")) next
 
@@ -2259,6 +2428,13 @@ bound_name <- function(entries, raw) {
       next
     }
 
+    if (is.call(expr) && identical(as.character(expr[[1]])[1L], "if")) {
+      cap <- capture_if(expr)
+      cap$pos <- pos
+      conditionals <- c(conditionals, list(cap))
+      next
+    }
+
     if (.is_assignment(expr)) {
       lhs_expr <- expr[[2]]
 
@@ -2280,7 +2456,8 @@ bound_name <- function(entries, raw) {
         rhs_expr_norm <- .normalise_expr(expr[[3]],
                                          .pin_names(name_map, state_ode_pins))
         rhs           <- paste(deparse(rhs_expr_norm, width.cutoff = 500L), collapse = " ")
-        odes  <- c(odes, list(list(state = state, rhs = rhs, rhs_expr = rhs_expr_norm)))
+        odes  <- c(odes, list(list(state = state, rhs = rhs,
+                                   rhs_expr = rhs_expr_norm, pos = pos)))
         aux_vars <- c(aux_vars, toupper(state))  # ODE state vars are auxiliary
         if (!identical(structural$type, "ode"))
           structural <- list(type = "ode")
@@ -2392,12 +2569,19 @@ bound_name <- function(entries, raw) {
       all_assigns <- c(all_assigns,
                        list(list(lhs = lhs_norm, rhs = rhs_norm,
                                  rhs_expr = rhs_expr,
-                                 rhs_expr_norm = rhs_expr_norm)))
+                                 rhs_expr_norm = rhs_expr_norm,
+                                 pos = pos)))
     }
   }
 
   # Pass 2: propagate aux_vars to fixpoint.
   # Any variable whose RHS contains an aux_var is itself auxiliary.
+  #
+  # Conditionals join the same fixpoint, as whole statements. An `if` defines
+  # every name assigned in either arm and reads its condition as well as both
+  # arms, so if anything it reads is auxiliary then everything it defines is --
+  # emitting a conditional that assigns a name in one branch and not the other
+  # would be a different model from the source.
   changed <- TRUE
   while (changed) {
     changed <- FALSE
@@ -2411,31 +2595,87 @@ bound_name <- function(entries, raw) {
         changed  <- TRUE
       }
     }
+    for (cst in conditionals) {
+      d <- .cond_defines(cst)
+      if (all(d %in% aux_vars)) next
+      if (any(.cond_refs(cst) %in% aux_vars)) {
+        aux_vars <- c(aux_vars, setdiff(d, aux_vars))
+        changed  <- TRUE
+      }
+    }
   }
 
-  # Pass 2b: inline aux-var definitions into ODE RHS strings.
-  # $DES-internal intermediates (e.g. C2, EFF) are excluded from
-  # [individual_parameters] but referenced in d/dt() expressions. Without
-  # inlining, they appear as undefined names that ferx-core rejects at parse time.
+  # Pass 2b: emit ODE-block intermediates in SOURCE ORDER instead of inlining.
+  #
+  # `.inline_aux_vars()` is gone, and its removal is the point of this phase.
+  # Substitution cannot represent a variable defined inside an `if` -- that is
+  # defect 4, where `cf` reached the output undefined -- and its depth-30 cutoff
+  # silently returned the un-inlined expression, leaving an undefined name in the
+  # file with no diagnostic. ferx supports intermediates directly, so the emitted
+  # block now reads like the source $DES it came from.
+  #
+  # What lands here is the CONJUNCTION of two tests, and the plan text named only
+  # the second. A statement must reference a state transitively (`aux_vars`) AND
+  # be reachable backward from a d/dt right-hand side or an init() expression. A
+  # $PK assignment is routinely reachable from a d/dt and must stay an individual
+  # parameter: those are in [odes] scope already, so moving one gains nothing and
+  # loses its per-subject evaluation. Reachability alone would empty
+  # [individual_parameters] into [odes].
+  #
+  # Order is preserved by `pos` and NOTHING sorts it. [odes] has no
+  # use-before-def check: an intermediate emitted below its consumer stays valid,
+  # reads a stale slot, and collapses the prediction to a constant with no
+  # diagnostic from the engine.
+  ode_intermediates <- integer()
+  cond_for_odes     <- integer()
   if (length(odes) > 0) {
     state_upper <- toupper(vapply(odes, function(o) o$state, ""))
     sigma_upper <- toupper(sigma_names)
-    aux_map     <- list()
-    for (a in all_assigns) {
-      if (a$lhs %in% aux_vars &&
-          !a$lhs %in% state_upper &&
-          !a$lhs %in% sigma_upper)
-        aux_map[[a$lhs]] <- a$rhs_expr_norm
+
+    # Candidate definitions: assignments and conditionals alike, in one list, so
+    # the closure below cannot see one kind and miss the other.
+    defs <- c(
+      lapply(seq_along(all_assigns), function(i) {
+        a <- all_assigns[[i]]
+        list(kind = "assign", idx = i, pos = a$pos, defines = a$lhs,
+             refs = toupper(.collect_symbols(a$rhs_expr_norm)))
+      }),
+      lapply(seq_along(conditionals), function(i) {
+        cst <- conditionals[[i]]
+        list(kind = "cond", idx = i, pos = cst$pos,
+             defines = .cond_defines(cst), refs = .cond_refs(cst))
+      }))
+
+    seed <- unique(c(
+      unlist(lapply(odes, function(o) toupper(.collect_symbols(o$rhs_expr)))),
+      unlist(lapply(init_conds, function(x) x$syms))))
+    hits <- .reachable_defs(seed, defs)
+
+    for (h in hits) {
+      d <- defs[[h]]
+      # The conjunction. A definition that names no state is an individual
+      # parameter, whatever reads it.
+      if (!any(d$defines %in% aux_vars)) next
+      if (all(d$defines %in% c(state_upper, sigma_upper))) next
+      if (identical(d$kind, "assign")) ode_intermediates <- c(ode_intermediates, d$idx)
+      else                             cond_for_odes     <- c(cond_for_odes, d$idx)
     }
-    if (length(aux_map) > 0) {
-      odes <- lapply(odes, function(o) {
-        inlined <- .inline_aux_vars(o$rhs_expr, aux_map)
-        list(state = o$state,
-             rhs   = paste(deparse(inlined, width.cutoff = 500L), collapse = " "))
-      })
-    } else {
-      odes <- lapply(odes, function(o) list(state = o$state, rhs = o$rhs))
-    }
+
+    # Interleave intermediates, conditionals and d/dt lines on source position.
+    ode_stmts <- c(
+      lapply(ode_intermediates, function(i) {
+        a <- all_assigns[[i]]
+        list(kind = "assign", lhs = a$lhs, rhs = a$rhs, pos = a$pos)
+      }),
+      lapply(cond_for_odes, function(i) {
+        st <- .render_cond(conditionals[[i]], pins = state_ode_pins)
+        st$pos <- conditionals[[i]]$pos
+        st
+      }),
+      lapply(odes, function(o)
+        list(kind = "ddt", state = o$state, rhs = o$rhs, pos = o$pos)))
+    ode_stmts <- ode_stmts[order(vapply(ode_stmts, function(x) x$pos, 0L))]
+    odes <- lapply(ode_stmts, function(x) { x$pos <- NULL; x })
   }
 
   # Pass 2c: collect RXM_* alias map for inline substitution.
@@ -2450,6 +2690,7 @@ bound_name <- function(entries, raw) {
 
   # Pass 3: classify each assignment into indiv_params or error_model.
   indiv_params <- list()
+  error_refs   <- character()
   for (a in all_assigns) {
     # Self-assignments arise from theta-alias resolution (tvcl <- t.TVCL -> TVCL <- TVCL).
     if (a$lhs == a$rhs) next
@@ -2469,6 +2710,9 @@ bound_name <- function(entries, raw) {
         err  <- .classify_error_assignment(a$rhs_expr_norm, sigma_names)
         error_model <- c(error_model,
                          list(list(dv = "DV", type = err$type, params = err$params)))
+        # Remembered for the scaffolding rule below: a parameter whose ONLY
+        # consumer is this expression is $ERROR bookkeeping, not a parameter.
+        error_refs <- c(error_refs, toupper(.collect_symbols(a$rhs_expr_norm)))
       }
       next
     }
@@ -2478,18 +2722,180 @@ bound_name <- function(entries, raw) {
     for (nm in names(rxm_map))
       rhs_final <- gsub(paste0("\\b", nm, "\\b"), rxm_map[[nm]], rhs_final, perl = TRUE)
 
-    indiv_params <- c(indiv_params, list(list(lhs = a$lhs, rhs = rhs_final)))
+    indiv_params <- c(indiv_params, list(list(lhs = a$lhs, rhs = rhs_final,
+                                              pos = a$pos)))
+  }
+
+  # Conditionals that did NOT go to [odes] belong here.
+  #
+  # Without this they were captured and then silently dropped -- in neither
+  # block, with no diagnostic -- which is defect 8 (a $PK covariate effect
+  # vanishing) reintroduced by the capture itself, and worse than before because
+  # the code now LOOKS like it handles them.
+  #
+  # Measured against ferx 0.3.0 before emitting: an `if` in
+  # [individual_parameters] parses AND branches on a covariate. With `SEX == 1`
+  # in the data, the conditional form matches a model with the true arm hardcoded
+  # to every printed digit and differs from the false arm.
+  #
+  # A state-dependent conditional that reached neither list is a different case:
+  # it cannot be an individual parameter (states are out of scope there) and
+  # nothing in [odes] reads it, so it is dead. Say so rather than emit it.
+  for (i in seq_along(conditionals)) {
+    if (i %in% cond_for_odes) next
+    cst <- conditionals[[i]]
+    if (any(.cond_defines(cst) %in% aux_vars)) {
+      warnings <- c(warnings, paste0(
+        "INFO  | a conditional assigning ",
+        paste(.cond_defines(cst), collapse = ", "),
+        " depends on a compartment amount but nothing in the emitted [odes] ",
+        "block reads it, so it has no effect and is dropped."))
+      next
+    }
+    st <- .render_cond(cst)
+    st$pos <- cst$pos
+    indiv_params <- c(indiv_params, list(st))
+  }
+  # Source order, then drop the bookkeeping field. [individual_parameters] DOES
+  # have a forward-reference check, so a mis-ordered block fails loudly there --
+  # unlike [odes]. Ordering it correctly is still cheaper than explaining that
+  # error to a user.
+  if (length(indiv_params) > 0) {
+    ord <- order(vapply(indiv_params, function(x)
+      if (is.null(x$pos)) .Machine$integer.max else x$pos, 0L))
+    indiv_params <- lapply(indiv_params[ord], function(x) { x$pos <- NULL; x })
   }
 
   list(
     indiv_params = indiv_params,
+    error_refs   = unique(error_refs),
     odes         = odes,
+    conditionals = conditionals,
     init_conds   = init_conds,
     error_model  = error_model,
     structural   = structural,
     warnings     = warnings,
     unsupported  = unsupported
   )
+}
+
+# Every name an [individual_parameters] statement list REFERENCES, including the
+# condition and both arms of a conditional.
+#
+# Reading `p$rhs` over the list misses all of them -- a conditional has no `rhs`
+# field -- so a parameter used only inside a branch looks unused. That matters
+# because the scaffolding rule below DELETES on the strength of this set.
+.ip_refs <- function(ips) {
+  sym <- function(x) {
+    e <- tryCatch(str2lang(x), error = function(e) NULL)
+    if (is.null(e)) character() else .collect_symbols(e)
+  }
+  walk <- function(sts) unlist(lapply(sts, function(p) {
+    if (identical(.stmt_kind(p, "assign"), "if"))
+      c(sym(p$cond), walk(p$then), walk(p$else_))
+    else sym(p$rhs)
+  }))
+  toupper(walk(ips))
+}
+
+# Every name an [individual_parameters] statement list DECLARES, including names
+# assigned inside a conditional's branches.
+#
+# Walking into branches is not a nicety. `.deshadow_theta_names()` is fed these
+# names to decide which thetas would shadow an individual parameter, and a name
+# assigned only inside an `if` is exactly as shadowable as a top-level one:
+# `theta TVCL` beside `if (SEX == 1) { TVCL = TVCL * TVSEX }` reads the THETA in
+# the branch, the assignment is dead, and ferx emits no diagnostic. That is the
+# defect CLAUDE.md opens with, reintroduced one nesting level down the moment
+# conditionals became emittable. `.assert_state_param_disjoint()` and the #17
+# dose-attribute pass read the same list for the same reason.
+.ip_names <- function(ips) .stmt_declared(ips, "assign", "assign")
+
+# The d/dt targets in an [odes] statement list.
+#
+# Since phase 5b the list holds intermediates and conditionals as well as `ddt`
+# entries, so `vapply(odes, function(o) o$state, "")` -- which every caller used
+# -- now errors on the first intermediate. One accessor rather than a `kind`
+# test at each of the dozen call sites, so a kind added later is handled once.
+.ode_states <- function(odes) {
+  out <- vapply(odes, function(o)
+    if (identical(.stmt_kind(o, "ddt"), "ddt")) o$state else NA_character_, "")
+  out[!is.na(out)]
+}
+
+# -- phase 5b: partitioning statements between [odes] and [individual_parameters]
+
+# Every name a captured conditional ASSIGNS, at any depth.
+#
+# The unit is the whole statement, never one arm. An `if` cannot be
+# half-emitted: emitting a conditional that assigns a name in one branch and not
+# the other is a different model from the source, so if any name it defines
+# belongs in a block, all of them do and the statement goes there entire.
+.cond_defines <- function(st) {
+  out <- character()
+  for (b in c(st$then, st$else_))
+    out <- c(out, if (identical(b$kind, "if")) .cond_defines(b) else b$lhs)
+  unique(out)
+}
+
+# Every name a captured conditional READS -- the condition as well as every arm's
+# right-hand side. The condition counts: `if (CT < 0)` makes the statement depend
+# on `CT` just as an arm reading it would, and missing that drops the definition
+# of a name the emitted block goes on to reference.
+.cond_refs <- function(st) {
+  out <- toupper(.collect_symbols(.normalise_expr(st$cond_raw, st$map)))
+  for (b in c(st$then, st$else_))
+    out <- c(out, if (identical(b$kind, "if")) .cond_refs(b)
+                  else toupper(.collect_symbols(.normalise_expr(b$rhs_raw, b$map))))
+  unique(out)
+}
+
+# Render a captured conditional into the emitter's statement shape, normalising
+# each sub-expression against the map SNAPSHOT taken when it was captured, plus
+# whatever extra pins the destination block requires.
+#
+# `pins` is what makes one capture serve both blocks: inside [odes] a name that
+# is both a state and a parameter resolves to the state, everywhere else to the
+# parameter, and the pins carry that difference without a second capture.
+.render_cond <- function(st, pins = character()) {
+  txt <- function(e, map)
+    paste(deparse(.normalise_expr(e, .pin_names(map, pins)), width.cutoff = 500L),
+          collapse = " ")
+  arm <- function(b) lapply(b, function(x)
+    if (identical(x$kind, "if")) .render_cond(x, pins)
+    else list(kind = "assign", lhs = x$lhs, rhs = txt(x$rhs_raw, x$map)))
+  out <- list(kind = "if", cond = txt(st$cond_raw, st$map), then = arm(st$then))
+  if (length(st$else_) > 0) out$else_ <- arm(st$else_)
+  out
+}
+
+# Backward closure: every definition an emitted [odes] block actually needs.
+#
+# `defs` is a list of records carrying `defines`, `refs` and `pos`. Seeded with
+# the symbols the d/dt right-hand sides and init() expressions reference, the
+# closure repeatedly pulls in any definition of a name currently wanted and adds
+# that definition's own reads to the frontier.
+#
+# This is only HALF the intermediate test. A definition also has to reference a
+# state transitively -- `aux_vars` -- or it stays an individual parameter: those
+# are in [odes] scope already, so moving one gains nothing and loses its
+# per-subject evaluation. Reachability alone would drag every $PK assignment a
+# d/dt happens to read into the ODE block.
+.reachable_defs <- function(seed, defs) {
+  want <- unique(seed)
+  taken <- rep(FALSE, length(defs))
+  repeat {
+    grew <- FALSE
+    for (i in seq_along(defs)) {
+      if (taken[i]) next
+      if (!any(defs[[i]]$defines %in% want)) next
+      taken[i] <- TRUE
+      want <- unique(c(want, defs[[i]]$refs))
+      grew <- TRUE
+    }
+    if (!grew) break
+  }
+  which(taken)
 }
 
 # Classify an error expression (assignment RHS) into proportional / additive / combined.
@@ -2547,6 +2953,11 @@ bound_name <- function(entries, raw) {
 # -- linCmt -> pk macro -------------------------------------------------------
 
 .infer_pk_macro <- function(indiv_params) {
+  # Plain assignments only. A pk macro argument must be a single declared
+  # individual parameter, so a conditional cannot supply one -- and reading
+  # `p$lhs` off an `if` statement errors rather than returning nothing.
+  indiv_params <- Filter(
+    function(p) !identical(.stmt_kind(p, "assign"), "if"), indiv_params)
   lhs_lc   <- tolower(vapply(indiv_params, function(p) p$lhs, ""))
   lhs_uc   <- vapply(indiv_params, function(p) p$lhs, "")
   warn     <- character()

@@ -49,6 +49,34 @@
 
 ## Bug fixes
 
+* **`$DES` and `$PK` conditionals are translated instead of discarded, and
+  ODE intermediates are emitted rather than inlined.** An `IF`/`THEN`/`ELSE`
+  anywhere in the model body used to be dropped with no diagnostic. In `$DES`
+  that left the name it defines undefined in the output (the file did not
+  parse); in `$PK` it silently deleted covariate effects, so any covariate model
+  written the standard way was mistranslated with `warnings` and `unsupported`
+  both empty. Conditionals now emit into `[odes]` or `[individual_parameters]`
+  according to whether they depend on a compartment amount, with both arms and
+  in source position.
+
+  `$DES` intermediates are emitted as ODE-block intermediates in source order
+  instead of being substituted into the `d/dt` lines. Substitution could not
+  represent a variable defined inside a conditional, and its depth cap silently
+  returned the un-inlined expression. The emitted `[odes]` block now reads like
+  the source `$DES`. **The output of `pkpd_ir.mod` changes**: `C2` and `EFF` are
+  emitted as intermediates rather than substituted, which is algebraically
+  identical and computes `CENTRAL/V2` once instead of twice.
+
+  A variable that reads a compartment amount now lands in `[odes]` rather than
+  `[individual_parameters]` -- the latter is evaluated once per subject, so such
+  a variable was being evaluated at the wrong frequency in a file that parsed
+  and fitted. `$ERROR` indicator variables (`W1 = 0` / `W2 = 0`) are dropped
+  rather than emitted as parameters the engine reports as never used.
+
+  The TMDD model from issue #6 now translates to a `.ferx` the engine accepts
+  with zero errors and zero warnings. Endpoint dispatch (issue #6 defect 5) is
+  still not translated.
+
 * **An ordinary parameter named like a ferx dose attribute is renamed.** ferx
   reads an `[individual_parameters]` name of the form `F{n}`, `D{n}`, `R{n}`,
   `ALAG{n}`, `LAGTIME{n}` (compartment `n` >= 1), or a bare `F`, `ALAG` or

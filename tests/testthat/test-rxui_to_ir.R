@@ -822,11 +822,15 @@ test_that("covariate detection does not report iniDf names as covariates", {
   expect_false(any(grepl("^T_|^E_", covs)))
 })
 
-test_that("an ODE intermediate is inlined with the binding it had when written", {
+test_that("an ODE intermediate keeps the binding it had when written", {
   # Kills the mutation that reverts pass 2b to re-normalising the raw expression
   # with the FINAL name_map. De-shadowing makes that map time-varying, so `frac`
-  # -- written when `cl` still meant the theta -- was inlined as the individual
+  # -- written when `cl` still meant the theta -- resolved to the individual
   # parameter. Both forms parse; ferx cannot tell them apart.
+  #
+  # Phase 5b emits the intermediate instead of substituting it into the d/dt
+  # line, which makes the binding directly readable rather than buried in the
+  # ODE right-hand side -- but the property under test is unchanged.
   skip_if_not_installed("rxode2")
   f <- function() {
     ini({ cl <- 1.0; v <- 10.0; ka <- 1; prop.err <- 0.1; eta.cl ~ 0.09 })
@@ -836,7 +840,9 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
             central ~ prop(prop.err) })
   }
   ir  <- suppressWarnings(rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2"))
-  rhs <- vapply(ir$odes, function(o) o$rhs, "")[2]
+  frac <- Filter(function(o) identical(o$lhs, "FRAC"), ir$odes)
+  expect_length(frac, 1L)
+  rhs <- frac[[1]]$rhs
 
   # `frac` must carry the THETA's value, and it does so through a carrier
   # parameter rather than by naming the theta: a theta is not in scope in [odes]
@@ -848,7 +854,10 @@ test_that("an ODE intermediate is inlined with the binding it had when written",
   # The carrier is named off the THETA (`TVCL_ODE`), not the source name: `CL_ODE`
   # would read as "the CL used in the ODE", which is the individual value, and
   # telling those two apart is the whole point.
-  expect_equal(rhs, "KA * depot - CL/V * central - central/TVCL_ODE")
+  expect_equal(rhs, "central/TVCL_ODE")
+  # And the d/dt line reads the intermediate rather than re-deriving it.
+  ddt_c <- Filter(function(o) identical(o$state, "central"), ir$odes)
+  expect_match(ddt_c[[1]]$rhs, "FRAC", fixed = TRUE)
   ip <- vapply(ir$indiv_params, function(p) paste0(p$lhs, "=", p$rhs), "")
   expect_true("TVCL_ODE=TVCL" %in% ip)
   # No numbered fallback was needed, so no warning about one.
@@ -942,8 +951,17 @@ test_that("an aux var is inlined with the name it was normalised under", {
 
   lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
   expect_false("EFF" %in% lhs)            # state-dependent: an ODE intermediate
-  rhs <- paste(vapply(ir$odes, function(o) o$rhs, ""), collapse = " ")
-  expect_false(grepl("C_2", rhs, fixed = TRUE))   # never referenced undeclared
+  # Phase 5b emits it instead of substituting it away, so the name now DOES
+  # appear -- and the property to hold is the one the old assertion stood in for:
+  # never referenced undeclared. `C_2` is the normalised spelling of `c.2`, so
+  # this also still pins that the emitted reference and the emitted declaration
+  # agree on which normalisation was applied.
+  intermediates <- vapply(Filter(function(o) identical(o$kind, "assign"), ir$odes),
+                          function(o) o$lhs, "")
+  expect_true("C_2" %in% intermediates)
+  expect_true(all(c("C_2", "EFF") %in%
+                  c(intermediates, .ode_states(ir$odes),
+                    vapply(ir$indiv_params, function(p) p$lhs, ""))))
 })
 
 test_that("an error model whose sigma arrives via a dotted name is classified", {
@@ -1208,7 +1226,7 @@ test_that("state renaming does not rename thetas -- one owner per collision", {
   lst <- list(quote(cl <- th1 * exp(eta1)), ddt("central", quote(-cl * central)))
   ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
-  expect_equal(vapply(ir$odes, function(o) o$state, ""), "central")
+  expect_equal(.ode_states(ir$odes), "central")
   expect_length(grep("state 'central'", ir$warnings), 0L)
 })
 
@@ -1942,21 +1960,32 @@ test_that("a state is not mistaken for a theta reference in an ODE", {
   expect_false(any(grepl("theta 'CENT' shares a name", ir$warnings)))
 })
 
-test_that("a theta reaching the ODE only after inlining is scoped too", {
+test_that("a theta reaching the ODE through an intermediate is scoped too", {
   # An intermediate that touches a state cannot be an individual parameter, so it
-  # is inlined into the d/dt line -- and the text that gets inlined was normalised
-  # for a different context, never against the [odes] scope. `ki <- KTP*CENT`
-  # therefore arrived as `TVKTP * CENT`: a bare theta in [odes], with the
-  # pass-through parameter defined and unreferenced beside it. This is why the
-  # scope is applied to the emitted right-hand side rather than during the walk.
+  # is emitted into [odes] -- and the text that gets emitted was normalised for a
+  # different context, never against the [odes] scope. `ki <- KTP*CENT` therefore
+  # arrived as `TVKTP * CENT`: a bare theta in [odes], with the pass-through
+  # parameter defined and unreferenced beside it. This is why the scope is
+  # applied to the emitted right-hand side rather than during the walk.
+  #
+  # Phase 5b changed HOW the intermediate reaches the block -- declared in source
+  # order rather than substituted into the d/dt line -- but not what must hold:
+  # no theta name may appear anywhere in [odes].
   ini <- rbind(theta_row("KTP", 0.5), theta_row("K", 0.1), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(k <- K * exp(eta1)), quote(ki <- KTP * CENT),
               ddt("CENT", quote(-k * CENT + ki)))
   ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
 
-  expect_equal(ir$odes[[1]]$rhs, "-K * CENT + KTP * CENT")
-  expect_false(grepl("TVKTP", ir$odes[[1]]$rhs, fixed = TRUE))
+  ki <- Filter(function(o) identical(o$lhs, "KI"), ir$odes)
+  expect_length(ki, 1L)
+  expect_equal(ki[[1]]$rhs, "KTP * CENT")
+  # The carrier, never the theta it carries.
+  expect_false(any(grepl("TVKTP", .emitted_ode_symbols(ir$odes), fixed = TRUE)))
   expect_true("KTP" %in% vapply(ir$indiv_params, function(p) p$lhs, ""))
+  # Declared before the line that reads it: [odes] has no use-before-def check,
+  # so the order is the whole correctness property.
+  kinds <- vapply(ir$odes, function(o) if (is.null(o$kind)) "ddt" else o$kind, "")
+  expect_lt(which(kinds == "assign")[1], which(kinds == "ddt")[1])
 })
 
 test_that("an intermediate that survives as a parameter carries the theta", {
@@ -2416,4 +2445,201 @@ test_that("a rename does not land on a covariate name", {
   expect_false("F1_PAR" %in% ip)
   # The covariate reference must survive untouched.
   expect_match(ir$odes[[1]]$rhs, "F1_PAR", fixed = TRUE)
+})
+
+# -- phase 5b: statements, conditionals and the block partition ---------------
+
+# Statement helpers, so the expectations read as what the emitted block says.
+ip_of  <- function(ir) vapply(ir$indiv_params, function(p)
+  if (identical(p$kind, "if")) paste0("if (", p$cond, ")") else paste0(p$lhs, " = ", p$rhs), "")
+ode_of <- function(ir) vapply(ir$odes, function(o)
+  switch(if (is.null(o$kind)) "ddt" else o$kind,
+         `if`   = paste0("if (", o$cond, ")"),
+         assign = paste0(o$lhs, " = ", o$rhs),
+         paste0("d/dt(", o$state, ")")), "")
+
+test_that("a $DES conditional is emitted into [odes] with both arms", {
+  # Defect 4. The conditional used to match no branch in the parse loop and be
+  # discarded, leaving the name it defines undefined in the output.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(ct <- CENT / KS),
+              quote(if (ct < 0) { cf <- 0 } else { cf <- ct * 2 }),
+              ddt("CENT", quote(-k * CENT * cf)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  o <- ode_of(ir)
+  expect_true(any(grepl("^if \\(CT < 0\\)$", o)))
+  cond <- Filter(function(x) identical(x$kind, "if"), ir$odes)[[1]]
+  expect_equal(vapply(cond$then,  function(x) paste0(x$lhs, " = ", x$rhs), ""), "CF = 0")
+  expect_equal(vapply(cond$else_, function(x) paste0(x$lhs, " = ", x$rhs), ""), "CF = CT * 2")
+  # And the name it defines is no longer undeclared.
+  expect_false("CF" %in% setdiff(.emitted_ode_symbols(ir$odes),
+                                 toupper(c(.stmt_declared(ir$odes, "ddt", "assign"),
+                                           .ode_states(ir$odes),
+                                           .ip_names(ir$indiv_params)))))
+})
+
+test_that("a state-dependent variable lands in [odes], never [individual_parameters]", {
+  # The half of defect 4 that produces a file which PARSES and is numerically
+  # wrong: [individual_parameters] is evaluated once per subject, but a variable
+  # reading a compartment amount has to be evaluated at every integration step.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ct <- CENT / KS),
+              quote(fb <- ct / (KS + ct)),
+              ddt("CENT", quote(-k * CENT * fb)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false("FB" %in% .ip_names(ir$indiv_params))
+  expect_true("FB" %in% .stmt_declared(ir$odes, "ddt", "assign"))
+})
+
+test_that("an ODE intermediate is declared before the line that reads it", {
+  # [odes] has no use-before-def check. An intermediate below its consumer stays
+  # valid, reads a stale slot, and collapses the prediction to a constant with no
+  # diagnostic -- so ordering is the correctness property, not presentation.
+  ini <- rbind(theta_row("K", 0.1), theta_row("KS", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(ct <- CENT / KS),
+              ddt("CENT", quote(-k * CENT * ct)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  o <- ode_of(ir)
+  expect_lt(grep("^CT = ", o), grep("^d/dt\\(CENT\\)", o))
+})
+
+test_that("a $PK conditional is emitted into [individual_parameters]", {
+  # Defect 8. Capturing conditionals without routing them here would be WORSE
+  # than the original defect -- captured and then dropped, in neither block and
+  # with no diagnostic, so the code looks like it handles them.
+  ini <- rbind(theta_row("T1", 1), theta_row("T3", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(tvcl <- T1),
+              quote(if (SEX == 1) tvcl <- T1 * T3),
+              quote(cl <- tvcl * exp(eta1)),
+              ddt("CENT", quote(-cl * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  ip <- ip_of(ir)
+  expect_true(any(grepl("^if \\(SEX == 1\\)$", ip)))
+  # Source order: defined, conditionally overridden, then read.
+  expect_lt(grep("^TVCL = ", ip)[1], grep("^if \\(SEX", ip))
+  expect_lt(grep("^if \\(SEX", ip), grep("^CL = ", ip))
+})
+
+test_that("$ERROR indicator variables are dropped, not emitted dead", {
+  # Defect 6. W1/W2 reference nothing and nothing reads them, so no reachability
+  # rule evicts them -- they arrive through pass 3's default. ferx would report
+  # them as computed but never used.
+  ini <- rbind(theta_row("K", 0.1), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1), sigma_row("eps2", 0.2))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(w1 <- 0), quote(w2 <- 0),
+              ddt("CENT", quote(-k * CENT)),
+              quote(y <- CENT * (1 + w1 * eps1 + w2 * eps2)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(c("W1", "W2") %in% .ip_names(ir$indiv_params)))
+  expect_match(ir$warnings, "\\$ERROR scaffolding", all = FALSE)
+})
+
+test_that("a theta is de-shadowed against a name assigned only in a branch", {
+  # The defect CLAUDE.md opens with, one nesting level down. `.deshadow_theta_names()`
+  # is fed the individual-parameter names; a name assigned only inside an `if`
+  # never reached that list, so a theta of the same name silently shadowed it --
+  # the branch assignment would be dead, with no diagnostic from ferx.
+  ini <- rbind(theta_row("CL", 1), theta_row("F2", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(if (SEX == 1) CL <- CL * F2),
+              quote(k <- CL * exp(eta1)),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  thetas <- vapply(ir$thetas, function(t) t$name, "")
+  expect_false("CL" %in% thetas)          # renamed away from the branch target
+  expect_true("CL" %in% .ip_names(ir$indiv_params))
+})
+
+test_that("an unused ODE intermediate is dropped rather than emitted", {
+  # `pk_1cmt_oral.mod` has an unused `CP = A(2)/V` in $DES. Inlining discarded it
+  # for free; emitting it would produce a `computed but never used` warning from
+  # the engine and put a name in the file the model does not use.
+  ini <- rbind(theta_row("K", 0.1), theta_row("V", 10), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(k <- K * exp(eta1)), quote(cp <- CENT / V),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false("CP" %in% .stmt_declared(ir$odes, "ddt", "assign"))
+  expect_false("CP" %in% .ip_names(ir$indiv_params))
+})
+
+test_that("the scaffolding drop stays aligned when a conditional is present", {
+  # `.ip_names()` walks into branches, so a conditional contributes as many names
+  # as it assigns. A name-indexed logical then misaligns with the STATEMENT list
+  # and deletes the wrong entry. This fixture forces the mismatch: one
+  # conditional assigning two names, so five names span four statements.
+  ini <- rbind(theta_row("K", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(if (SEX == 1) { aa <- T2; bb <- T2 * 2 }),
+              quote(w1 <- 0),
+              ddt("CENT", quote(-k * CENT * aa * bb)),
+              quote(y <- CENT * (1 + w1 * eps1)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # The scaffolding goes, and nothing else does.
+  expect_false("W1" %in% .ip_names(ir$indiv_params))
+  expect_true(all(c("K", "AA", "BB") %in% .ip_names(ir$indiv_params)))
+  # The conditional itself must survive intact -- both arms, both names.
+  conds <- Filter(function(p) identical(p$kind, "if"), ir$indiv_params)
+  expect_length(conds, 1L)
+  expect_equal(sort(vapply(conds[[1]]$then, function(x) x$lhs, "")), c("AA", "BB"))
+})
+
+test_that("a parameter read only inside a conditional counts as used", {
+  # The `used` set was built from `p$rhs` over the statement list, and a
+  # conditional has no `rhs` -- so every name read inside a branch looked unused.
+  # Combined with the scaffolding rule, which DELETES on the strength of that
+  # set, a parameter referenced only in a branch could be removed and leave the
+  # branch naming something undeclared.
+  ini <- rbind(theta_row("K", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(w1 <- T2),                       # read ONLY by the branch...
+              quote(if (SEX == 1) k <- k * w1),      # ...here
+              ddt("CENT", quote(-k * CENT)),
+              quote(y <- CENT * (1 + w1 * eps1)))    # ...and by $ERROR
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # W1 is referenced by an emitted conditional, so it is NOT scaffolding.
+  expect_true("W1" %in% .ip_names(ir$indiv_params))
+  # And nothing the emitted block names is left undeclared.
+  declared <- c(.ip_names(ir$indiv_params), .ode_states(ir$odes),
+                .stmt_declared(ir$odes, "ddt", "assign"),
+                vapply(ir$thetas, function(t) t$name, ""))
+  expect_true("W1" %in% declared)
+})
+
+test_that("a dose-attribute rename reaches inside a conditional", {
+  # Two review findings in one fixture. The #17 rename pass assumed every
+  # [individual_parameters] entry has `lhs`/`rhs`, so a model carrying BOTH a
+  # $PK conditional and a dose-attribute-shaped name aborted in
+  # `dose_out$map[[NULL]]` -- measured, not hypothetical.
+  #
+  # And `.ip_names()` reports a name assigned both at the top level and in a
+  # branch twice, so the deconflicter renamed it twice, consuming a second
+  # candidate (`F1_PAR` then `F1_PAR_1`) and reporting it twice for one
+  # parameter. One decision per name, not per occurrence.
+  ini <- rbind(theta_row("T1", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(f1 <- T1),
+              quote(if (SEX == 1) f1 <- T1 * T2),
+              quote(k <- f1 * exp(eta1)),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(.is_dose_attr_name(.ip_names(ir$indiv_params))))
+  expect_true("F1_PAR" %in% .ip_names(ir$indiv_params))   # not F1_PAR_1
+  # The branch assignment and the downstream reference follow the same rename.
+  cond <- Filter(function(p) identical(p$kind, "if"), ir$indiv_params)[[1]]
+  expect_equal(vapply(cond$then, function(x) x$lhs, ""), "F1_PAR")
+  k <- Filter(function(p) identical(p$lhs, "K"), ir$indiv_params)[[1]]
+  expect_match(k$rhs, "F1_PAR", fixed = TRUE)
+  expect_length(grep("shape of a ferx dose attribute", ir$warnings), 1L)
 })
