@@ -597,3 +597,313 @@ test_that("a per-CMT gap emits keyed y[CMT=N] plus a keyed suggestion, wherever 
   expect_no_match(result$ferx_text, "W1", fixed = TRUE)
   expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
 })
+
+# -- Phase 6c: which compartment is observed ----------------------------------
+#
+# These are tier 2 rather than tier 1 because the evidence they weigh -- $MODEL
+# DEFOBS and $PK's `S<n>` -- is read off the raw control stream by nm_to_ferx()
+# and reaches rxui_to_ir() only as hints. Reaching the lower tiers from an
+# inline rxode2 model is not possible either: rxode2 requires the endpoint to
+# name a defined variable, and any such variable resolves to a compartment at
+# tier 1, so the cascade never gets past its first step.
+
+test_that("the observed compartment is taken from S<n> when nothing else names it", {
+  skip_if_not_installed("nonmem2rx")
+  # s_scaling_not_last.ctl declares PERIPH last and scales CENTRAL. Before this
+  # phase the cascade ran out of evidence and took `tail(states)`, which is
+  # PERIPH -- and then dropped [scaling] as well, because the scaled
+  # compartment was not the one it had decided was observed.
+  m <- system.file("testmodels/nonmem/s_scaling_not_last.ctl",
+                   package = "ferxtranslate")
+  skip_if(m == "")
+  result <- suppressWarnings(nm_to_ferx(m, validate = FALSE))
+
+  expect_match(result$ferx_text,
+               "ode(obs_cmt=CENTRAL, states=[DEPOT, CENTRAL, PERIPH])",
+               fixed = TRUE)
+  # Both halves, because the failure took both: the wrong compartment AND the
+  # scaling that went missing with it.
+  expect_match(result$ferx_text, "obs_scale = V", fixed = TRUE)
+  expect_length(result$unsupported, 0L)
+  expect_length(grep("^ERROR .*compartment could be inferred", result$warnings), 0L)
+})
+
+test_that("$MODEL DEFOBS outranks $PK scaling when the two disagree", {
+  skip_if_not_installed("nonmem2rx")
+  # DEFOBS states which compartment is observed; `S<n>` says which compartment's
+  # amount is converted to the data's scale. The first is a statement and the
+  # second an inference from purpose, so DEFOBS wins. The fixture makes them
+  # name different compartments, which is the only arrangement that can show the
+  # order being wrong.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "defobs_beats_scaling.ctl")
+  writeLines(c(
+    "$PROBLEM DEFOBS and S2 disagree",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "  COMP=(PERIPH, DEFOBS)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "  Q  = THETA(4)",
+    "  V3 = THETA(5)",
+    "  S2 = V",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2) - (Q/V)*A(2) + (Q/V3)*A(3)",
+    "  DADT(3) =  (Q/V)*A(2) - (Q/V3)*A(3)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1) (0,8) (0,60)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "obs_cmt=PERIPH", fixed = TRUE)
+  # The S<n> tier did not fire, so it must not have announced that it did.
+  expect_length(grep("taken from \\$PK's S", result$warnings), 0L)
+})
+
+test_that("scaling for more than one compartment identifies none", {
+  skip_if_not_installed("nonmem2rx")
+  # A source that scales several compartments has named none of them, so the
+  # tier declines rather than taking the lowest number. PERIPH is declared last
+  # so declining is visible: the cascade falls through to the guess and says so,
+  # where picking S1 would have answered DEPOT silently.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "two_scalings.ctl")
+  writeLines(c(
+    "$PROBLEM S1 and S2 both present",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "  COMP=(PERIPH)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "  Q  = THETA(4)",
+    "  V3 = THETA(5)",
+    "  S1 = V",
+    "  S2 = V",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2) - (Q/V)*A(2) + (Q/V3)*A(3)",
+    "  DADT(3) =  (Q/V)*A(2) - (Q/V3)*A(3)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1) (0,8) (0,60)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_length(grep("taken from \\$PK's S", result$warnings), 0L)
+  expect_length(grep("^ERROR .*compartment could be inferred", result$warnings), 1L)
+  expect_no_match(result$ferx_text, "obs_cmt=DEPOT", fixed = TRUE)
+})
+
+test_that("a source that names no compartment reports an ERROR and an unsupported entry", {
+  skip_if_not_installed("nonmem2rx")
+  # No compartment in the DV expression, no DEFOBS, no scaling. The answer is
+  # declaration order, which is position and not evidence -- so it is reported
+  # at ERROR and listed as a gap, not announced as an inference.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "no_evidence.ctl")
+  writeLines(c(
+    "$PROBLEM nothing names the observed compartment",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  err <- grep("^ERROR .*compartment could be inferred", result$warnings, value = TRUE)
+  expect_length(err, 1L)
+  expect_match(err, "declared last, which is position and not evidence", fixed = TRUE)
+  expect_length(grep("obs_cmt guessed", result$unsupported), 1L)
+  # Reported, not fatal: the file is still emitted and still names a compartment.
+  expect_match(result$ferx_text, "obs_cmt=CENTRAL", fixed = TRUE)
+})
+
+test_that("a one-compartment model is not guessing and says nothing", {
+  skip_if_not_installed("nonmem2rx")
+  # `tail(states)` and "the only compartment" are the same answer here, so there
+  # is no ambiguity to report. Without this carve-out the commonest ODE shape in
+  # pharmacometrics collects an ERROR about a choice it never had.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "single_cmt.ctl")
+  writeLines(c(
+    "$PROBLEM one compartment, no DEFOBS, no scaling",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "$DES",
+    "  DADT(1) = -(CL/V)*A(1)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "ode(obs_cmt=CENTRAL, states=[CENTRAL])", fixed = TRUE)
+  expect_length(grep("compartment could be inferred", result$warnings), 0L)
+  expect_length(result$unsupported, 0L)
+})
+
+test_that("S<n> is not trusted when $MODEL order and d/dt order disagree", {
+  skip_if_not_installed("nonmem2rx")
+  # `n` in `S<n>` is a $MODEL COMP ordinal; state_names is d/dt order. nonmem2rx
+  # keeps $DES statement order, so a block writing DADT(2) first yields states
+  # [CENTRAL, DEPOT] while S2 still means CENTRAL. Indexing one with the other
+  # took DEPOT, announced it as the scaled compartment, and attached obs_scale
+  # to it -- a file that validates clean and predicts the depot amount over V.
+  # This is the same cross-check the DEFOBS tier makes, for the same reason.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "des_reordered.ctl")
+  writeLines(c(
+    "$PROBLEM DADT written in reverse index order",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "  S2 = V",
+    "$DES",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "  DADT(1) = -KA*A(1)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  # Declined, and said why rather than answering confidently.
+  expect_length(grep("taken from \\$PK's S", result$warnings), 0L)
+  dis <- grep("^WARN .*orderings disagree", result$warnings, value = TRUE)
+  expect_length(dis, 1L)
+  expect_match(dis, "compartment 2 ('CENTRAL')", fixed = TRUE)
+  expect_match(dis, "differential equation is for 'DEPOT'", fixed = TRUE)
+  # Having declined, it falls through to the fallback, which reports as a gap.
+  expect_length(grep("obs_cmt guessed", result$unsupported), 1L)
+})
+
+test_that("an unnamed scaling_hint does not abort the translation", {
+  skip_if_not_installed("nonmem2rx")
+  # names() on an unnamed list is NULL, so as.integer() gives integer(0) and
+  # `!is.na(integer(0))` is logical(0) -- which aborts the `if` rather than
+  # declining. rxui_to_ir() is exported and scaling_hint is its argument, so
+  # this is a caller-reachable crash, and the same trap the ui$central check
+  # below it already records.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "unnamed_hint.ctl")
+  writeLines(c(
+    "$PROBLEM no compartment named anywhere",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "$ERROR",
+    "  IPRED = F",
+    "  Y     = IPRED*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+  ui <- suppressMessages(nonmem2rx::nonmem2rx(ctl))
+
+  expect_no_error(
+    ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                      scaling_hint = list("V"))))
+  # Declined rather than picked: an unnamed entry names no compartment.
+  expect_length(grep("taken from \\$PK's S", ir$warnings), 0L)
+  expect_length(grep("obs_cmt guessed", ir$unsupported), 1L)
+})
+
+test_that("a $MODEL with no DEFOBS is not reported as contradicting the DV expression", {
+  skip_if_not_installed("nonmem2rx")
+  # .extract_nm_defobs() now returns the COMP list even when no compartment is
+  # marked DEFOBS, with name = NA. .same_cmt_name() reports NA as a
+  # disagreement, so without an is.na() guard every model that resolves at tier
+  # 1 and declares no DEFOBS would be accused of contradicting itself.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "explicit_no_defobs.ctl")
+  writeLines(c(
+    "$PROBLEM DV names A(2); $MODEL marks nothing",
+    "$INPUT ID TIME DV AMT EVID MDV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "$ERROR",
+    "  Y = A(2)*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "obs_cmt=CENTRAL", fixed = TRUE)
+  expect_length(grep("declares 'NA' as DEFOBS", result$warnings), 0L)
+  expect_length(grep("but \\$MODEL declares", result$warnings), 0L)
+})

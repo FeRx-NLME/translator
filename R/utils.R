@@ -90,7 +90,11 @@
 # also the NONMEM compartment number the `S<n>` scaling lookup uses, so getting
 # it wrong loses the scaling silently.
 #
-# Returns NULL when $MODEL is absent or names no DEFOBS. Deliberately does NOT
+# Returns NULL when $MODEL is absent or declares no compartments. When $MODEL
+# exists but names no DEFOBS, `index` and `name` come back NA and only `comps`
+# is populated -- callers already require a non-NA index, and the COMP list is
+# worth returning on its own: it is the only way to check a NONMEM compartment
+# NUMBER against the d/dt order it is about to index into. Deliberately does NOT
 # fall back to NONMEM's own default (compartment 1 when DEFOBS is omitted): the
 # caller has better evidence than that -- the compartment the DV expression
 # names -- and a quiet assumption about NONMEM semantics would outrank it.
@@ -111,20 +115,29 @@
   m  <- gregexpr(re, txt, ignore.case = TRUE, perl = TRUE)
   decls <- regmatches(txt, m)[[1]]
   if (length(decls) == 0L) return(NULL)
+  comps  <- character(length(decls))
+  defobs <- NA_integer_
   for (i in seq_along(decls)) {
     inner <- sub("^\\bCOMP(ARTMENT)?\\s*=?\\s*", "", decls[i],
                  ignore.case = TRUE, perl = TRUE)
     inner <- sub("^\\((.*)\\)$", "\\1", inner)
     toks  <- trimws(strsplit(inner, "[,[:space:]]+")[[1]])
     toks  <- toks[nzchar(toks)]
+    if (length(toks) == 0L) next
+    # Recorded for every compartment, attributes or not: a bare `COMP=NAME`
+    # occupies an ordinal and naming it is the whole point of the list.
+    comps[i] <- toks[1]
     if (length(toks) < 2L) next
     # NM-TRAN permits abbreviating an attribute to any unambiguous prefix, and
     # the full spelling is DEFOBSERVATION. The only other DEF* attribute is
     # DEFDOSE, which diverges at the fourth character, so DEFO is the shortest
     # unambiguous prefix -- `^DEFOBS` rejected the legal `DEFO` and `DEFOB` and
     # silently reverted the caller to its guess.
-    if (any(grepl("^DEFO", toks[-1], ignore.case = TRUE)))
-      return(list(index = i, name = toks[1], n_comp = length(decls)))
+    if (is.na(defobs) && any(grepl("^DEFO", toks[-1], ignore.case = TRUE)))
+      defobs <- i
   }
-  NULL
+  list(index  = defobs,
+       name   = if (is.na(defobs)) NA_character_ else comps[defobs],
+       n_comp = length(decls),
+       comps  = comps)
 }

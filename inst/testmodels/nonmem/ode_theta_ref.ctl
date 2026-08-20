@@ -25,13 +25,13 @@ $INPUT ID TIME AMT DV MDV
 $DATA ode_theta_ref.csv IGNORE=@
 $SUBROUTINES ADVAN13 TOL=9
 $MODEL
-; DO NOT REORDER these two lines. The translator never reads DEFOBS -- obs_cmt
-; falls back to tail(states) -- so PERIPH is picked because it is declared LAST,
-; not because it is marked DEFOBS. The guess is right and the emitted model is
-; correct, but swapping the order would silently change which compartment is
-; observed and this fixture would go on passing while testing a different model.
-; When obs_cmt learns to read DEFOBS this becomes a free regression test: same
-; output, minus the "could not be inferred" warning.
+; DO NOT REORDER these two lines. PERIPH is both marked DEFOBS and declared
+; LAST, so this fixture cannot by itself tell the DEFOBS tier from the
+; positional fallback -- swapping the order would silently change which
+; compartment is observed while the fixture went on passing. It does not need
+; to make that distinction: $ERROR names A(2) outright, so obs_cmt resolves at
+; the top of the cascade here and never consults either. defobs_not_last.ctl is
+; the fixture for DEFOBS and s_scaling_not_last.ctl the one for $PK's S<n>.
   COMP=(CENT, DEFDOSE)
   COMP=(PERIPH, DEFOBS)
 $PK

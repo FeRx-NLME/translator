@@ -1469,6 +1469,112 @@ the 11.37-unit double-scale and the silently-ignored `obs_cmt` measured above.
 
 ---
 
+#### Phase 6c measurement pass (done before implementation)
+
+6b delivered 6c's first sentence -- `obs_cmt` is dropped whenever a `y` readout
+is emitted. This pass is about the case where no readout is derivable and the
+compartment still has to be named.
+
+**The cascade already reads DEFOBS.** `.extract_nm_defobs()` parses `$MODEL` from
+the raw control stream and `rxui_to_ir()` consults it as tier 2, below a DV
+expression that names a compartment outright. So the plan's second sentence --
+"parse `DEFOBS` instead of `tail(state_names, 1)`" -- is done, and what is left is
+the third: what happens when both fail.
+
+**Corpus census.** Two bundled models reach the positional guess:
+
+```
+ode_warfarin.ctl    obs_cmt=CENTRAL   WARN | obs_cmt could not be inferred -- guessed 'CENTRAL'
+pk_1cmt_oral.mod    obs_cmt=CENTRAL   WARN | obs_cmt could not be inferred -- guessed 'CENTRAL'
+```
+
+Both are right, and both are right by coincidence: each has two compartments, so
+`tail(states)` and the observed compartment are the same index. Neither model can
+show the guess being wrong, which is the discriminating-fixture rule again -- the
+corpus contains no case that separates the two.
+
+**The evidence the cascade does not consult.** Both of those models carry
+`S2 = V` in `$PK`. `S<n>` is keyed by NONMEM compartment number and exists to
+convert that compartment's amount to the data's scale, so a model that scales
+exactly one compartment has named the observed one. Measured on a three-
+compartment probe (no `DEFOBS`, `IPRED = F`, `S2 = V`, `PERIPH` declared last):
+
+```
+WARN | obs_cmt could not be inferred -- guessed 'PERIPH', verify in [structural_model]
+WARN | $PK declares scaling for compartment(s) 2 but not for the observed
+       compartment 3 ('PERIPH'), so no [scaling] block was emitted.
+  ode(obs_cmt=PERIPH, states=[DEPOT, CENTRAL, PERIPH])
+```
+
+Wrong compartment, and the scaling dropped with it -- the `S2=V` class CLAUDE.md
+warns about, arrived at from the other direction. The two warnings state the
+contradiction between themselves and neither acts on it.
+
+#### Phase 6c design
+
+**A fifth tier, `S<n>`, between DEFOBS and the guess.** Ordered by what the
+source is asserting, not by convenience:
+
+1. A compartment the DV expression names outright.
+2. `$MODEL` DEFOBS.
+3. **`$PK` `S<n>`, only when exactly one compartment is scaled.** DEFOBS says
+   which compartment is observed; `S<n>` says which compartment's amount is
+   converted to the data's scale. Those are the same compartment in every model
+   where both appear, but the second is an inference from purpose and the first
+   is a statement, so DEFOBS outranks it.
+4. `ui$central` -- NULL for both back ends, kept because it costs nothing.
+5. `tail(state_names, 1)`.
+
+Two entries in `scaling_hint` mean the source scales several compartments and
+identifies none, so the tier declines rather than picking the lowest number. An
+`n` outside `1..length(states)` declines for the same reason tier 2 does.
+
+Not circular with the `[scaling]` lookup below it: `obs_idx` flows one way into
+`scaling_hint[[obs_idx]]`, and when the tier fired that key is the one that
+supplied the index, so the lookup finds the entry it came from.
+
+**Tier 5 becomes `ERROR` and joins `unsupported`.** It is a guess presented as an
+answer, and `unsupported` is the field a user reads as an action list. It does not
+block: `unsupported` is reported, not fatal, so a model that genuinely cannot say
+which compartment it observes still translates and still validates -- it simply
+stops claiming the answer was inferred.
+
+**Fixtures.** `ode_theta_ref.ctl` carries a comment asserting the translator never
+reads DEFOBS, which stopped being true when tier 2 landed; it is corrected in the
+same commit. The three-compartment probe above becomes a bundled model, since it
+is the only case in the corpus that can distinguish tier 3 from tier 5.
+
+#### Phase 6c review pass -- what the design above missed
+
+Found by reviewing the implemented diff, both measured rather than argued.
+
+**Tier 3 indexed a $MODEL ordinal into a d/dt-ordered list.** `n` in `S<n>` is a
+`$MODEL` COMP ordinal; `state_names` is `d/dt` order. The design above treats
+them as the same thing, and the DEFOBS tier -- which cross-checks its ordinal by
+name for exactly this reason -- is sitting ten lines above it. They can disagree:
+nonmem2rx keeps `$DES` statement order, so a block writing `DADT(2)` before
+`DADT(1)` yields `[CENTRAL, DEPOT]` while `S2` still means CENTRAL. Measured, the
+tier took DEPOT, announced it as the scaled compartment, and attached
+`obs_scale` to it -- a file that validates clean and predicts the depot amount
+over `V`. SILENT-WRONG, and introduced by the fix for a SILENT-WRONG defect.
+
+The cross-check needs the COMP list, which `.extract_nm_defobs()` had been
+throwing away whenever no compartment was marked DEFOBS -- precisely the case
+tier 3 exists for. It now returns the list with `index = NA` instead of NULL.
+That in turn required guarding the tier-1 contradiction warning against an NA
+name, or every model resolving at tier 1 with no DEFOBS would be accused of
+contradicting a DEFOBS it does not declare.
+
+**An unnamed `scaling_hint` aborted the translation.** `names()` on an unnamed
+list is NULL, so `as.integer()` returns `integer(0)` and `!is.na(integer(0))` is
+`logical(0)`, which aborts the `if` with "missing value where TRUE/FALSE
+needed". `rxui_to_ir()` is exported and `scaling_hint` is its argument, so this
+is caller-reachable. It is the same trap the `ui$central` check fifteen lines
+below already records in a comment -- the lesson was written down and not
+applied at the new site.
+
+---
+
 ### Phase 7 -- `inits = c("control", "final")`
 
 `nonmem2rx(..., updateFinal = FALSE)` is the knob; its roxygen reads "Update the
