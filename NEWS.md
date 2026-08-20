@@ -2,6 +2,45 @@
 
 ## Breaking changes
 
+* The CI engine pin moves to `ferx-r@9c97c13` (from `ferx-r@7889719`), whose
+  committed `Cargo.lock` resolves ferx-core at `25b5f473` -- the merge of
+  ferx-core#1003. That makes `E_DOSE_ATTR_DOUBLE_USE` live in the `engine` job:
+  a bare `F`/`LAGTIME`/`ALAG` or an indexed `F{n}`/`ALAG{n}`/`LAGTIME{n}` READ in
+  `[odes]` (RHS or `init()`), `[scaling]`, or `[adaptive_dosing] observe` is now a
+  parse error on ODE models. The translator emits no such name, so no output
+  changes; the pin is what proves it.
+
+  The rejection is **ODE-models-only** -- an analytical `pk ...` model still
+  accepts the same double use silently (ferx-core#1004, open), so this pin is not
+  a backstop for analytical output. `.deconflict_dose_attr_names()` remains the
+  only guard there.
+
+  `9c97c13` is ferx-r main rather than a tag, because both READMEs install with
+  `pak::pak("FeRx-NLME/ferx-r")`, which takes the default branch. Its DESCRIPTION
+  still reads 0.3.0 -- as it has for ten commits past the `v0.3.0` tag, while
+  ferx-r's own NEWS heading reads `0.3.0.9000` -- so identify this engine by SHA
+  and not by version. The stale version is upstream breakage this pin did not
+  cause (ferx-r#296); what changed here is that it became consequential, this
+  being the first breaking parser change to ride under a released version number.
+
+  No concordance reference omega and no bundled dataset moved. One concordance
+  TEST did have to change: the dose-attribute guard's discriminating half asserted
+  that the un-renamed spelling still simulates and comes back scaled by exactly
+  the parameter's value, which was the silent-wrong hazard. Under the new engine
+  that spelling is a parse error instead, so the assertion now pins the rejection.
+  The property under test is unchanged; only the consequence moved, from
+  silent-wrong to loud. That test now requires the pinned engine and fails against
+  anything older, which is correct for the concordance tier. No re-baseline of the concordance reference omegas or the
+  bundled datasets was needed.
+
+  `engine-pin-drift.yml` now compares the pin against ferx-r's **main HEAD**
+  rather than its latest release, for the same reason. Left as it was it would
+  have filed "Engine pin behind ferx v0.3.0" every week from this commit onward
+  -- reporting BEHIND while the pin was AHEAD -- and a watchdog that cries wolf on
+  a schedule gets muted. Its stated fear of tracking main, that it "would fire on
+  every upstream commit", was unfounded: the job is weekly and dedups on title, so
+  at most one issue is ever open.
+
 * `ode(states=[...])` is now emitted in `$MODEL` COMP order rather than `$DES`
   statement order (issue #25). ferx numbers compartments by their POSITION in
   that list -- measured on 0.3.0, a dose row's `CMT` is applied as

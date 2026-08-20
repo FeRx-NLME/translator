@@ -431,27 +431,54 @@ test_that("a parameter named like a dose attribute is not applied to the dose", 
   data_file <- tempfile(fileext = ".csv")
   write.csv(tmpl, data_file, row.names = FALSE, quote = FALSE)
 
-  sim_of <- function(txt) {
+  write_tmp <- function(txt) {
     f <- tempfile(fileext = ".ferx")
     writeLines(txt, f)
-    ferx_simulate(f, data_file, n_sim = 1L, seed = 20260819)$DV_SIM
+    f
   }
+  sim_of <- function(txt)
+    ferx_simulate(write_tmp(txt), data_file, n_sim = 1L, seed = 20260819)$DV_SIM
 
   # `KE` is the control: a name ferx cannot read as a dose attribute, and
   # otherwise the same file. `F1` is what this package emitted before the guard.
   fixed   <- sim_of(emitted)
   control <- sim_of(gsub("F1_PAR", "KE", emitted, fixed = TRUE))
-  broken  <- sim_of(gsub("F1_PAR", "F1", emitted, fixed = TRUE))
 
   # The rename changed the spelling and nothing else.
   expect_equal(fixed, control, tolerance = 1e-10)
 
-  # The discriminating half: without the rename the engine applies the parameter
-  # a second time, as bioavailability on the dose. If this ever stops being true
-  # the test above has become a tautology and proves nothing. Measured on
-  # ferx 0.3.0: the ratio is exactly the parameter's value (0.1).
-  expect_false(isTRUE(all.equal(fixed, broken, tolerance = 1e-6)))
-  expect_equal(broken / fixed, rep(0.1, length(fixed)), tolerance = 1e-4)
+  # The discriminating half, and it CHANGED SHAPE when the engine pin moved to
+  # ferx-r@9c97c13 -- worth reading before touching it.
+  #
+  # This used to assert that the un-renamed spelling still simulates and comes
+  # back scaled by exactly the parameter's value: `broken / fixed == 0.1`,
+  # because the engine applied `F1` a second time as bioavailability on the dose,
+  # silently. That was the whole hazard -- a wrong answer with no diagnostic.
+  #
+  # ferx-core#993/#1003 (`E_DOSE_ATTR_DOUBLE_USE`) turned that into a PARSE
+  # ERROR: a dose attribute both applied by the engine and read by the model is
+  # now rejected outright on ODE models. So the broken spelling no longer
+  # simulates at all, and the old assertion failed with a zero-length `broken`
+  # rather than a ratio -- which is how the pin bump surfaced it.
+  #
+  # The property under test is unchanged: WITHOUT the rename this package would
+  # emit a model that does not mean what the source said. Only the consequence
+  # moved, from silent-wrong to loud -- which is strictly better and is the point
+  # of the upstream change. Asserting the rejection keeps the test discriminating;
+  # dropping the half entirely would leave `fixed == control` comparing a model
+  # with itself.
+  #
+  # NOTE this now REQUIRES the pinned engine. On a ferx older than ferx-core
+  # 25b5f473 the broken spelling still validates, and this expectation fails --
+  # correctly, since the concordance tier is tied to the pinned build.
+  broken_v <- ferx_model_validate(write_tmp(gsub("F1_PAR", "F1", emitted,
+                                                 fixed = TRUE)))
+  expect_false(isTRUE(broken_v$ok))
+  # Not merely "invalid": invalid FOR THIS REASON. The engine's message ends with
+  # the literal clause below, which ferx-core pins with a test of its own so it
+  # cannot silently degrade to a generic parse error.
+  expect_match(paste(broken_v$diagnostics$message, collapse = " | "),
+               "reserved dose-attribute name", fixed = TRUE)
 })
 
 # -- error-model sigma ORDER (issue #6 defect 10, restated) -------------------

@@ -12,8 +12,21 @@ name: engine-pin-drift
 # repo's PR checks red, because that punishes an unrelated contributor for a
 # maintenance task.
 #
-# It compares against the latest ferx-r RELEASE, not against `main`. Tracking main
-# would fire on every upstream commit; the pin is meant to follow shipped versions.
+# It compares against ferx-r's `main`, NOT its latest release, because main is what
+# users install: both this repo's README and ferx-r's say
+# `pak::pak("FeRx-NLME/ferx-r")`, which resolves the default branch. An earlier
+# version of this file tracked the latest release "because the pin is meant to
+# follow shipped versions" and feared that main "would fire on every upstream
+# commit". Both halves were wrong. ferx-r ships from main -- its tags lag it -- so
+# release-tracking watches something nobody installs; and this job runs WEEKLY with
+# title-based dedup below, so at most one issue is ever open regardless of how many
+# commits land in between.
+#
+# Left unfixed it would have been worse than useless: once the pin moved to a main
+# commit ahead of v0.3.0, this would have filed "Engine pin behind ferx v0.3.0"
+# every week, reporting BEHIND while the pin was AHEAD. A watchdog that cries wolf
+# on a schedule gets muted, and then the real drift goes unnoticed -- the same
+# ending as the silent-watchdog trap in CLAUDE.md, reached from the other side.
 
 # NOTE for anyone copying this file as a template: a workflow whose only triggers
 # are `schedule` and `workflow_dispatch` is NOT registered by GitHub until it has
@@ -37,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Compare the engine pin with ferx-r's latest release
+      - name: Compare the engine pin with ferx-r's main HEAD
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM: FeRx-NLME/ferx-r
@@ -56,22 +69,19 @@ jobs:
           fi
           echo "pinned: ${pinned}"
 
-          tag=$(gh api "repos/${UPSTREAM}/releases/latest" --jq .tag_name)
-          if [ -z "${tag}" ] || [ "${tag}" = "null" ]; then
-            echo "::error::${UPSTREAM} reported no latest release"
+          latest=$(gh api "repos/${UPSTREAM}/commits/main" --jq .sha)
+          if [ -z "${latest}" ] || [ "${latest}" = "null" ]; then
+            echo "::error::could not read ${UPSTREAM} main HEAD"
             exit 1
           fi
-          # Resolve through the commit endpoint so an annotated tag is dereferenced
-          # for us; the git/ref endpoint would hand back the tag object's own SHA.
-          latest=$(gh api "repos/${UPSTREAM}/commits/${tag}" --jq .sha)
-          echo "latest release: ${tag} = ${latest}"
+          echo "${UPSTREAM} main: ${latest}"
 
           # The pin is a short SHA by convention, so compare on the prefix.
           case "${latest}" in
             "${pinned}"*) echo "Pin is current."; exit 0 ;;
           esac
 
-          title="Engine pin behind ferx ${tag}"
+          title="Engine pin behind ferx-r main"
           existing=$(gh issue list --state open --search "in:title \"Engine pin behind\"" \
                      --json number --jq '.[0].number // empty')
           if [ -n "${existing}" ]; then
@@ -90,8 +100,12 @@ jobs:
           # makes the whole workflow unparseable -- and an unparseable workflow never
           # runs, which is the same silent nothing this file exists to prevent.
           body=$(printf '%s\n' \
-            "\`${UPSTREAM}\` released **${tag}** (\`${latest}\`), but the \`engine\` job in" \
+            "\`${UPSTREAM}\` main is at \`${latest}\`, but the \`engine\` job in" \
             "\`.github/workflows/check.yml\` still pins \`${pinned}\`." \
+            "" \
+            "main is what users get -- both READMEs install with" \
+            "\`pak::pak(\"${UPSTREAM}\")\`, which resolves the default branch, and ferx-r's" \
+            "tags lag it. Do not \"fix\" this by pinning the latest tag." \
             "" \
             "That job is the only tier that exercises the engine -- the fast PR job has" \
             "no \`ferx\` -- so until the pin moves, a green engine check proves only that" \
@@ -101,6 +115,9 @@ jobs:
             "" \
             "1. Bump the pin in \`.github/workflows/check.yml\` (three places: two" \
             "   comments and the \`extra-packages\` entry) and in \`CLAUDE.md\`." \
+            "   Check whether the ENGINE actually moved, not just ferx-r: the ferx-core" \
+            "   rev lives in ferx-r's committed \`src/rust/Cargo.lock\`, not in its" \
+            "   \`Cargo.toml\`, which reads as unpinned and is misleading." \
             "2. Run the full suite against the new engine. Per \`CLAUDE.md\` the reference" \
             "   omegas in \`tests/testthat/test-concordance.R\` and the bundled datasets in" \
             "   \`inst/testdata/\` are tied to the pinned build. If either moves," \
