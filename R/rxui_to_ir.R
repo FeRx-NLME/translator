@@ -650,6 +650,26 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         "data's scale."))
   }
 
+  # A readout supersedes both inferences it was derived from (defects 12, 15).
+  #
+  # `obs_scale` STACKS with `y` rather than replacing it: measured on 0.3.0 the
+  # file validates clean and every prediction moves by up to 11.37 units. The
+  # $ERROR block computes the observation explicitly -- `CTOT = A(1)/VC` already
+  # divides by the volume -- so applying S1 again double-scales it. `obs_cmt` is
+  # merely ignored once `y` is present, which is harmless numerically but leaves
+  # a guess in the file that no longer selects anything.
+  if (!is.null(expr_out$readout)) {
+    if (!is.null(scaling$obs_scale))
+      warn <- c(warn, paste0(
+        "INFO  | [scaling] obs_scale = ", scaling$obs_scale, " is dropped -- the ",
+        "$ERROR block computes the observation itself, and ferx applies ",
+        "obs_scale on TOP of a `y` readout rather than instead of it."))
+    scaling <- if (identical(expr_out$readout$kind, "per_cmt"))
+                 list(per_cmt = expr_out$readout$entries)
+               else list(y = expr_out$readout$y)
+    structural$obs_cmt <- NULL
+  }
+
   lincmt_found <- identical(structural$type, "lincmt")
   if (lincmt_found) {
     # Fixed-effect PK params (theta with no ETA) are absent from indiv_params,
@@ -2637,23 +2657,25 @@ bound_name <- function(entries, raw) {
   # diagnostic from the engine.
   ode_intermediates <- integer()
   cond_for_odes     <- integer()
+  # Candidate definitions: assignments and conditionals alike, in one list, so
+  # the closures below cannot see one kind and miss the other. Hoisted out of the
+  # ODE branch because pass 2d needs the same list for a linCmt model, which has
+  # no [odes] block at all but can still dispatch its readout.
+  defs <- c(
+    lapply(seq_along(all_assigns), function(i) {
+      a <- all_assigns[[i]]
+      list(kind = "assign", idx = i, pos = a$pos, defines = a$lhs,
+           refs = toupper(.collect_symbols(a$rhs_expr_norm)))
+    }),
+    lapply(seq_along(conditionals), function(i) {
+      cst <- conditionals[[i]]
+      list(kind = "cond", idx = i, pos = cst$pos,
+           defines = .cond_defines(cst), refs = .cond_refs(cst))
+    }))
+  state_names_emitted <- vapply(odes, function(o) o$state, "")
   if (length(odes) > 0) {
-    state_upper <- toupper(vapply(odes, function(o) o$state, ""))
+    state_upper <- toupper(state_names_emitted)
     sigma_upper <- toupper(sigma_names)
-
-    # Candidate definitions: assignments and conditionals alike, in one list, so
-    # the closure below cannot see one kind and miss the other.
-    defs <- c(
-      lapply(seq_along(all_assigns), function(i) {
-        a <- all_assigns[[i]]
-        list(kind = "assign", idx = i, pos = a$pos, defines = a$lhs,
-             refs = toupper(.collect_symbols(a$rhs_expr_norm)))
-      }),
-      lapply(seq_along(conditionals), function(i) {
-        cst <- conditionals[[i]]
-        list(kind = "cond", idx = i, pos = cst$pos,
-             defines = .cond_defines(cst), refs = .cond_refs(cst))
-      }))
 
     seed <- unique(c(
       unlist(lapply(odes, function(o) toupper(.collect_symbols(o$rhs_expr)))),
@@ -2687,6 +2709,64 @@ bound_name <- function(entries, raw) {
     odes <- lapply(ode_stmts, function(x) { x$pos <- NULL; x })
   }
 
+  # Pass 2d: endpoint dispatch (issue #6 defect 5).
+  #
+  # Runs after 2b so it can see what [odes] already claimed, and before 3 so the
+  # statements it consumes never reach [individual_parameters]. Until now the
+  # readout chain was discarded here -- `CTOT`/`RTOT`/`IPRED` absorbed into
+  # `aux_vars` and skipped, the `IF (FLAG.EQ.2) IPRED = RTOT` that selects
+  # between them dropped with an INFO, and `Y` itself reduced to one
+  # (type, params) pair at the moment it was seen. All three are the model.
+  #
+  # It engages only when the chain holds a conditional. A source with none
+  # reaches pass 3 exactly as before, which is what keeps single-endpoint output
+  # byte-identical.
+  readout         <- NULL
+  readout_assigns <- integer()
+  readout_conds   <- integer()
+  if (length(error_model) == 0 && !length(error_suggestion) &&
+      length(conditionals) > 0 && length(sigma_names) > 0) {
+    # The same rule pass 3 uses to find `Y`, deliberately duplicated rather than
+    # approximated: if the two disagreed, 6b would build a readout around one
+    # statement while pass 3 classified another.
+    y_idx <- NA_integer_
+    for (i in seq_along(all_assigns)) {
+      a <- all_assigns[[i]]
+      if (a$lhs == a$rhs) next
+      if (grepl("^SCALE\\d*$", a$lhs) || grepl(.NM2RX_TEMP_NORM_RE, a$lhs)) next
+      if (!(a$lhs %in% aux_vars)) next
+      if (!length(intersect(toupper(.collect_symbols(a$rhs_expr_norm)), sigma_names)))
+        next
+      y_idx <- i
+      break
+    }
+    if (!is.na(y_idx)) {
+      ch <- .readout_chain(y_idx, all_assigns, conditionals, defs, aux_vars)
+      ep <- if (!is.null(ch$why)) ch
+            else .build_endpoints(all_assigns[[y_idx]]$rhs_expr_norm, ch$chain,
+                                  sigma_names, aux_vars, state_names_emitted)
+      out <- if (!is.null(ep$why) || is.null(ep$col)) ep
+             else .assemble_endpoints(ep, state_names_emitted)
+      if (!is.null(out$why)) {
+        # Reported, not acted on: pass 3 still runs unchanged, so the emitted
+        # file is what it was before this phase. Saying nothing would leave the
+        # conditional to the generic "nothing reads it" INFO below, which
+        # describes a dead statement -- and a $ERROR conditional is not dead, it
+        # is untranslated.
+        warnings <- c(warnings, paste0(
+          "ERROR | the $ERROR block is conditional, but ", out$why,
+          ". No per-endpoint [scaling] y or [error_model] is emitted, so the ",
+          "translated model does not reproduce the source's endpoint selection."))
+      } else if (!is.null(out$readout)) {
+        readout         <- out$readout
+        error_model     <- out$error_model
+        warnings        <- c(warnings, out$warnings)
+        readout_assigns <- c(ch$assigns, y_idx)
+        readout_conds   <- ch$conds
+      }
+    }
+  }
+
   # Pass 2c: collect RXM_* alias map for inline substitution.
   # nonmem2rx emits RXM_X = Y lines as internal IOV/eta copies. Collect them
   # all before Pass 3 (ordering in ui$lstExpr is not guaranteed) so that any
@@ -2700,7 +2780,11 @@ bound_name <- function(entries, raw) {
   # Pass 3: classify each assignment into indiv_params or error_model.
   indiv_params <- list()
   error_refs   <- character()
-  for (a in all_assigns) {
+  for (i in seq_along(all_assigns)) {
+    a <- all_assigns[[i]]
+    # Consumed by pass 2d: the readout chain and the `Y` it feeds are already
+    # rendered into [scaling] and [error_model].
+    if (i %in% readout_assigns) next
     # Self-assignments arise from theta-alias resolution (tvcl <- t.TVCL -> TVCL <- TVCL).
     if (a$lhs == a$rhs) next
 
@@ -2763,7 +2847,7 @@ bound_name <- function(entries, raw) {
   # it cannot be an individual parameter (states are out of scope there) and
   # nothing in [odes] reads it, so it is dead. Say so rather than emit it.
   for (i in seq_along(conditionals)) {
-    if (i %in% cond_for_odes) next
+    if (i %in% cond_for_odes || i %in% readout_conds) next
     cst <- conditionals[[i]]
     if (any(.cond_defines(cst) %in% aux_vars)) {
       warnings <- c(warnings, paste0(
@@ -2795,6 +2879,7 @@ bound_name <- function(entries, raw) {
     init_conds   = init_conds,
     error_model  = error_model,
     error_suggestion = error_suggestion,
+    readout      = readout,
     structural   = structural,
     warnings     = warnings,
     unsupported  = unsupported
@@ -3123,6 +3208,370 @@ bound_name <- function(entries, raw) {
     paste0("# the names below, so check the order of the `sigma` lines too:"),
     paste0("# [error_model]"),
     paste0("#   DV ~ ", guess))
+}
+
+
+# -- phase 6b: endpoint dispatch ----------------------------------------------
+
+# Arithmetic identity folding over a parsed expression.
+#
+# 6a deliberately did WITHOUT a simplifier: it only had to answer yes/no, so it
+# compared coefficients numerically at probe points instead. 6b cannot, because
+# it needs the prediction as an EXPRESSION to put in `[scaling] y` -- and after
+# an indicator has been substituted, that expression reads
+# `CENT/VC * (1 + 1 * 0 + 0 * 0)`. Folding is what turns it back into `CENT/VC`.
+#
+# The scope is the identities that substitution creates and nothing more:
+# 0 and 1 under the four operators, plus constant arithmetic. It is not, and
+# must not grow into, an algebra system -- risk 4 of the plan is that widening a
+# $ERROR heuristic is how this issue happened.
+#
+# `0 * x -> 0` is unsound when `x` is NaN or Inf. It is sound HERE because the
+# source computes the same product: NONMEM evaluating `W2*EPS2` with `W2 = 0`
+# gets zero, so the folded form and the model agree by construction.
+#
+# `(` nodes are dropped rather than folded through. deparse() re-parenthesises
+# from the tree, so `(a + b) * c` survives the round trip; keeping the node
+# would just block the identity tests one level down.
+.fold_consts <- function(expr) {
+  if (!is.call(expr)) return(expr)
+  op <- as.character(expr[[1]])[1L]
+  if (identical(op, "(")) return(.fold_consts(expr[[2]]))
+  args <- lapply(as.list(expr[-1]), .fold_consts)
+  num  <- function(x) is.numeric(x) && length(x) == 1L && !is.na(x)
+  is0  <- function(x) num(x) && x == 0
+  is1  <- function(x) num(x) && x == 1
+  rebuilt <- as.call(c(list(expr[[1]]), args))
+
+  if (length(args) == 1L && identical(op, "-") && num(args[[1]]))
+    return(-args[[1]])
+
+  if (length(args) != 2L || !op %in% c("+", "-", "*", "/", "^")) return(rebuilt)
+  a <- args[[1]]; b <- args[[2]]
+  if (num(a) && num(b))
+    return(tryCatch(eval(rebuilt, envir = baseenv()), error = function(e) rebuilt))
+  switch(op,
+    "*" = if (is0(a) || is0(b)) 0 else if (is1(a)) b else if (is1(b)) a else rebuilt,
+    "+" = if (is0(a)) b else if (is0(b)) a else rebuilt,
+    "-" = if (is0(b)) a else rebuilt,
+    "/" = if (is0(a)) 0 else if (is1(b)) a else rebuilt,
+    "^" = if (is1(b)) a else rebuilt,
+    rebuilt)
+}
+
+# Substitute every symbol that has a definition, to a fixpoint.
+#
+# This is `.inline_aux_vars()` rewritten, which 5b's comment claimed to have
+# deleted and did not. The change that matters is the failure mode: the old one
+# gave up at depth 30 and returned the PARTLY inlined expression, so a cycle
+# reached the file as an undefined name with no diagnostic. Returning NULL makes
+# the caller decide, and every caller here reports.
+#
+# `seen` is per-path, not global, so a name legitimately read by two different
+# branches is inlined twice rather than mistaken for a cycle.
+.inline_defs <- function(expr, defs, seen = character()) {
+  if (is.symbol(expr)) {
+    nm <- as.character(expr)
+    if (!nm %in% names(defs)) return(expr)
+    if (nm %in% seen) return(NULL)
+    return(.inline_defs(defs[[nm]], defs, c(seen, nm)))
+  }
+  if (!is.call(expr)) return(expr)
+  args <- lapply(as.list(expr[-1]), .inline_defs, defs = defs, seen = seen)
+  if (any(vapply(args, is.null, logical(1)))) return(NULL)
+  as.call(c(list(expr[[1]]), args))
+}
+
+# Read a set of captured conditionals as a single-column equality dispatch.
+#
+# Returns `list(col=, values=)` or `list(why=)`. The restriction to one column
+# and to `==` is the whole safety argument, not a convenience: it makes the
+# cases MUTUALLY EXCLUSIVE by construction. Admit `FLAG >= 1` beside
+# `FLAG >= 2` and the combination where both hold is one the case enumeration
+# below never evaluates -- it would emit a model for a case it never looked at,
+# silently. Per risk 4, everything outside the catalogue is reported.
+#
+# `why` is NULL when the conditions are simply absent, which means
+# single-endpoint and is not a failure.
+.dispatch_conditions <- function(conds) {
+  if (length(conds) == 0L) return(list(why = NULL))
+  col <- NULL
+  values <- list()
+  for (st in conds) {
+    if (any(vapply(c(st$then, st$else_),
+                   function(b) identical(b$kind, "if"), logical(1))))
+      return(list(why = "a conditional in the $ERROR chain is nested"))
+    e <- st$cond
+    if (!is.call(e) || !identical(as.character(e[[1]])[1L], "==") ||
+        !is.symbol(e[[2]]) || !is.numeric(e[[3]]) || length(e[[3]]) != 1L)
+      return(list(why = paste0(
+        "the condition `", .deparse_or(e),
+        "` is not a `<column> == <number>` test")))
+    nm <- toupper(as.character(e[[2]]))
+    if (is.null(col)) col <- nm
+    else if (!identical(col, nm))
+      return(list(why = paste0(
+        "the $ERROR conditionals switch on more than one column (`", col,
+        "` and `", nm, "`), so the cases are not mutually exclusive")))
+    v <- as.numeric(e[[3]])
+    if (!any(vapply(values, function(x) isTRUE(all.equal(x, v)), logical(1))))
+      values <- c(values, list(v))
+  }
+  list(col = col, values = values)
+}
+
+.deparse_or <- function(e, alt = "<unparseable>")
+  tryCatch(deparse1(e), error = function(err) alt)
+
+# Derive one (readout, error model) pair per endpoint from the $ERROR chain.
+#
+# `chain` is the backward closure of the `Y =` right-hand side, in source order,
+# each element either `list(kind="assign", lhs, rhs)` or
+# `list(kind="if", cond, then, else_)` with normalised EXPRESSIONS (not the text
+# `.render_cond()` produces -- these have to be substituted into, not printed).
+#
+# Returns `list(why=)` on anything outside the catalogue, and the caller then
+# leaves pass 3 exactly as it was. That fall-through is deliberate: a $ERROR
+# conditional that is not a dispatch (`IF (IPRED.LT.0) IPRED = 0`) is dropped
+# with an INFO today, and turning it into a hard failure would regress models
+# that translate now for a case this phase is not about.
+.build_endpoints <- function(y_rhs, chain, sigma_names, aux_vars, state_names) {
+  conds <- Filter(function(x) identical(x$kind, "if"), chain)
+  disp  <- .dispatch_conditions(conds)
+  if (!is.null(disp$why)) return(list(why = disp$why))
+  if (is.null(disp$col))  return(list(why = NULL))   # no dispatch: single endpoint
+
+  # One case per literal, plus the fall-through where every condition is false.
+  # `value = NULL` marks the fall-through; it is the branch ferx requires as a
+  # terminating `else`, and the one a per-CMT block cannot express.
+  cases <- c(lapply(disp$values, function(v) list(value = v)), list(list(value = NULL)))
+
+  ode_only <- setdiff(aux_vars, toupper(state_names))
+  out <- list()
+  for (k in seq_along(cases)) {
+    v <- cases[[k]]$value
+
+    # Walk the chain in source order, executing the arm each condition selects.
+    env <- list()
+    for (st in chain) {
+      if (identical(st$kind, "assign")) { env[[st$lhs]] <- st$rhs; next }
+      e   <- st$cond
+      lit <- as.numeric(e[[3]])
+      hit <- !is.null(v) && isTRUE(all.equal(v, lit))
+      for (b in (if (hit) st$then else st$else_)) env[[b$lhs]] <- b$rhs
+    }
+
+    full <- .inline_defs(y_rhs, env)
+    if (is.null(full))
+      return(list(why = "the $ERROR chain is cyclic, so `Y` cannot be resolved"))
+    full <- .fold_consts(full)
+
+    # An epsilon an indicator switched off is not part of THIS endpoint's model.
+    # Left in place its coefficient is 0, which is neither 1 nor the prediction,
+    # and the case would abort on a term the source had already deleted.
+    live <- character()
+    for (s in intersect(toupper(.collect_symbols(full)), sigma_names)) {
+      d <- tryCatch(.fold_consts(stats::D(full, s)), error = function(e) NULL)
+      if (is.null(d)) return(list(why = paste0("`", s, "` cannot be differentiated")))
+      if (!(is.numeric(d) && length(d) == 1L && !is.na(d) && d == 0))
+        live <- c(live, s)
+      else full <- .fold_consts(.substitute_sym(full, s, 0))
+    }
+
+    # The readout is `Y` with every epsilon zeroed, then folded. Folding is what
+    # makes this an expression rather than the un-simplified `X * (1 + 0 + 0)`.
+    pred <- full
+    for (s in live) pred <- .substitute_sym(pred, s, 0)
+    pred <- .fold_consts(pred)
+    if (any(toupper(.collect_symbols(pred)) %in% sigma_names))
+      return(list(why = "a sigma survives into the prediction, so `Y` is not linear in it"))
+
+    # 6e. `y` sees states, individual parameters and covariates. An [odes]
+    # intermediate is none of those: ferx reads it as a covariate and the fit
+    # dies on E_MISSING_COVARIATE -- but only when a data file is present, so
+    # model-only validation would call the file good.
+    bad <- intersect(toupper(.collect_symbols(pred)), ode_only)
+    if (length(bad) > 0)
+      return(list(why = paste0(
+        "the readout references `", paste(unique(bad), collapse = "`, `"),
+        "`, which ferx resolves inside [odes] but not in [scaling] y")))
+
+    err <- if (length(live) == 0L) list(type = NA_character_)
+           else .classify_error_assignment(full, live)
+
+    out[[k]] <- list(value = v, pred = pred,
+                     type = err$type, params = err$params,
+                     why  = if (is.na(err$type))
+                              paste0("`Y` for ", disp$col,
+                                     if (is.null(v)) " outside the dispatched values"
+                                     else paste0(" == ", .fmt_lit(v)),
+                                     " is `", .deparse_or(full),
+                                     "`, which is not a ferx error model"))
+  }
+  list(col = disp$col, cases = out)
+}
+
+.fmt_lit <- function(v)
+  if (isTRUE(all.equal(v, round(v)))) format(round(v)) else format(v)
+
+.expr_text <- function(e)
+  paste(deparse(e, width.cutoff = 500L), collapse = " ")
+
+# Turn the per-case (readout, error model) pairs into the two emitted blocks.
+#
+# Which halves branch is decided per half: measured on 0.3.0, a uniform `y`
+# beside a per-CMT `[error_model]` and a per-CMT `y` beside a single-endpoint
+# `[error_model]` are both accepted, so a source that switches only one of them
+# emits only one branching block.
+#
+# The `else`/fall-through is the whole difficulty. ferx REQUIRES a terminating
+# bare `else` on a covariate-selected error model and offers no equivalent at all
+# for `y[CMT=N]`, while the fall-through of the source is often not an error
+# model at all: with `W1 = W2 = 0` outside the dispatched values NONMEM computes
+# `Y = IPRED`, an observation with no residual error, which is not a model any
+# data can be fitted under. That is the source declaring its own dispatch
+# exhaustive, so the last listed case becomes the `else` and the assumption is
+# stated. Where the fall-through IS a real error model it is kept as the `else`,
+# and on the per-CMT path it is expanded over the compartments no condition
+# named -- exact, not a guess, since the source applies it to each of them.
+.assemble_endpoints <- function(ep, state_names) {
+  cases <- ep$cases
+  n     <- length(cases)
+  dflt  <- cases[[n]]
+  listed <- cases[-n]
+  warnings <- character()
+
+  bad <- Filter(function(c) !is.null(c$why), listed)
+  if (length(bad) > 0) return(list(why = bad[[1]]$why))
+
+  keep_default <- !is.na(dflt$type)
+  per_cmt      <- identical(ep$col, "CMT")
+  if (!keep_default) {
+    if (!per_cmt && length(listed) < 2L)
+      return(list(why = paste0(
+        "the fall-through case has no error model (", dflt$why,
+        ") and there is only one dispatched value, so no branch could serve as ",
+        "the `else` ferx requires")))
+    warnings <- c(warnings, paste0(
+      "INFO  | outside ", ep$col, " in {",
+      paste(vapply(listed, function(c) .fmt_lit(c$value), ""), collapse = ", "),
+      "} the source computes an observation with no residual error, so those ",
+      "values cannot occur in fittable data. The dispatch is emitted as ",
+      "exhaustive over them",
+      if (per_cmt) "." else paste0(": ", ep$col, " == ",
+        .fmt_lit(listed[[length(listed)]]$value),
+        " becomes the terminating `else` ferx requires.")))
+  }
+
+  emitted <- if (keep_default) cases else listed
+  preds   <- vapply(emitted, function(c) .expr_text(c$pred), "")
+  errs    <- vapply(emitted, function(c)
+                    paste0(c$type, "(", paste(c$params, collapse = ", "), ")"), "")
+  uniform_pred <- length(unique(preds)) == 1L
+  uniform_err  <- length(unique(errs))  == 1L
+
+  if (per_cmt) {
+    cmts <- vapply(listed, function(c) c$value, 0)
+    if (any(cmts != round(cmts)) || any(cmts < 1) || any(cmts > length(state_names)))
+      return(list(why = paste0(
+        "a CMT dispatch names compartment(s) outside the model's ",
+        length(state_names), " states")))
+    cmts <- as.integer(round(cmts))
+    # The fall-through covers every OTHER compartment, so name them.
+    rest <- setdiff(seq_along(state_names), cmts)
+    idx  <- c(cmts, if (keep_default) rest)
+    src  <- c(listed, if (keep_default) rep(list(dflt), length(rest)))
+    ord  <- order(idx); idx <- idx[ord]; src <- src[ord]
+    if (!keep_default && length(rest) > 0)
+      warnings <- c(warnings, paste0(
+        "INFO  | no [scaling] y or [error_model] entry is emitted for compartment(s) ",
+        paste(rest, collapse = ", "),
+        "; ferx rejects the fit naming them if the data observes any."))
+    readout <- if (uniform_pred) list(kind = "expr", y = preds[[1]])
+               else list(kind = "per_cmt", entries = Map(function(i, c)
+                 list(cmt = i, expr = .expr_text(c$pred)), idx, src))
+    error_model <- if (uniform_err)
+      list(list(dv = "DV", type = emitted[[1]]$type, params = emitted[[1]]$params))
+      else Map(function(i, c) list(dv = "DV", type = c$type, params = c$params,
+                                   cmt = i), idx, src)
+    return(list(readout = readout, error_model = error_model, warnings = warnings))
+  }
+
+  conds <- c(vapply(listed, function(c)
+              paste0(ep$col, " == ", .fmt_lit(c$value)), ""),
+             if (keep_default) NA_character_)
+  # The last emitted branch is the bare `else`, whether it is the real
+  # fall-through or a folded-in case.
+  conds[length(emitted)] <- NA_character_
+
+  readout <- list(kind = "expr", y = if (uniform_pred) preds[[1]] else
+    Reduce(function(acc, i) paste0("if (", conds[i], ") ", preds[i], " else ", acc),
+           rev(seq_len(length(emitted) - 1L)), preds[[length(emitted)]]))
+  error_model <- if (uniform_err)
+    list(list(dv = "DV", type = emitted[[1]]$type, params = emitted[[1]]$params))
+    else lapply(seq_along(emitted), function(i)
+      list(dv = "DV", type = emitted[[i]]$type, params = emitted[[i]]$params,
+           cond = if (is.na(conds[i])) NULL else conds[i]))
+  list(readout = readout, error_model = error_model, warnings = warnings)
+}
+
+# The $ERROR readout chain: the statements 6b consumes, and the names it must
+# inline out of the emitted expression.
+#
+# Inlining is kept MINIMAL on purpose. Two classes have to go, and only two:
+# a name that is auxiliary (it reads a compartment, so ferx will not resolve it
+# in `[scaling]`), and a name a dispatch conditional assigns (its value differs
+# between cases, so an expression naming it cannot represent all of them).
+# Everything else in the closure is an ordinary individual parameter -- `VC` in
+# `CTOT = A(1)/VC` -- and `y` can reference those directly. Inlining them anyway
+# would drag thetas and etas into a block that emits per-observation, replacing
+# a correct reference with a wrong expansion.
+#
+# The set is closed transitively: `W3 = W1 + W2` inherits from `W1`.
+.readout_chain <- function(y_idx, all_assigns, conditionals, defs, aux_vars) {
+  y   <- all_assigns[[y_idx]]
+  hit <- .reachable_defs(toupper(.collect_symbols(y$rhs_expr_norm)), defs)
+  cl  <- defs[hit]
+  cl  <- Filter(function(d) !(identical(d$kind, "assign") && d$idx == y_idx), cl)
+
+  cond_names <- unique(unlist(lapply(cl, function(d)
+    if (identical(d$kind, "cond")) d$defines else character())))
+  inline <- unique(c(intersect(unlist(lapply(cl, function(d) d$defines)), aux_vars),
+                     cond_names))
+  repeat {
+    grew <- FALSE
+    for (d in cl) {
+      if (all(d$defines %in% inline)) next
+      if (any(d$refs %in% inline)) { inline <- unique(c(inline, d$defines)); grew <- TRUE }
+    }
+    if (!grew) break
+  }
+
+  keep <- Filter(function(d) any(d$defines %in% inline), cl)
+  mixed <- Filter(function(d) !all(d$defines %in% inline), keep)
+  if (length(mixed) > 0)
+    return(list(why = paste0(
+      "a $ERROR conditional assigns both dispatch and non-dispatch names (",
+      paste(mixed[[1]]$defines, collapse = ", "), ")")))
+
+  chain <- lapply(keep, function(d) {
+    if (identical(d$kind, "assign")) {
+      a <- all_assigns[[d$idx]]
+      list(kind = "assign", lhs = a$lhs, rhs = a$rhs_expr_norm, pos = a$pos)
+    } else {
+      st  <- conditionals[[d$idx]]
+      arm <- function(b) lapply(b, function(x)
+        list(lhs = x$lhs, rhs = .normalise_expr(x$rhs_raw, x$map)))
+      list(kind = "if", cond = .normalise_expr(st$cond_raw, st$map),
+           then = arm(st$then), else_ = arm(st$else_), pos = st$pos)
+    }
+  })
+  chain <- chain[order(vapply(chain, function(x) x$pos, 0L))]
+  list(chain = chain,
+       assigns = vapply(Filter(function(d) identical(d$kind, "assign"), keep),
+                        function(d) d$idx, 0L),
+       conds   = vapply(Filter(function(d) identical(d$kind, "cond"), keep),
+                        function(d) d$idx, 0L))
 }
 
 .parse_error_rhs <- function(rhs, name_map) {

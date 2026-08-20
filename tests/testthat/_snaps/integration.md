@@ -428,3 +428,117 @@
         maxiter = 500
         covariance = true
 
+# TMDD with a FLAG dispatch: Form C readout + selected error model
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: qss_tmdd.mod
+      # renamed: state c.RTOT -> c_RTOT
+      
+      [parameters]
+        theta TVKEL(0.05, 0.001, 1.0)
+        theta TVVC(3.0, 0.5, 50.0)
+        theta TVKTP(0.8, 0.05, 15.0)
+        theta TVKPT(0.4, 0.02, 8.0)
+        theta TVKSS(6.0, 0.3, 100.0)
+        theta TVKINT(0.3, 0.01, 5.0)
+        theta TVKDEG(0.03, 0.001, 0.5)
+        theta TVRBASE(20.0, 1.0, 400.0)
+      
+        omega ETA1 ~ 0.09
+        omega ETA2 ~ 0.04
+        omega ETA3 ~ 0.09
+      
+        sigma EPS1 ~ 0.15 (sd)
+        sigma EPS2 ~ 0.2 (sd)
+      
+      [individual_parameters]
+        KEL = TVKEL * exp(ETA1)
+        VC = TVVC * exp(ETA2)
+        KTP = TVKTP
+        KPT = TVKPT
+        KSS = TVKSS
+        KINT = TVKINT
+        KDEG = TVKDEG
+        RBASE = TVRBASE * exp(ETA3)
+        KSYN = RBASE * KDEG
+      
+      [structural_model]
+        ode(states=[CENT, TISS, c_RTOT])
+      
+      [odes]
+        init(c_RTOT) = RBASE
+        CT = CENT/VC
+        RT = c_RTOT
+        BB = CT - RT - KSS
+        DSC = BB * BB + 4 * KSS * CT
+        if (DSC < 0) { DSC = 0 }
+        DD = sqrt(DSC)
+        if (BB >= 0) { CF = 0.5 * (BB + DD) } else { CF = 2 * KSS * CT/(DD - BB + 1e-30) }
+        FB = CF/(KSS + CF)
+        d/dt(CENT) = -(KEL + KPT) * CF * VC - RT * KINT * FB * VC + KTP * TISS
+        d/dt(TISS) = -KTP * TISS + KPT * CF * VC
+        d/dt(c_RTOT) = KSYN - KDEG * RT - (KINT - KDEG) * RT * FB
+      
+      [error_model]
+        if (FLAG == 2) { DV ~ proportional(EPS2) }
+        else { DV ~ proportional(EPS1) }
+      
+      [scaling]
+        y = if (FLAG == 2) c_RTOT else CENT/VC
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+
+# PKPD with a CMT dispatch: per-CMT readout + per-CMT error model
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: pkpd_cmt.mod
+      
+      [parameters]
+        theta TVKEL(0.1, 0.001, 1.0)
+        theta TVVC(5.0, 0.5, 50.0)
+        theta TVKOUT(0.2, 0.01, 5.0)
+        theta TVBASE(10.0, 1.0, 100.0)
+      
+        omega ETA1 ~ 0.09
+        omega ETA2 ~ 0.04
+        omega ETA3 ~ 0.04
+      
+        sigma EPS1 ~ 0.15 (sd)
+        sigma EPS2 ~ 1.0 (sd)
+      
+      [individual_parameters]
+        KEL = TVKEL * exp(ETA1)
+        VC = TVVC * exp(ETA2)
+        KOUT = TVKOUT
+        BASE = TVBASE * exp(ETA3)
+        KIN = BASE * KOUT
+      
+      [structural_model]
+        ode(states=[CENT, PD])
+      
+      [odes]
+        init(PD) = BASE
+        CP = CENT/VC
+        d/dt(CENT) = -KEL * CENT
+        d/dt(PD) = KIN * (1 + CP) - KOUT * PD
+      
+      [error_model]
+        CMT=1: DV ~ proportional(EPS1)
+        CMT=2: DV ~ additive(EPS2)
+      
+      [scaling]
+        y[CMT=1] = CENT/VC
+        y[CMT=2] = PD
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+

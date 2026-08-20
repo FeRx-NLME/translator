@@ -1,0 +1,63 @@
+$PROBLEM Quasi-steady-state TMDD, 2-cmt, drug + total target
+$INPUT ID TIME AMT RATE EVID MDV CMT FLAG DV
+$DATA data.csv IGNORE=@
+$SUBROUTINES ADVAN13 TOL=9
+$MODEL
+  COMP=(CENT, DEFDOSE, DEFOBS)
+  COMP=(TISS)
+  COMP=(RTOT)
+$PK
+  KEL   = THETA(1)*EXP(ETA(1))
+  VC    = THETA(2)*EXP(ETA(2))
+  KTP   = THETA(3)
+  KPT   = THETA(4)
+  KSS   = THETA(5)
+  KINT  = THETA(6)
+  KDEG  = THETA(7)
+  RBASE = THETA(8)*EXP(ETA(3))
+  KSYN  = RBASE*KDEG
+  A_0(3) = RBASE
+  S1    = VC
+$DES
+  CT  = A(1)/VC
+  RT  = A(3)
+  BB  = CT - RT - KSS
+  DSC = BB*BB + 4.0*KSS*CT
+  IF (DSC.LT.0.0) DSC = 0.0
+  DD  = SQRT(DSC)
+  IF (BB.GE.0.0) THEN
+    CF = 0.5*(BB + DD)
+  ELSE
+    CF = 2.0*KSS*CT/(DD - BB + 1.0E-30)
+  ENDIF
+  FB  = CF/(KSS + CF)
+  DADT(1) = -(KEL+KPT)*CF*VC - RT*KINT*FB*VC + KTP*A(2)
+  DADT(2) = -KTP*A(2) + KPT*CF*VC
+  DADT(3) =  KSYN - KDEG*RT - (KINT-KDEG)*RT*FB
+$ERROR
+  CTOT = A(1)/VC
+  RTOT = A(3)
+  IPRED = CTOT
+  IF (FLAG.EQ.2) IPRED = RTOT
+  W1 = 0
+  W2 = 0
+  IF (FLAG.EQ.1) W1 = 1
+  IF (FLAG.EQ.2) W2 = 1
+  Y = IPRED*(1 + W1*EPS(1) + W2*EPS(2))
+$THETA
+  (0.001, 0.05, 1.0)   ; 1 KEL
+  (0.5, 3.0, 50.0)     ; 2 VC
+  (0.05, 0.8, 15.0)    ; 3 KTP
+  (0.02, 0.4, 8.0)     ; 4 KPT
+  (0.3, 6.0, 100.0)    ; 5 KSS
+  (0.01, 0.3, 5.0)     ; 6 KINT
+  (0.001, 0.03, 0.5)   ; 7 KDEG
+  (1.0, 20.0, 400.0)   ; 8 RBASE
+$OMEGA
+  0.09
+  0.04
+  0.09
+$SIGMA
+  0.0225
+  0.04
+$ESTIMATION METHOD=1 INTER MAXEVAL=9999 PRINT=5 NOABORT

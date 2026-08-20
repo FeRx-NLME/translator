@@ -195,3 +195,54 @@ test_that("an uncommented error_suggestion line is rejected", {
                                           "  DV ~ additive(EPS1)"))
   expect_error(validate_ferx_ir(bad), "only comment lines")
 })
+
+test_that("a readout and obs_scale cannot both be carried", {
+  # Measured on ferx 0.3.0: the file validates clean and every prediction moves
+  # by up to 11.37 units, because ferx applies obs_scale on TOP of the readout
+  # expression rather than instead of it. No diagnostic from the engine, which
+  # is why the guard belongs here. This is defect 15.
+  ode <- function(scaling) new_ferx_ir(
+    structural = list(type = "ode", states = "CENT", obs_cmt = "CENT"),
+    odes = list(list(kind = "ddt", state = "CENT", rhs = "-CENT")),
+    scaling = scaling)
+  expect_error(validate_ferx_ir(ode(list(y = "CENT", obs_scale = "V"))), "double-scal")
+  expect_error(validate_ferx_ir(ode(list(per_cmt = list(list(cmt = 1L, expr = "CENT")),
+                                        obs_scale = "V"))), "double-scal")
+  expect_error(validate_ferx_ir(
+    ode(list(y = "CENT", per_cmt = list(list(cmt = 1L, expr = "CENT"))))),
+    "both a plain `y` and a per-CMT")
+  expect_silent(validate_ferx_ir(ode(list(y = "CENT"))))
+  expect_silent(validate_ferx_ir(ode(list(obs_scale = "V"))))
+})
+
+test_that("obs_cmt is required for an ODE model only when no readout replaces it", {
+  no_obs <- function(scaling) new_ferx_ir(
+    structural = list(type = "ode", states = "CENT"),
+    odes = list(list(kind = "ddt", state = "CENT", rhs = "-CENT")),
+    scaling = scaling)
+  expect_error(validate_ferx_ir(no_obs(list())), "obs_cmt must be a character scalar")
+  expect_silent(validate_ferx_ir(no_obs(list(y = "CENT"))))
+  expect_silent(validate_ferx_ir(no_obs(list(per_cmt = list(list(cmt = 1L, expr = "CENT"))))))
+})
+
+test_that("an error_model must be one form, and a selected chain must end in an else", {
+  em <- function(...) validate_ferx_ir(new_ferx_ir(error_model = list(...)))
+  expect_error(em(list(dv = "DV", type = "additive", params = "E1", cmt = 1L),
+                  list(dv = "DV", type = "additive", params = "E2", cond = "F == 2")),
+               "mixes per-CMT and covariate-selected")
+  expect_error(em(list(dv = "DV", type = "additive", params = "E1", cmt = 1L),
+                  list(dv = "DV", type = "additive", params = "E2")),
+               "mixes per-CMT entries with unkeyed")
+  # ferx requires the terminating bare `else` "so every observation maps to an
+  # error model". The emitter derives it from a NULL cond, so a chain without one
+  # would emit `else if (...) { ... }` and stop -- rejected by the engine.
+  expect_error(em(list(dv = "DV", type = "additive", params = "E1", cond = "F == 1"),
+                  list(dv = "DV", type = "additive", params = "E2", cond = "F == 2")),
+               "must end with an unconditional entry")
+  expect_error(em(list(dv = "DV", type = "additive", params = "E1"),
+                  list(dv = "DV", type = "additive", params = "E2", cond = "F == 2")),
+               "only the LAST covariate-selected")
+  expect_silent(validate_ferx_ir(
+    em(list(dv = "DV", type = "additive", params = "E1", cond = "F == 1"),
+       list(dv = "DV", type = "additive", params = "E2"))))
+})

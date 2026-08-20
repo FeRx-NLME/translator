@@ -168,6 +168,41 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
   expect_length(result$unsupported, 0L)
 })
 
+test_that("TMDD with a FLAG dispatch: Form C readout + selected error model", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("qss_tmdd.mod")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  # The three halves of defect 5, asserted rather than left to the snapshot: a
+  # snapshot records whatever is emitted, including a silently dropped dispatch.
+  expect_match(result$ferx_text, "y = if (FLAG == 2) c_RTOT else CENT/VC",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "if (FLAG == 2) { DV ~ proportional(EPS2) }",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "else { DV ~ proportional(EPS1) }", fixed = TRUE)
+  # Defects 12 and 15: both inferences the readout replaces are gone. obs_scale
+  # would double-scale every prediction, obs_cmt is ignored.
+  expect_no_match(result$ferx_text, "obs_scale", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
+  # Defect 6: the indicators are consumed, not left dead in the parameter block.
+  expect_no_match(result$ferx_text, "W1", fixed = TRUE)
+})
+
+test_that("PKPD with a CMT dispatch: per-CMT readout + per-CMT error model", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("pkpd_cmt.mod")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  # ferx does not expose CMT as a covariate, so this source cannot use Form C --
+  # measured, `Model references covariate(s) not found in data: CMT`.
+  expect_match(result$ferx_text, "y[CMT=1] = CENT/VC", fixed = TRUE)
+  expect_match(result$ferx_text, "y[CMT=2] = PD", fixed = TRUE)
+  expect_match(result$ferx_text, "CMT=1: DV ~ proportional(EPS1)", fixed = TRUE)
+  # The two endpoints carry different error TYPES, which ferx allows per branch.
+  expect_match(result$ferx_text, "CMT=2: DV ~ additive(EPS2)", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
+})
+
 # -- corpus-wide sweep (engine-free, runs on every PR) ------------------------
 
 # Translates every bundled model once and asserts three things: that nothing

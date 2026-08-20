@@ -161,3 +161,45 @@ simulate_dataset(
   nm_template(50, dose = 4.0, cmt = 1L,
               obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24)),
   seed = 321L, out_path = "inst/testdata/ode_1cpt_oral_concordance.csv")
+
+# ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
+# Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column
+# (Form C readout plus a covariate-selected error model); `pkpd_cmt.mod`
+# switches on CMT (y[CMT=N] plus CMT=N: bodies), which is a separate path
+# because ferx does not expose CMT to the covariate scope.
+#
+# The template carries the observation compartment AND the flag, since the
+# dispatch is the thing under test: a dataset observing one endpoint only would
+# leave the other branch unevaluated and the test could not tell a working
+# dispatch from a dropped one.
+nm_template_2ep <- function(n_subj, dose, obs_times, cmt_a, cmt_b) {
+  rows <- list()
+  for (id in seq_len(n_subj)) {
+    rows[[length(rows) + 1L]] <- data.frame(
+      ID = id, TIME = 0, DV = 0, EVID = 1L, AMT = dose, CMT = 1L,
+      FLAG = 1L, MDV = 1L)
+    for (t in obs_times) {
+      rows[[length(rows) + 1L]] <- data.frame(
+        ID = id, TIME = t, DV = 0, EVID = 0L, AMT = ".", CMT = cmt_a,
+        FLAG = 1L, MDV = 0L)
+      rows[[length(rows) + 1L]] <- data.frame(
+        ID = id, TIME = t, DV = 0, EVID = 0L, AMT = ".", CMT = cmt_b,
+        FLAG = 2L, MDV = 0L)
+    }
+  }
+  do.call(rbind, rows)
+}
+
+simulate_dataset(
+  translate_tmp("qss_tmdd.mod"),
+  nm_template_2ep(12, dose = 100.0,
+                  obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 48),
+                  cmt_a = 1L, cmt_b = 3L),
+  seed = 606L, out_path = "inst/testdata/qss_tmdd_dispatch.csv")
+
+simulate_dataset(
+  translate_tmp("pkpd_cmt.mod"),
+  nm_template_2ep(12, dose = 100.0,
+                  obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 48),
+                  cmt_a = 1L, cmt_b = 2L),
+  seed = 607L, out_path = "inst/testdata/pkpd_cmt_dispatch.csv")

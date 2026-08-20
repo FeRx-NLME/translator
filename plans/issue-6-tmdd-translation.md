@@ -1311,6 +1311,114 @@ emitted `.ferx` with its em-dash mangled to the literal seven characters
 `U+2014` inside a `# WARNING:` comment. Cosmetic, unrelated to this issue, and a
 separate fix.
 
+#### Phase 6b measurement pass (done before implementation)
+
+Taken against ferx 0.3.0 on 2026-08-20, after 6a landed. Five findings, two of
+which changed the design.
+
+**`CMT` is not a covariate, so Form C cannot dispatch on it.** `y = if (CMT == 3)
+... else ...` validates and then fails at fit:
+
+```
+Model references covariate(s) not found in data (case-sensitive): CMT.
+Available covariate columns: FLAG.
+```
+
+The engine consumes `CMT` structurally and never exposes it to the covariate
+scope. So the two dispatch forms are not interchangeable and the decision rule in
+6b is forced, not stylistic: a source that switches on `CMT` MUST become
+`y[CMT=n]` plus `CMT=n:` bodies. The earlier measurement that the two forms agree
+numerically was taken on a dataset where `CMT` and `FLAG` were correlated and each
+form used its own column; it says nothing about reading `CMT` from the other form.
+
+**`CMT` survives `nonmem2rx` into `lstExpr`,** verbatim and upper-case, exactly as
+`FLAG` does (`if (CMT == 2) ipred <- resp`). So the per-CMT path is buildable from
+the same captured conditionals as Form C.
+
+**Incomplete per-CMT coverage fails loudly, in both blocks.** With `CMT=3` dropped
+from one block at a time, on data observing CMT 1 and 3:
+
+```
+[scaling]: per-CMT `y[CMT=N]` Form C is missing entries for observed CMTs [3].
+[error_model] has no entry for observed compartment(s) 3; add a `CMT=N: DV ~ ...` line.
+```
+
+This is the opposite of the `obs_scale`-stacking behaviour and it matters for the
+design: the translator does not have to prove the dispatch exhaustive, because
+the engine checks it against the observed data and names the missing compartment.
+An INFO recording the assumption is enough.
+
+**Branch bodies are unconstrained in type.** Different types in different
+branches (`additive` in one, `proportional` in the other) and `combined(a, b)`
+inside a branch are both accepted and fit. So a per-endpoint classification needs
+no cross-branch agreement.
+
+**A uniform `y = <expr>` alongside a covariate-selected `[error_model]` is
+accepted.** The readout and the error model dispatch independently; a source that
+switches only the error model does not need a branching readout.
+
+**`.covariate_names()` cannot answer the scope question.** It walks assignments
+and tildes only, so a conditional is invisible to it in both directions: on the
+reporter's model it misses `FLAG` (used only inside `if`s) and reports `CF` (a
+$DES variable assigned only inside an `if`) as a covariate. Using it for the 6e
+scope check would reject the one symbol the readout needs and admit the one class
+of symbol the readout must reject. The right test is positive and local: a
+symbol in `y` is legal iff it is an emitted state, an emitted individual
+parameter, a known function, or a name the model never assigns ANYWHERE
+(including inside a conditional arm) -- that last clause being the real
+definition of a covariate. It rejects `CT`/`RT`/`CF` exactly as the
+E_MISSING_COVARIATE measurement requires.
+
+#### Phase 6b design
+
+**Where it runs.** A new pass between 2b (the [odes] partition) and 3 (the
+individual-parameter/error split), so it can see what 2b already claimed and
+pass 3 can skip what it takes.
+
+**Step 1 -- find `Y`.** The first assignment whose LHS is auxiliary and whose RHS
+references a sigma. Identical to the rule pass 3 uses today, so a model with no
+conditionals in its chain reaches the existing code path unchanged.
+
+**Step 2 -- the readout chain.** Backward-reachable definitions from that RHS
+over `all_assigns` and `conditionals`, which is `.reachable_defs()` again.
+
+**Step 3 -- the cases.** Every conditional in the chain must be
+`<COV> == <literal>` on ONE common covariate, un-nested. That restriction is what
+makes the cases mutually exclusive by construction; without it, overlapping
+conditions (`FLAG >= 1` and `FLAG >= 2`) have a combination the enumeration never
+evaluates, and it would be silently wrong. Anything else is an ERROR, per risk 4.
+No conditions at all means single-endpoint: fall straight through to today's
+behaviour.
+
+**Step 4 -- evaluate each case.** Walk the chain in source order maintaining
+`name -> expression`; a conditional executes the arm its condition selects under
+the case. Then inline `Y` to a fixpoint. One case per distinct literal, plus the
+fall-through with every condition false.
+
+**Step 5 -- split into readout and error model.** The readout is `Y` with every
+epsilon substituted to `0` and then constant-folded (`0*x -> 0`, `1*x -> x`,
+`x+0 -> x`, ...). Folding is the piece 6a deliberately did without -- 6a could
+compare numerically because it only needed a yes/no, while 6b needs the
+prediction as an EXPRESSION to put in `y`. The error model per case comes from
+`.classify_error_assignment()` unchanged, after substituting `0` for every
+epsilon whose derivative is identically zero in that case -- an epsilon
+switched off by an indicator is not part of that endpoint's model, and left in
+place it would classify as neither 1 nor the prediction and abort the case.
+
+**Step 6 -- choose the form.** Dispatch column `CMT` -> `y[CMT=n]` + `CMT=n:`.
+Anything else -> Form C `y =` + covariate-selected `[error_model]`, whose
+required terminating `else` is the fall-through case when that classifies, and
+otherwise the last case folded in with an INFO recording the exhaustiveness
+assumption.
+
+**Step 7 -- scope check (6e).** Every free symbol of every readout expression
+must be a state, an individual parameter, a known function or an unassigned name.
+Otherwise ERROR and no `y`, which leaves the engine to reject the file on the
+missing block -- 6f's mechanism.
+
+**Step 8 -- `obs_scale` and `obs_cmt`.** Dropped whenever a `y` is emitted, per
+the 11.37-unit double-scale and the silently-ignored `obs_cmt` measured above.
+
 ---
 
 ### Phase 7 -- `inits = c("control", "final")`
