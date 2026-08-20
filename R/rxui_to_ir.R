@@ -2712,6 +2712,11 @@ bound_name <- function(entries, raw) {
       # Check if this is the error model assignment (RHS contains sigma vars).
       syms <- toupper(.collect_symbols(a$rhs_expr_norm))
       eps  <- intersect(syms, sigma_names)
+      # First sigma-referencing assignment wins, whether or not it could be
+      # classified. Without the `error_suggestion` half of this guard an
+      # undetermined first expression would leave `error_model` empty and let a
+      # LATER one be emitted instead -- so the file would carry an error model
+      # from one statement and a comment saying none was emitted from another.
       if (length(eps) > 0 && length(error_model) == 0 &&
           !length(error_suggestion)) {
         # The normalised form, same as the detection above. Handing the raw
@@ -3081,7 +3086,12 @@ bound_name <- function(entries, raw) {
 # in role order too -- inert today, but it is what the file MEANS, and it is what
 # keeps the file correct if ferx-core ever binds by name.
 .order_sigmas_for_error <- function(sigmas, error_model) {
-  if (length(sigmas) < 2L || length(error_model) == 0L) return(sigmas)
+  # Single-endpoint only, and deliberately so. Phase 6b introduces per-CMT and
+  # covariate-selected error models, which ferx resolves BY NAME
+  # (`position(|s| s == nm)`) -- reordering for those would be unnecessary and,
+  # since the entries disagree about roles, would silently follow whichever
+  # endpoint happened to be first.
+  if (length(sigmas) < 2L || length(error_model) != 1L) return(sigmas)
   want <- toupper(error_model[[1]]$params)
   if (length(want) == 0L) return(sigmas)
   have <- toupper(vapply(sigmas, function(s) s$name, ""))
@@ -3105,7 +3115,10 @@ bound_name <- function(entries, raw) {
     paste0("# No [error_model] is emitted, so ferx will reject this file until you",
            " supply one."),
     paste0("# A plausible reading, NOT a translation -- verify against the source",
-           " before use:"),
+           " before use."),
+    paste0("# Note ferx assigns the sigma roles by DECLARATION order in",
+           " [parameters], not by"),
+    paste0("# the names below, so check the order of the `sigma` lines too:"),
     paste0("# [error_model]"),
     paste0("#   DV ~ ", guess))
 }

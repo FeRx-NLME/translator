@@ -2788,4 +2788,18 @@ test_that("sigma declarations are reordered to the roles the error model needs",
   expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), list())),
                c("EPS1", "EPS2"))
   expect_length(.order_sigmas_for_error(list(), list()), 0L)
+
+  # A multi-entry error model is left alone. Unreachable from rxui_to_ir() today
+  # -- at most one entry is ever built -- so only a hand-built list can test it,
+  # and it goes untested otherwise: relaxing the guard to `length(...) == 0`
+  # leaves the whole suite green.
+  #
+  # It matters for phase 6b, which introduces per-CMT and covariate-selected
+  # error models. ferx resolves THOSE by name, so reordering is unnecessary, and
+  # the entries disagree about roles, so reordering would silently follow
+  # whichever endpoint happened to be first.
+  per_cmt <- list(list(dv = "DV", cmt = 1L, type = "proportional", params = "EPS2"),
+                  list(dv = "DV", cmt = 3L, type = "additive",     params = "EPS1"))
+  expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), per_cmt)),
+               c("EPS1", "EPS2"))
 })
