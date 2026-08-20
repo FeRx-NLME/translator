@@ -209,6 +209,21 @@ validate_ferx_ir <- function(ir) {
       )
   }
 
+  # Every error_suggestion line must be a comment. The suggestion is a plausible
+  # reading of an error expression we could NOT translate, printed where the
+  # block would have gone; one uncommented line makes the engine parse a guess as
+  # though it were the translation, which is the exact failure this field exists
+  # to avoid. Checked here rather than left to the emitter because the emitter
+  # joins the lines verbatim and cannot tell the difference.
+  if (length(ir$error_suggestion) > 0) {
+    bad <- ir$error_suggestion[!grepl("^\\s*#", ir$error_suggestion)]
+    if (length(bad) > 0)
+      cli::cli_abort(c(
+        "error_suggestion must contain only comment lines.",
+        x = "Not a comment: {.val {bad[1]}}"
+      ))
+  }
+
   invisible(ir)
 }
 

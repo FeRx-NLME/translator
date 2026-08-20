@@ -178,3 +178,20 @@ test_that("the legality check reads declarations, not expression text", {
   ir <- .pk_ir(indiv_params = list(list(lhs = "CL", rhs = "TVCL * WT.KG")))
   expect_silent(validate_ferx_ir(ir))
 })
+
+test_that("an uncommented error_suggestion line is rejected", {
+  # The suggestion is a reading of an expression we could NOT translate. One
+  # uncommented line and the engine parses the guess as the translation --
+  # the failure the field exists to prevent.
+  ok <- new_ferx_ir(error_suggestion = c("# could not translate",
+                                         "# [error_model]",
+                                         "#   DV ~ additive(EPS1)"))
+  expect_silent(validate_ferx_ir(ok))
+  # Leading whitespace before the # is still a comment.
+  expect_silent(validate_ferx_ir(new_ferx_ir(error_suggestion = "  # indented")))
+
+  bad <- new_ferx_ir(error_suggestion = c("# could not translate",
+                                          "[error_model]",
+                                          "  DV ~ additive(EPS1)"))
+  expect_error(validate_ferx_ir(bad), "only comment lines")
+})

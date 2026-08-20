@@ -1180,9 +1180,32 @@ would pass whether or not the bug were fixed. This is the discriminating-fixture
 rule biting at the level of the *plan* rather than the test: the fix as specified
 would have been inert, shipped green, and read as done.
 
+**The two multi-endpoint paths are immune, and the disagreement is measurable in
+both directions.** Same model, two sigmas 40x apart, `maxiter = 0`:
+
+| `[error_model]` form | swap the `sigma` DECLARATION order | swap the NAMES in `[error_model]` |
+|---|---|---|
+| single-endpoint `combined(a, b)` | **103.209 -> 36.181** | no change |
+| per-CMT `CMT=n: DV ~ ...` | no change (409.550) | **409.550 -> 3508.421** |
+| covariate-selected `if (COV...) {...}` | no change (409.549) | **409.549 -> 3508.395** |
+
+Exactly complementary: single-endpoint binds by position and ignores the names,
+the other two bind by name and ignore the position. The name-swap column is the
+control -- without it, "declaration order does not matter" would be equally
+consistent with the names being ignored too.
+
+Consequence for phase 6b: a model 6b converts to per-CMT or covariate-selected is
+immune to this by construction, and `.order_sigmas_for_error()` correctly turns
+itself off for them (it is guarded to a single-entry error model). 6b therefore
+neither needs nor fixes this. What stays exposed is every single-endpoint model,
+which is most of them -- 6a makes *our* emitted order right, but a hand-edited
+file, a hand-written model, or one from another tool has no such protection.
+
 Worth raising with ferx-core separately: accepting a sigma name, checking it
 exists, and then ignoring it is a silent-wrong-answer generator independent of
-anything this package does.
+anything this package does. The fix is on the engine side -- either bind by name
+on the single-endpoint path as the other two already do, or reject an argument
+list whose order does not match the declaration order.
 
 **Defects 10 and 11 are live on `main`, and 11 is the common case.** Measured by
 translating the reporter's model with only its `$ERROR` `Y=` line changed:
