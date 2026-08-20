@@ -392,3 +392,85 @@ test_that("a parameter named like a dose attribute is not applied to the dose", 
   expect_false(isTRUE(all.equal(fixed, broken, tolerance = 1e-6)))
   expect_equal(broken / fixed, rep(0.1, length(fixed)), tolerance = 1e-4)
 })
+
+# -- error-model sigma ORDER (issue #6 defect 10, restated) -------------------
+#
+# The issue calls this "the emitted combined() arguments are transposed". Measured
+# against ferx 0.3.0, that lever does not exist: `combined(EPS1, EPS2)` and
+# `combined(EPS2, EPS1)` fit to the same OFV to every digit. ferx consumes a
+# single-endpoint error model's sigmas POSITIONALLY from the declaration order and
+# discards the names (`build_error_spec`, ferx-core model_parser.rs:11328).
+#
+# The transposition the issue describes is real. What causes it is the order of
+# the `sigma` lines in [parameters], so that is what this guards. A test written
+# against the combined() arguments would pass whether or not the bug is fixed --
+# it was, until this was measured.
+test_that("sigma declaration order follows the error roles, and is load-bearing", {
+  ctl <- c(
+    "$PROBLEM combined error, additive term written first",
+    "$INPUT ID TIME AMT EVID MDV CMT DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL COMP=(CENT, DEFDOSE, DEFOBS)",
+    "$PK",
+    "  KE = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  S1 = V",
+    "$DES",
+    "  DADT(1) = -KE*A(1)",
+    "$ERROR",
+    "  IPRED = A(1)/V",
+    "  Y = IPRED + EPS(1) + IPRED*EPS(2)",
+    "$THETA (0.001, 0.1, 1.0)",
+    "$THETA (1.0, 10.0, 100.0)",
+    "$OMEGA 0.09",
+    "$SIGMA 4.0",      # EPS(1): additive,     SD 2.0
+    "$SIGMA 0.0025",   # EPS(2): proportional, SD 0.05
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999")
+  d <- tmp_ctl_dir()
+  writeLines(ctl, file.path(d, "m.ctl"))
+  emitted <- suppressWarnings(nm_to_ferx(file.path(d, "m.ctl"),
+                                         validate = FALSE))$ferx_text
+
+  # EPS(2) is the proportional term, so it must be DECLARED first -- the source
+  # declares it second. The 40x gap between the two SDs means a transposition
+  # cannot hide in rounding.
+  decl <- grep("^\\s*sigma ", strsplit(emitted, "\n")[[1]], value = TRUE)
+  expect_equal(trimws(decl), c("sigma EPS2 ~ 0.05 (sd)", "sigma EPS1 ~ 2.0 (sd)"))
+  # The arguments are in role order too. Inert today, but it is what the file
+  # means, and it is what keeps the file right if ferx-core ever binds by name.
+  expect_match(emitted, "DV ~ combined(EPS2, EPS1)", fixed = TRUE)
+
+  rows <- do.call(rbind, lapply(1:6, function(i) rbind(
+    data.frame(ID = i, TIME = 0, AMT = 100, EVID = 1L, MDV = 1L, CMT = 1L, DV = 0),
+    data.frame(ID = i, TIME = c(0.5, 2, 8, 24), AMT = 0, EVID = 0L, MDV = 0L,
+               CMT = 1L, DV = c(9.5, 8.2, 4.5, 0.9)))))
+  data_file <- file.path(d, "d.csv")
+  write.csv(rows, data_file, row.names = FALSE, quote = FALSE)
+
+  # maxiter = 0 holds the thetas at their initials, so the OFV is a deterministic
+  # function of the model text alone.
+  ofv_of <- function(txt) {
+    txt <- sub("maxiter = 500", "maxiter = 0", txt, fixed = TRUE)
+    txt <- sub("covariance = true", "covariance = false", txt, fixed = TRUE)
+    f <- tempfile(tmpdir = d, fileext = ".ferx")
+    writeLines(txt, f)
+    invisible(utils::capture.output(fit <- suppressMessages(
+      ferx_fit(f, data = data_file))))
+    fit$ofv
+  }
+  correct <- ofv_of(emitted)
+  swapped <- ofv_of(sub("sigma EPS2 ~ 0.05 (sd)\n  sigma EPS1 ~ 2.0 (sd)",
+                        "sigma EPS1 ~ 2.0 (sd)\n  sigma EPS2 ~ 0.05 (sd)",
+                        emitted, fixed = TRUE))
+  # The discriminating half. If this ever stops holding, the declaration order has
+  # stopped mattering and the assertion above has become decorative.
+  expect_false(isTRUE(all.equal(correct, swapped, tolerance = 1e-6)))
+
+  # And the transposed ARGUMENT order really is inert -- the fact that makes the
+  # declaration order the only lever. Stated as a test so it cannot quietly
+  # change under us.
+  arg_swapped <- ofv_of(sub("combined(EPS2, EPS1)", "combined(EPS1, EPS2)",
+                            emitted, fixed = TRUE))
+  expect_equal(arg_swapped, correct, tolerance = 1e-9)
+})

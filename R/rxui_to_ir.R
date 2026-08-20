@@ -1071,12 +1071,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     thetas        = theta_out$thetas,
     omegas        = omega_out$omegas,
     kappas        = kappa_out$kappas,
-    sigmas        = sigma_out$sigmas,
+    sigmas        = .order_sigmas_for_error(sigma_out$sigmas,
+                                            expr_out$error_model),
     indiv_params  = expr_out$indiv_params,
     structural    = structural,
     odes          = expr_out$odes,
     initial_conditions = init_conds,
     error_model   = expr_out$error_model,
+    error_suggestion = expr_out$error_suggestion,
     scaling       = scaling,
     fit_options   = fit_opts,
     warnings      = warn,
@@ -2294,6 +2296,7 @@ bound_name <- function(entries, raw) {
   all_assigns  <- list()   # list(lhs_norm, rhs_norm, rhs_expr)
   odes         <- list()
   error_model  <- list()
+  error_suggestion <- character()
   structural   <- list()
   warnings     <- character()
   unsupported  <- character()
@@ -2410,9 +2413,12 @@ bound_name <- function(entries, raw) {
 
     if (.is_lincmt_tilde(expr)) {
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
-      error_model <- c(error_model,
-                       list(list(dv = "DV", type = err_out$type,
-                                 params = err_out$params)))
+      if (is.na(err_out$type))
+        error_suggestion <- .error_model_suggestion(deparse1(expr[[3]]), err_out$eps)
+      else
+        error_model <- c(error_model,
+                         list(list(dv = "DV", type = err_out$type,
+                                   params = err_out$params)))
       warnings    <- c(warnings, err_out$warnings)
       if (!identical(structural$type, "ode"))
         structural <- list(type = "lincmt")
@@ -2421,9 +2427,12 @@ bound_name <- function(entries, raw) {
 
     if (.is_tilde(expr)) {
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
-      error_model <- c(error_model,
-                       list(list(dv = "DV", type = err_out$type,
-                                 params = err_out$params)))
+      if (is.na(err_out$type))
+        error_suggestion <- .error_model_suggestion(deparse1(expr[[3]]), err_out$eps)
+      else
+        error_model <- c(error_model,
+                         list(list(dv = "DV", type = err_out$type,
+                                   params = err_out$params)))
       warnings    <- c(warnings, err_out$warnings)
       next
     }
@@ -2703,13 +2712,20 @@ bound_name <- function(entries, raw) {
       # Check if this is the error model assignment (RHS contains sigma vars).
       syms <- toupper(.collect_symbols(a$rhs_expr_norm))
       eps  <- intersect(syms, sigma_names)
-      if (length(eps) > 0 && length(error_model) == 0) {
+      if (length(eps) > 0 && length(error_model) == 0 &&
+          !length(error_suggestion)) {
         # The normalised form, same as the detection above. Handing the raw
         # expression here made detection succeed and classification find no
         # sigma, emitting `DV ~ proportional()`.
         err  <- .classify_error_assignment(a$rhs_expr_norm, sigma_names)
-        error_model <- c(error_model,
-                         list(list(dv = "DV", type = err$type, params = err$params)))
+        warnings <- c(warnings, err$warnings)
+        if (is.na(err$type)) {
+          error_suggestion <- .error_model_suggestion(
+            tryCatch(deparse1(a$rhs_expr_norm), error = function(e) "?"), err$eps)
+        } else {
+          error_model <- c(error_model,
+                           list(list(dv = "DV", type = err$type, params = err$params)))
+        }
         # Remembered for the scaffolding rule below: a parameter whose ONLY
         # consumer is this expression is $ERROR bookkeeping, not a parameter.
         error_refs <- c(error_refs, toupper(.collect_symbols(a$rhs_expr_norm)))
@@ -2773,6 +2789,7 @@ bound_name <- function(entries, raw) {
     conditionals = conditionals,
     init_conds   = init_conds,
     error_model  = error_model,
+    error_suggestion = error_suggestion,
     structural   = structural,
     warnings     = warnings,
     unsupported  = unsupported
@@ -2898,22 +2915,199 @@ bound_name <- function(entries, raw) {
   which(taken)
 }
 
-# Classify an error expression (assignment RHS) into proportional / additive / combined.
-# sigma_names: character vector of normalised sigma variable names (e.g. "EPS1").
+# Classify an error expression (assignment RHS) into proportional / additive /
+# combined, by STRUCTURE rather than by counting epsilons (issue #6 defects
+# 10, 11).
+#
+# The previous rule was "two or more epsilons -> combined, in traversal order;
+# one epsilon -> additive if the top-level call is `+`, else proportional".
+# Both halves are wrong, and both fail silently:
+#
+#   Y = F + EPS(1) + F*EPS(2)   emitted combined(EPS1, EPS2)
+#   Y = F + F*EPS(1)            emitted additive(EPS1)
+#
+# ferx reads `combined(a, b)` as (proportional, additive) --
+# `ferx-core/src/types.rs:1702` -- so the first transposes the two sigmas: the
+# additive SD is applied proportionally and vice versa, and the fit converges on
+# the wrong answer. The second is `Y = F + F*EPS(1)`, which is arguably the most
+# common way to write proportional error in NONMEM at all.
+#
+# The structural rule: these expressions are linear in the epsilons, so
+# `Y = pred + sum_i c_i * eps_i` and the coefficient `c_i = dY/deps_i` decides.
+# `D()` extracts it exactly and needs no term-rewriting of our own:
+#
+#   F * (1 + EPS1)                 dY/dEPS1 = F            -> proportional
+#   F + F*EPS1                     dY/dEPS1 = F            -> proportional
+#   F + EPS1                       dY/dEPS1 = 1            -> additive
+#   F + EPS1 + F*EPS2              1 and F                 -> combined(EPS2, EPS1)
+#   IPRED*(1 + W1*EPS1 + W2*EPS2)  IPRED*W1 and IPRED*W2   -> undetermined
+#   F*exp(EPS1)                    F*exp(EPS1)             -> undetermined
+#
+# The last two are the point of the design. An indicator-weighted coefficient is
+# a multi-endpoint model, and an epsilon surviving into its own coefficient is
+# non-linear; neither is expressible as a single ferx error model, and both are
+# reported rather than guessed at. Deciding "proportional" merely because the
+# coefficient is not a literal would classify `Y = F + EPS(1)*THETA(4)` -- an
+# additive error with a scaled SD -- as proportional, so the coefficient must
+# consist of the PREDICTION specifically, not merely of non-literals.
+#
+# Whether a coefficient IS the prediction is decided by numeric identity, not by
+# a whitelist of symbols. The first attempt whitelisted `aux_vars` less the
+# sigmas -- "names that transitively reference a state" -- and it rejects
+# `Y = CENT/VC * (1 + EPS1)`, because `VC` is an ordinary individual parameter
+# that references no state. Widening the whitelist to individual parameters does
+# not help either: `W1` is one too, and that is precisely the case that must be
+# rejected. No set of names separates them, because the distinction is not about
+# which names appear but about whether the coefficient equals the prediction.
+#
+# So compare the two directly. `pred` is the expression with every epsilon set to
+# zero, and the test is `c_i == pred` (proportional) or `c_i == 1` (additive),
+# evaluated at several random points. That is what the whitelist was standing in
+# for -- a simplifier, so that `IPRED*(1+0)` reduces to `IPRED` -- and three
+# independent draws make an accidental agreement not worth engineering against.
+#
+# Returns type = NA_character_ when no single ferx error model expresses the
+# source; the caller then emits no [error_model] and the engine rejects the file,
+# which is a louder and more honest failure than a wrong model that fits.
 .classify_error_assignment <- function(rhs_expr, sigma_names) {
   syms <- toupper(.collect_symbols(rhs_expr))
   eps  <- intersect(syms, sigma_names)
+  src  <- tryCatch(deparse1(rhs_expr), error = function(e) "<unparseable>")
+
+  undetermined <- function(why)
+    list(type = NA_character_, params = character(),
+         warnings = paste0("ERROR | could not determine the error model from `Y = ",
+                           src, "`: ", why,
+                           ". No [error_model] is emitted -- a guessed error ",
+                           "model converges silently on the wrong answer."),
+         eps = eps)
 
   if (length(eps) == 0)
-    return(list(type = "proportional", params = character()))
+    return(undetermined("it references no sigma"))
 
-  if (length(eps) >= 2)
-    return(list(type = "combined", params = eps))
+  # Probe points for the identity test. Kept away from 0 and 1 so a coefficient
+  # of `1` cannot be confused with a symbol that happens to equal 1, and positive
+  # so a `sqrt`/`log` in the readout stays in domain.
+  # Bind the symbols VERBATIM. Uppercasing them here bound `CENTRAL` while the
+  # expression reads `central`, so every probe evaluated to NA and every model
+  # came out undetermined -- including the ones the whole suite covers.
+  free <- setdiff(all.vars(rhs_expr), eps)
+  probes <- lapply(list(c(1.7, 0.37), c(2.3, 0.53), c(0.61, 0.29)), function(ab)
+    if (!length(free)) list()
+    else stats::setNames(as.list(seq(ab[1], by = ab[2], length.out = length(free))),
+                         free))
+  zero_eps <- stats::setNames(as.list(rep(0, length(eps))), eps)
 
-  # Single epsilon: multiplicative = proportional, additive = additive.
-  fn <- tryCatch(as.character(rhs_expr[[1]]), error = function(e) "")
-  type <- if (fn == "+") "additive" else "proportional"
-  list(type = type, params = eps)
+  at <- function(expr, env) tryCatch(
+    eval(expr, envir = c(env, zero_eps), enclos = baseenv()),
+    error = function(e) NA_real_)
+  same <- function(expr, target) all(vapply(probes, function(pr) {
+    a <- at(expr, pr)
+    b <- if (is.numeric(target)) target else at(target, pr)
+    length(a) == 1L && length(b) == 1L && is.finite(a) && is.finite(b) &&
+      isTRUE(all.equal(a, b, tolerance = 1e-9))
+  }, logical(1)))
+
+  # `pred` is the expression with the epsilons zeroed; `at()` applies `zero_eps`
+  # to everything it evaluates, so `rhs_expr` itself IS `pred` under evaluation.
+  pred <- rhs_expr
+  if (!same(pred, pred))
+    return(undetermined("it could not be evaluated numerically"))
+
+  kind <- character(length(eps))
+  for (i in seq_along(eps)) {
+    coef <- tryCatch(stats::D(rhs_expr, eps[i]), error = function(e) NULL)
+    if (is.null(coef))
+      return(undetermined(paste0("`", eps[i], "` appears in a form that cannot be ",
+                                 "differentiated")))
+    if (any(toupper(all.vars(coef)) %in% sigma_names))
+      return(undetermined(paste0("it is not linear in `", eps[i],
+                                 "` (the coefficient still contains a sigma)")))
+    kind[i] <- if (same(coef, 1)) "additive"
+               else if (same(coef, pred)) "proportional"
+               else return(undetermined(paste0(
+                 "`", eps[i], "` is weighted by `", deparse1(coef),
+                 "`, which is neither 1 nor the prediction `", deparse1(pred),
+                 "` -- an indicator-weighted, multi-endpoint or scaled-sigma ",
+                 "error model")))
+  }
+
+  n_add  <- sum(kind == "additive")
+  n_prop <- sum(kind == "proportional")
+
+  if (length(eps) == 1L)
+    return(list(type = kind[1], params = eps, warnings = character(), eps = eps))
+
+  # ferx's only two-sigma model is `combined(proportional, additive)`. Emit in
+  # that order regardless of the order the source wrote them in -- getting this
+  # from traversal order is defect 10.
+  if (length(eps) == 2L && n_add == 1L && n_prop == 1L)
+    return(list(type = "combined",
+                params = c(eps[kind == "proportional"], eps[kind == "additive"]),
+                warnings = character(), eps = eps))
+
+  undetermined(paste0(length(eps), " sigmas classified as ", n_prop,
+                      " proportional and ", n_add,
+                      " additive; ferx expresses only combined(proportional, additive)"))
+}
+
+# Reorder the sigma declarations so the [error_model] consumes the right ones.
+#
+# ferx binds a single-endpoint error model's sigmas POSITIONALLY, from the global
+# declaration order -- the names written in `DV ~ combined(A, B)` are checked for
+# existence and then discarded. `build_error_spec` in
+# `ferx-core/src/parser/model_parser.rs:11328` says so outright ("Single-endpoint
+# sigmas are consumed positionally from the global sigma vector") and returns
+# `ErrorSpec::Single(model)`, keeping no name at all. Per-CMT error models are the
+# opposite -- they resolve each name with `position(|s| s == nm)` -- so the two
+# paths disagree, and only the single-endpoint one is silent about it.
+#
+# Measured on ferx 0.3.0, holding thetas at their initials. Declaring
+# `EPS1 ~ 2.0` before `EPS2 ~ 0.05`:
+#
+#   DV ~ proportional(EPS2)   OFV = 103.217   <- uses EPS1's 2.0
+#   DV ~ proportional(EPS1)   OFV = 103.217
+#   EPS2 declared alone       OFV = -41.979   <- what EPS2 actually means
+#
+# So the argument names cannot fix a mis-ordered declaration list, and issue #6's
+# defect 10 -- "the emitted combined() arguments are transposed" -- names a lever
+# that does not exist: `combined(EPS1, EPS2)` and `combined(EPS2, EPS1)` are the
+# same model to every digit. The transposition it describes is real; the thing
+# that causes it is the order of the `sigma` lines.
+#
+# So: the sigmas the error model uses come first, in role order (ferx reads
+# `combined` as proportional-then-additive), and any sigma the error model does
+# not reference keeps its relative position behind them. Names are still emitted
+# in role order too -- inert today, but it is what the file MEANS, and it is what
+# keeps the file correct if ferx-core ever binds by name.
+.order_sigmas_for_error <- function(sigmas, error_model) {
+  if (length(sigmas) < 2L || length(error_model) == 0L) return(sigmas)
+  want <- toupper(error_model[[1]]$params)
+  if (length(want) == 0L) return(sigmas)
+  have <- toupper(vapply(sigmas, function(s) s$name, ""))
+  idx  <- match(want, have)
+  idx  <- idx[!is.na(idx)]
+  if (!length(idx)) return(sigmas)
+  c(sigmas[idx], sigmas[-idx])
+}
+
+# A commented-out `[error_model]` block, rendered where the real one would have
+# gone. The block is inert -- the engine rejects a file with no [error_model], so
+# nothing is silently accepted -- but the user is not left to write it from
+# scratch either: uncommenting is one edit, and the source expression is right
+# there to check it against.
+.error_model_suggestion <- function(src, eps) {
+  guess <- if (length(eps) >= 2L) paste0("combined(", paste(eps[1:2], collapse = ", "), ")")
+           else if (length(eps) == 1L) paste0("proportional(", eps, ")")
+           else "proportional(SIGMA)"
+  c(paste0("# ferxtranslate could not translate this $ERROR expression:"),
+    paste0("#   Y = ", src),
+    paste0("# No [error_model] is emitted, so ferx will reject this file until you",
+           " supply one."),
+    paste0("# A plausible reading, NOT a translation -- verify against the source",
+           " before use:"),
+    paste0("# [error_model]"),
+    paste0("#   DV ~ ", guess))
 }
 
 .parse_error_rhs <- function(rhs, name_map) {
@@ -2944,10 +3138,25 @@ bound_name <- function(entries, raw) {
     }
   }
 
-  warn <- c(warn, "WARN  | complex $ERROR -- classified as proportional, verify")
+  # Issue #6 defect 6f. This used to guess `proportional` behind a WARN, which is
+  # the failure mode the whole issue is about: a guess that looks like a
+  # translation. It is now reported and NOT emitted -- see
+  # `.classify_error_assignment()` for why a missing block is the right lever.
+  #
+  # Note the plan's stated mechanism (an `unsupported` entry, "which phase 1 then
+  # blocks on") does not work: `strict` aborts on `.report_validation()`, which is
+  # driven purely by engine rejections, and `translate.R` deliberately keeps
+  # `unsupported` -- the ferx-core feature-gap signal -- separate from our own
+  # bugs. Emitting no [error_model] gets the block from the engine instead
+  # (E_MISSING_BLOCK), which is where phase 1 put it.
   params <- tryCatch(.norm(.strip_prefix(as.character(rhs[[2]]))),
                      error = function(e) character())
-  list(type = "proportional", params = params, warnings = warn)
+  warn <- c(warn, paste0(
+    "ERROR | could not determine the error model from `", deparse1(rhs),
+    "`. No [error_model] is emitted -- a guessed error model converges silently ",
+    "on the wrong answer."))
+  list(type = NA_character_, params = character(), warnings = warn,
+       eps = params)
 }
 
 # -- linCmt -> pk macro -------------------------------------------------------

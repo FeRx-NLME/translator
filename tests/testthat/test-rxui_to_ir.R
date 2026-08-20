@@ -2643,3 +2643,149 @@ test_that("a dose-attribute rename reaches inside a conditional", {
   expect_match(k$rhs, "F1_PAR", fixed = TRUE)
   expect_length(grep("shape of a ferx dose attribute", ir$warnings), 1L)
 })
+
+# -- Phase 6a: error model structure (issue #6 defects 10, 11, 6f) ------------
+
+# One two-sigma model, built so the SOURCE order of the two epsilons is the
+# opposite of ferx's argument order. That is the whole point: `combined(a, b)` is
+# (proportional, additive) in ferx-core, so emitting traversal order transposes
+# the two SDs and the fit converges on the wrong answer with no diagnostic.
+err_ui <- function(y_rhs) {
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.04), sigma_row("eps2", 0.09))
+  mock_ui(ini, list(quote(cl <- t.CL * exp(eta1)),
+                    ddt("central", quote(-cl * central)),
+                    as.call(list(as.name("<-"), as.name("y"), y_rhs))))
+}
+err_of <- function(y_rhs) {
+  ir <- suppressWarnings(rxui_to_ir(err_ui(y_rhs)))
+  if (!length(ir$error_model)) return(NA_character_)
+  paste0(ir$error_model[[1]]$type, "(",
+         paste(ir$error_model[[1]]$params, collapse = ", "), ")")
+}
+
+test_that("combined() emits ferx's (proportional, additive) order, not source order", {
+  # Defect 10. The additive term is written FIRST here, so traversal order gives
+  # combined(EPS1, EPS2) and the correct answer is combined(EPS2, EPS1). A source
+  # that happened to write the proportional term first could not tell the two
+  # apart -- the fixture only discriminates because the order is reversed.
+  expect_equal(err_of(quote(central + eps1 + central * eps2)),
+               "combined(EPS2, EPS1)")
+  # ... and the mirror image, so the rule is not "always swap".
+  expect_equal(err_of(quote(central * (1 + eps1) + eps2)),
+               "combined(EPS1, EPS2)")
+})
+
+test_that("Y = F + F*EPS is proportional, not additive", {
+  # Defect 11, and the common case: this is how NONMEM models usually spell
+  # proportional error. The old rule keyed on the top-level call being `+`.
+  expect_equal(err_of(quote(central + central * eps1)), "proportional(EPS1)")
+  # The two spellings of the same model must agree.
+  expect_equal(err_of(quote(central * (1 + eps1))), "proportional(EPS1)")
+  # ... while a genuinely additive error is still additive.
+  expect_equal(err_of(quote(central + eps1)), "additive(EPS1)")
+})
+
+test_that("a prediction that is an expression is still recognised as proportional", {
+  # `CENT/VC` is the prediction, but `VC` is an ordinary individual parameter
+  # that references no state. Any rule that decides "is this the prediction?"
+  # from a whitelist of names fails here while passing every test above it.
+  ini <- rbind(theta_row("t.VC", 3), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.04))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, list(
+    quote(vc <- t.VC * exp(eta1)),
+    ddt("central", quote(-central/vc)),
+    quote(y <- central/vc * (1 + eps1))))))
+  expect_length(ir$error_model, 1L)
+  expect_equal(ir$error_model[[1]]$type, "proportional")
+})
+
+test_that("an error expression ferx cannot express emits no [error_model]", {
+  # Each of these is a real model that the counting classifier turned into a
+  # confident, wrong answer. `NA` here means no [error_model] is emitted, which
+  # makes the engine reject the file rather than fit it.
+  expect_true(is.na(err_of(quote(central * (1 + w1 * eps1 + w2 * eps2)))))  # multi-endpoint
+  expect_true(is.na(err_of(quote(central * exp(eps1)))))                    # non-linear
+  expect_true(is.na(err_of(quote(central + 2 * eps1))))                     # scaled sigma
+  expect_true(is.na(err_of(quote(central + eps1 + eps2))))                  # two additive
+})
+
+test_that("an untranslatable error expression is reported and carries a suggestion", {
+  ir <- suppressWarnings(rxui_to_ir(err_ui(quote(central * (1 + w1 * eps1 + w2 * eps2)))))
+  expect_length(ir$error_model, 0L)
+  expect_match(ir$warnings, "^ERROR \\| could not determine the error model",
+               all = FALSE)
+  # The reason names the offending coefficient, not just "complex $ERROR".
+  expect_match(ir$warnings, "weighted by", all = FALSE)
+
+  txt <- emit_ferx(ir)
+  expect_no_match(txt, "\n\\[error_model\\]")
+  expect_match(txt, "# ferxtranslate could not translate this \\$ERROR expression")
+  expect_match(txt, "# A plausible reading, NOT a translation")
+  # Every suggestion line must be a comment. One uncommented line would make the
+  # engine parse a guess as though it were the translation.
+  sug <- grep("^#", strsplit(txt, "\n")[[1]], value = TRUE, invert = TRUE)
+  expect_length(grep("DV ~", sug), 0L)
+})
+
+test_that("a translatable error expression produces no suggestion", {
+  ir <- suppressWarnings(rxui_to_ir(err_ui(quote(central * (1 + eps1)))))
+  expect_length(ir$error_model, 1L)
+  expect_length(ir$error_suggestion, 0L)
+  expect_no_match(emit_ferx(ir), "could not translate")
+})
+
+test_that("an unrecognised tilde error form is reported, not guessed (defect 6f)", {
+  # Was `WARN | complex $ERROR -- classified as proportional, verify`, which is
+  # the failure mode this issue is about: a guess that reads as a translation.
+  # `lnorm()` is not one of the three forms .parse_error_rhs() understands.
+  map <- .norm_map_from_ini(sigma_row("err.x", 0.01))
+  out <- .parse_error_rhs(quote(lnorm(err.x)), map)
+  expect_true(is.na(out$type))
+  expect_length(out$params, 0L)
+  expect_match(out$warnings, "^ERROR \\| could not determine the error model",
+               all = FALSE)
+})
+
+test_that("an unrecognised tilde error form emits no [error_model] block", {
+  # The whole point of returning NA: the file must NOT carry a guessed model.
+  # Reached through the pipeline, since the abort lever is the engine rejecting
+  # a file with no [error_model].
+  ini <- rbind(theta_row("t.CL", 1), eta_row("eta1", 0.09, 1L),
+               sigma_row("err.x", 0.01))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(
+    ini, list(quote(cl <- t.CL * exp(eta1)),
+              as.call(list(as.name("~"), as.name("DV"),
+                           quote(lnorm(err.x))))))))
+  expect_length(ir$error_model, 0L)
+  txt <- emit_ferx(ir)
+  expect_no_match(txt, "\n\\[error_model\\]")
+  expect_match(txt, "# ferxtranslate could not translate")
+})
+
+test_that("sigma declarations are reordered to the roles the error model needs", {
+  sig <- function(...) lapply(c(...), function(n) list(name = n, value = 1, scale = "sd"))
+  nm  <- function(x) vapply(x, function(s) s$name, "")
+
+  # ferx binds single-endpoint sigmas positionally from the declaration order and
+  # discards the names, so the declaration list IS the role assignment.
+  em <- list(list(dv = "DV", type = "combined", params = c("EPS2", "EPS1")))
+  expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), em)),
+               c("EPS2", "EPS1"))
+
+  # A sigma the error model does not reference keeps its place behind the ones it
+  # does -- dropping it would change the model's parameter count.
+  em1 <- list(list(dv = "DV", type = "proportional", params = "EPS2"))
+  expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2", "EPS3"), em1)),
+               c("EPS2", "EPS1", "EPS3"))
+
+  # Already in role order: unchanged, so an ordinary model is byte-identical.
+  em2 <- list(list(dv = "DV", type = "combined", params = c("EPS1", "EPS2")))
+  expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), em2)),
+               c("EPS1", "EPS2"))
+
+  # Nothing to do, and nothing dropped, when there is no error model at all.
+  expect_equal(nm(.order_sigmas_for_error(sig("EPS1", "EPS2"), list())),
+               c("EPS1", "EPS2"))
+  expect_length(.order_sigmas_for_error(list(), list()), 0L)
+})
