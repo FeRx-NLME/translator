@@ -21,6 +21,14 @@
   not by version. No re-baseline of the concordance reference omegas or the
   bundled datasets was needed.
 
+  `engine-pin-drift.yml` now compares the pin against ferx-r's **main HEAD**
+  rather than its latest release, for the same reason. Left as it was it would
+  have filed "Engine pin behind ferx v0.3.0" every week from this commit onward
+  -- reporting BEHIND while the pin was AHEAD -- and a watchdog that cries wolf on
+  a schedule gets muted. Its stated fear of tracking main, that it "would fire on
+  every upstream commit", was unfounded: the job is weekly and dedups on title, so
+  at most one issue is ever open.
+
 * `ode(states=[...])` is now emitted in `$MODEL` COMP order rather than `$DES`
   statement order (issue #25). ferx numbers compartments by their POSITION in
   that list -- measured on 0.3.0, a dose row's `CMT` is applied as
