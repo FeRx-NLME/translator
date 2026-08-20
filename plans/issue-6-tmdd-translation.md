@@ -1544,6 +1544,35 @@ reads DEFOBS, which stopped being true when tier 2 landed; it is corrected in th
 same commit. The three-compartment probe above becomes a bundled model, since it
 is the only case in the corpus that can distinguish tier 3 from tier 5.
 
+#### Phase 6c review pass -- what the design above missed
+
+Found by reviewing the implemented diff, both measured rather than argued.
+
+**Tier 3 indexed a $MODEL ordinal into a d/dt-ordered list.** `n` in `S<n>` is a
+`$MODEL` COMP ordinal; `state_names` is `d/dt` order. The design above treats
+them as the same thing, and the DEFOBS tier -- which cross-checks its ordinal by
+name for exactly this reason -- is sitting ten lines above it. They can disagree:
+nonmem2rx keeps `$DES` statement order, so a block writing `DADT(2)` before
+`DADT(1)` yields `[CENTRAL, DEPOT]` while `S2` still means CENTRAL. Measured, the
+tier took DEPOT, announced it as the scaled compartment, and attached
+`obs_scale` to it -- a file that validates clean and predicts the depot amount
+over `V`. SILENT-WRONG, and introduced by the fix for a SILENT-WRONG defect.
+
+The cross-check needs the COMP list, which `.extract_nm_defobs()` had been
+throwing away whenever no compartment was marked DEFOBS -- precisely the case
+tier 3 exists for. It now returns the list with `index = NA` instead of NULL.
+That in turn required guarding the tier-1 contradiction warning against an NA
+name, or every model resolving at tier 1 with no DEFOBS would be accused of
+contradicting a DEFOBS it does not declare.
+
+**An unnamed `scaling_hint` aborted the translation.** `names()` on an unnamed
+list is NULL, so `as.integer()` returns `integer(0)` and `!is.na(integer(0))` is
+`logical(0)`, which aborts the `if` with "missing value where TRUE/FALSE
+needed". `rxui_to_ir()` is exported and `scaling_hint` is its argument, so this
+is caller-reachable. It is the same trap the `ui$central` check fifteen lines
+below already records in a comment -- the lesson was written down and not
+applied at the new site.
+
 ---
 
 ### Phase 7 -- `inits = c("control", "final")`

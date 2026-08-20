@@ -1537,11 +1537,24 @@ test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
   expect_equal(.extract_nm_defobs(mk("  COMP=(A)",
                                      "  COMP=(B, DEFOBSERVATION)"))$index, 2L)
   # DEFDOSE must not be mistaken for DEFOBS -- they share the DEF prefix.
-  expect_null(.extract_nm_defobs(mk("  COMP=(A, DEFDOSE)", "  COMP=(B)")))
+  # `index` NA rather than a NULL return: the COMP list is worth having on its
+  # own, since it is the only way to check a NONMEM compartment NUMBER against
+  # the d/dt order it indexes into. Callers already require a non-NA index.
+  no_defdose <- .extract_nm_defobs(mk("  COMP=(A, DEFDOSE)", "  COMP=(B)"))
+  expect_true(is.na(no_defdose$index))
+  expect_true(is.na(no_defdose$name))
+  expect_equal(no_defdose$comps, c("A", "B"))
   # A DEFOBS that only appears in a comment is not a declaration.
-  expect_null(.extract_nm_defobs(mk("  COMP=(A) ; DEFOBS goes here one day",
-                                    "  COMP=(B)")))
-  # No $MODEL at all.
+  commented <- .extract_nm_defobs(mk("  COMP=(A) ; DEFOBS goes here one day",
+                                     "  COMP=(B)"))
+  expect_true(is.na(commented$index))
+  expect_equal(commented$comps, c("A", "B"))
+  # A bare `COMP=NAME` occupies an ordinal, so it must appear in the list or
+  # every later ordinal is off by one.
+  bare <- .extract_nm_defobs(mk("  COMP=DEPOT", "  COMP=(CENTRAL, DEFOBS)"))
+  expect_equal(bare$index, 2L)
+  expect_equal(bare$comps, c("DEPOT", "CENTRAL"))
+  # No $MODEL at all -- still NULL, since there is no COMP list either.
   f <- file.path(tmp_ctl_dir(), "nomodel.ctl")
   writeLines(c("$PROBLEM x", "$PK"), f)
   expect_null(.extract_nm_defobs(f))

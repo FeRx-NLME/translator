@@ -531,6 +531,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       obs_cmt_num <- match(explicit, state_raw)
       # Say so when the source contradicts itself, rather than picking silently.
       if (!is.null(obs_hint) && is.character(obs_hint$name) &&
+          !is.na(obs_hint$name) &&
           !.same_cmt_name(explicit, obs_hint$name))
         warn <- c(warn, paste0(
           "WARN  | the observation expression reads compartment '", explicit,
@@ -584,10 +585,40 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     #    scaling_hint[[obs_idx]], and when this tier fires that key is the one
     #    that supplied the index.
     if (is.null(obs_cmt) && length(scaling_hint) == 1L) {
+      # length(), not just is.na(): names() on an unnamed list is NULL, so
+      # as.integer() returns integer(0) and `!is.na(integer(0))` is logical(0),
+      # which aborts the `if` with "missing value where TRUE/FALSE needed". Same
+      # trap as the ui$central length check below, on a list a caller supplies.
       s_idx <- suppressWarnings(as.integer(names(scaling_hint)[1L]))
       # More than one scaled compartment identifies none, so this tier is not
       # reached at all; a single one still has to be a compartment that exists.
-      if (!is.na(s_idx) && s_idx >= 1L && s_idx <= length(state_names)) {
+      ok <- length(s_idx) == 1L && !is.na(s_idx) &&
+            s_idx >= 1L && s_idx <= length(state_names)
+      # `n` in `S<n>` is a $MODEL COMP ordinal and state_names is d/dt order, so
+      # indexing one with the other needs the two to agree -- the same check the
+      # DEFOBS tier makes, and for the same reason. They CAN disagree: nonmem2rx
+      # keeps $DES statement order, so a block writing `DADT(2)` before
+      # `DADT(1)` yields states [CENTRAL, DEPOT] while `S2` still means CENTRAL.
+      # Measured, that took DEPOT, announced it as the scaled compartment, and
+      # attached obs_scale to it -- validating clean and predicting the depot
+      # amount over V.
+      comps <- if (!is.null(obs_hint)) obs_hint$comps else NULL
+      if (ok && (is.null(comps) || length(comps) < s_idx ||
+                 !.same_cmt_name(state_raw[s_idx], comps[s_idx]))) {
+        ok <- FALSE
+        # Only worth saying when there was something to check and it failed;
+        # a caller passing scaling_hint without obs_hint gets no COMP list and
+        # no accusation.
+        if (!is.null(comps) && length(comps) >= s_idx)
+          warn <- c(warn, paste0(
+            "WARN  | $PK sets S", s_idx, ", which is $MODEL compartment ",
+            s_idx, " ('", comps[s_idx], "'), but the ", s_idx,
+            "th differential equation is for '", state_raw[s_idx],
+            "'. The two orderings disagree, so the observed compartment was ",
+            "not taken from the scaling -- verify obs_cmt in ",
+            "[structural_model]."))
+      }
+      if (ok) {
         obs_cmt     <- state_names[[s_idx]]
         obs_cmt_num <- s_idx
         warn <- c(warn, paste0(
@@ -634,8 +665,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         # and still validates; it stops claiming the answer was inferred.
         warn <- c(warn, paste0(
           "ERROR | no compartment could be inferred for the observation: the ",
-          "$ERROR block names none, $MODEL declares no DEFOBS, and $PK scales ",
-          "no single compartment. Guessed '", obs_cmt, "' because it is ",
+          "$ERROR block names none, $MODEL declares no DEFOBS, and no single ",
+          "scaled compartment could be used. Guessed '", obs_cmt, "' because it is ",
           "declared last, which is position and not evidence -- set obs_cmt in ",
           "[structural_model] yourself."))
         unsp <- c(unsp, paste0(

@@ -70,7 +70,12 @@
   last, it took `PERIPH` and then dropped `[scaling]` as well, because the
   scaled compartment was not the one it had decided was observed. A source that
   scales several compartments identifies none, so the inference declines rather
-  than taking the lowest number, and `DEFOBS` still outranks it.
+  than taking the lowest number, and `DEFOBS` still outranks it. The `n` in
+  `S<n>` is a `$MODEL` COMP ordinal while the translated state list is in `d/dt`
+  order, and those can disagree -- nonmem2rx keeps `$DES` statement order, so a
+  block writing `DADT(2)` first yields `[CENTRAL, DEPOT]` while `S2` still means
+  CENTRAL. The two are cross-checked by name before the index is trusted, as the
+  `DEFOBS` inference already was, and a disagreement declines with a `WARN`.
 
 * A NONMEM `$ERROR` block that dispatches between two endpoints is now
   translated instead of being reduced to one of them (issue #6, defect 5). The
