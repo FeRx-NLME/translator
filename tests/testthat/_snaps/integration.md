@@ -383,7 +383,9 @@
         d/dt(DOSE) = -K12 * DOSE
         d/dt(CENTRAL) = K12 * DOSE - K20 * CENTRAL - K23 * CENTRAL + K32 * PERIPH
         d/dt(PERIPH) = K23 * CENTRAL - K32 * PERIPH
-        d/dt(EFFECT) = (1 - CENTRAL/V2 * EMAX/(CENTRAL/V2 + EC50)) * RIN - KOUT * EFFECT
+        C2 = CENTRAL/V2
+        EFF = 1 - C2 * EMAX/(C2 + EC50)
+        d/dt(EFFECT) = EFF * RIN - KOUT * EFFECT
       
       [error_model]
         DV ~ additive(EPS1)
