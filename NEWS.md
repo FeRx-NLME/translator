@@ -12,6 +12,12 @@
   dispatches between endpoints are affected; every other model's output is
   unchanged.
 
+* Warning text changed for untranslatable `$ERROR` expressions. The prediction
+  named in "neither 1 nor the prediction ..." is now the expression with its
+  epsilons zeroed, as the words say -- it previously printed the epsilon terms
+  back, so the message named a "prediction" containing a sigma. Code matching
+  on that message text needs updating; `result$warnings` structure is unchanged.
+
 * The `sigma` declarations in `[parameters]` are now emitted in the order the
   `[error_model]` consumes them, rather than in `$SIGMA` order. ferx binds a
   single-endpoint error model's sigmas POSITIONALLY from the declaration order
@@ -59,6 +65,18 @@
   on it. The conditions must be equality tests on ONE column; anything else is
   reported rather than guessed at, and the pre-existing single-endpoint path
   runs unchanged, so no existing model's output moves.
+
+* An endpoint a dispatch cannot express no longer sinks the whole translation.
+  The `[scaling]` readout is derived per endpoint and independently of the error
+  model, so it is emitted in full; the `[error_model]` becomes a commented block
+  in the same dispatch shape with the one branch that needs a human marked
+  `DV ~ ???` beside the source expression. ferx still rejects the file for the
+  missing block, so nothing is silently accepted, but the mechanical half of the
+  work is done. The report also names the endpoint and the epsilon actually at
+  fault: previously such a model fell back to the single-endpoint path, which
+  re-diagnosed the un-substituted `Y`, blamed whichever epsilon the indicators
+  touched first, and suggested a single-endpoint `combined()` model of the wrong
+  shape entirely.
 
 * NONMEM `$ERROR` expressions are classified by STRUCTURE rather than by counting
   epsilons (issue #6, defects 10 and 11). The coefficient of each epsilon decides

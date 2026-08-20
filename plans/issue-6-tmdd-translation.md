@@ -1434,6 +1434,36 @@ must be a state, an individual parameter, a known function or an unassigned name
 Otherwise ERROR and no `y`, which leaves the engine to reject the file on the
 missing block -- 6f's mechanism.
 
+**Reporting a gap -- one message, dispatch-shaped.** Found after the fact, from
+the question "does the classifier's reason reach the per-case message?" -- the
+answer was no, and looking at real output showed two worse problems beside it.
+Measured on a clean FLAG dispatch whose FLAG == 2 endpoint carries a scaled
+sigma, the old output was:
+
+```
+ERROR | ... `Y` for FLAG == 2 is `PERI + EPS2 * THETA3`, which is not a ferx error model.
+ERROR | ... `EPS1` is weighted by `IPRED * W1` ... an indicator-weighted, multi-endpoint
+        or scaled-sigma error model.
+# [error_model]
+#   DV ~ combined(EPS1, EPS2)
+```
+
+The first message says WHICH endpoint but not why. The second is a re-diagnosis
+of the UN-substituted `Y`, so it blames `EPS1` -- which is fine -- and calls the
+model indicator-weighted, which is what this phase had just resolved. The
+suggestion is single-endpoint, the wrong SHAPE for a model needing one entry per
+endpoint, and its sigma-declaration-order note applies only to the form this
+model is not using. Three separate ways of speaking single-endpoint after the
+dispatch had been read.
+
+The fix is one report per failing endpoint. The readout is derived per case and
+independently of the error model, so it survives a classification failure and is
+emitted in full; the error model becomes a commented block in the same dispatch
+shape with the gap marked. The classifier gained a `reason` field so the
+explanation can be placed in a sentence naming the endpoint, and the prediction
+it names is now eps-free -- it printed the epsilon terms back, so the message
+named a "prediction" containing a sigma.
+
 **Step 8 -- `obs_scale` and `obs_cmt`.** Dropped whenever a `y` is emitted, per
 the 11.37-unit double-scale and the silently-ignored `obs_cmt` measured above.
 

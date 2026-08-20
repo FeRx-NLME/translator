@@ -462,3 +462,73 @@ test_that("a non-dispatch conditional on the readout is reported, not silently d
   expect_match(result$ferx_text, "ode(obs_cmt=CENT, states=[CENT, PERI])",
                fixed = TRUE)
 })
+
+test_that("an unexpressible endpoint reports once, names the right sigma, and keeps the readout", {
+  skip_if_not_installed("nonmem2rx")
+  # A clean FLAG dispatch where only the FLAG == 2 endpoint carries a scaled
+  # sigma. Before this the model fell back to the single-endpoint path and
+  # produced TWO ERRORs: the per-case one, and a second that re-diagnosed the
+  # un-substituted `Y` and reported "`EPS1` is weighted by `IPRED * W1` ... an
+  # indicator-weighted ... error model". EPS1 is fine, EPS2 is the problem, and
+  # "indicator-weighted" is what this phase had just resolved. The file also
+  # carried a single-endpoint `DV ~ combined(EPS1, EPS2)` suggestion, which is
+  # the wrong SHAPE for a model that needs one entry per endpoint.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "gap.mod")
+  writeLines(c(
+    "$PROBLEM one endpoint not expressible",
+    "$INPUT ID TIME AMT EVID MDV CMT FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  PERIF = A(2)",
+    "  IPRED = CONC",
+    "  IF (FLAG.EQ.2) IPRED = PERIF",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  IF (FLAG.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1)) + W2*EPS(2)*THETA(3)",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  errs <- grep("^ERROR", result$warnings, value = TRUE)
+  expect_length(errs, 1L)
+  expect_match(errs, "the endpoint for FLAG == 2", fixed = TRUE)
+  expect_match(errs, "`EPS2` is weighted by `THETA3`", fixed = TRUE)
+  # The prediction named is eps-free.
+  expect_match(errs, "the prediction `PERI`", fixed = TRUE)
+  # The epsilon that is FINE is not blamed, and the indicator complaint this
+  # phase resolved is not raised.
+  expect_no_match(errs, "EPS1` is weighted", fixed = TRUE)
+
+  # The readout is emitted for real and is complete.
+  expect_match(result$ferx_text, "\n[scaling]\n  y = if (FLAG == 2) PERI else CENT/VC",
+               fixed = TRUE)
+  # The error model is a dispatch-shaped comment with one marked gap.
+  expect_match(result$ferx_text, "#   if (FLAG == 2) { DV ~ ??? }", fixed = TRUE)
+  expect_match(result$ferx_text, "#   else { DV ~ proportional(EPS1) }", fixed = TRUE)
+  expect_no_match(result$ferx_text, "combined(EPS1, EPS2)", fixed = TRUE)
+  # ferx still rejects the file, which is what keeps this loud.
+  expect_no_match(result$ferx_text, "\n[error_model]\n", fixed = TRUE)
+})

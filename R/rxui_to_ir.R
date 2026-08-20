@@ -2748,7 +2748,26 @@ bound_name <- function(entries, raw) {
                                   sigma_names, aux_vars, state_names_emitted)
       out <- if (!is.null(ep$why) || is.null(ep$col)) ep
              else .assemble_endpoints(ep, state_names_emitted)
-      if (!is.null(out$why)) {
+      if (!is.null(out$suggestion)) {
+        # A dispatch we read, with one endpoint we could not express. The readout
+        # is emitted for real -- it is complete -- and the error model becomes a
+        # commented block with the gap marked. No [error_model] means the engine
+        # rejects the file, which is 6f's mechanism and keeps this loud.
+        #
+        # Consuming the chain also suppresses pass 3's single-endpoint
+        # classification of `Y`, which would otherwise re-diagnose the
+        # UN-substituted expression and name whichever epsilon the indicators
+        # touched rather than the one at fault.
+        readout          <- out$readout
+        error_suggestion <- out$suggestion
+        warnings         <- c(warnings, out$warnings, paste0(
+          "ERROR | the $ERROR block dispatches on ", ep$col, ", but ", out$why,
+          ". The [scaling] readout is emitted; the [error_model] is left as a ",
+          "commented block with the missing branch marked, so ferx rejects the ",
+          "file until you complete it."))
+        readout_assigns  <- c(ch$assigns, y_idx)
+        readout_conds    <- ch$conds
+      } else if (!is.null(out$why)) {
         # Reported, not acted on: pass 3 still runs unchanged, so the emitted
         # file is what it was before this phase. Saying nothing would leave the
         # conditional to the generic "nothing reads it" INFO below, which
@@ -3065,8 +3084,14 @@ bound_name <- function(entries, raw) {
   eps  <- intersect(syms, sigma_names)
   src  <- tryCatch(deparse1(rhs_expr), error = function(e) "<unparseable>")
 
+  # `reason` is the bare explanation; `warnings` is the sentence built around it.
+  # Phase 6b needs the two separated: it calls this once PER ENDPOINT, on the
+  # already-substituted expression, and has to place the reason in a message
+  # naming that endpoint. Re-deriving it by stripping the prefix off `warnings`
+  # would be string surgery on a sentence, and reporting no reason at all left
+  # the user with "which is not a ferx error model" and nothing to act on.
   undetermined <- function(why)
-    list(type = NA_character_, params = character(),
+    list(type = NA_character_, params = character(), reason = why,
          warnings = paste0("ERROR | could not determine the error model from `Y = ",
                            src, "`: ", why,
                            ". No [error_model] is emitted -- a guessed error ",
@@ -3120,7 +3145,16 @@ bound_name <- function(entries, raw) {
                else if (same(coef, pred)) "proportional"
                else return(undetermined(paste0(
                  "`", eps[i], "` is weighted by `", deparse1(coef),
-                 "`, which is neither 1 nor the prediction `", deparse1(pred),
+                 "`, which is neither 1 nor the prediction `",
+                 # The prediction SHOWN is the expression with the epsilons
+                 # zeroed and folded. `pred` is `rhs_expr` -- zeroing happens at
+                 # evaluation time, inside `at()` -- so deparsing it printed the
+                 # epsilon terms back and the message read "neither 1 nor the
+                 # prediction `PERI + EPS2 * THETA3`", inviting the reader to ask
+                 # why a prediction contains a sigma. Display only; the identity
+                 # test is unchanged.
+                 deparse1(.fold_consts(
+                   Reduce(function(e, sg) .substitute_sym(e, sg, 0), eps, rhs_expr))),
                  "` -- an indicator-weighted, multi-endpoint or scaled-sigma ",
                  "error model")))
   }
@@ -3410,14 +3444,16 @@ bound_name <- function(entries, raw) {
     err <- if (length(live) == 0L) list(type = NA_character_)
            else .classify_error_assignment(full, live)
 
-    out[[k]] <- list(value = v, pred = pred,
+    reason <- if (length(live) == 0L) "it references no sigma" else err$reason
+    out[[k]] <- list(value = v, pred = pred, src = .deparse_or(full),
                      type = err$type, params = err$params,
                      why  = if (is.na(err$type))
-                              paste0("`Y` for ", disp$col,
+                              paste0("the endpoint for ", disp$col,
                                      if (is.null(v)) " outside the dispatched values"
                                      else paste0(" == ", .fmt_lit(v)),
-                                     " is `", .deparse_or(full),
-                                     "`, which is not a ferx error model"))
+                                     " cannot be expressed as a ferx error model: ",
+                                     "`Y` is `", .deparse_or(full), "`, and ",
+                                     reason))
   }
   list(col = disp$col, cases = out)
 }
@@ -3452,8 +3488,14 @@ bound_name <- function(entries, raw) {
   listed <- cases[-n]
   warnings <- character()
 
-  bad <- Filter(function(c) !is.null(c$why), listed)
-  if (length(bad) > 0) return(list(why = bad[[1]]$why))
+  # A listed endpoint that will not classify does NOT sink the whole dispatch.
+  # The readout is derived per case and independently of the error model, so it
+  # is complete and correct even here -- emitting it saves the user the half of
+  # the work that is mechanical, and leaves only the branch that needs a human.
+  # Everything downstream used to fall back to the single-endpoint path instead,
+  # which re-diagnosed the UN-substituted `Y` and blamed whichever epsilon the
+  # indicators touched first rather than the one actually at fault.
+  partial <- vapply(listed, function(c) !is.null(c$why), logical(1))
 
   keep_default <- !is.na(dflt$type)
   per_cmt      <- identical(ep$col, "CMT")
@@ -3463,6 +3505,11 @@ bound_name <- function(entries, raw) {
         "the fall-through case has no error model (", dflt$why,
         ") and there is only one dispatched value, so no branch could serve as ",
         "the `else` ferx requires")))
+    # The branch folded into the `else` must be one that classified. Folding a
+    # FAILED case there would put the gap where ferx allows no condition, and
+    # the suggestion could not say which endpoint it belonged to.
+    if (any(partial) && partial[length(partial)])
+      return(list(why = listed[[length(listed)]]$why))
     warnings <- c(warnings, paste0(
       "INFO  | outside ", ep$col, " in {",
       paste(vapply(listed, function(c) .fmt_lit(c$value), ""), collapse = ", "),
@@ -3479,7 +3526,11 @@ bound_name <- function(entries, raw) {
   errs    <- vapply(emitted, function(c)
                     paste0(c$type, "(", paste(c$params, collapse = ", "), ")"), "")
   uniform_pred <- length(unique(preds)) == 1L
-  uniform_err  <- length(unique(errs))  == 1L
+  # No `!any(partial)` guard here. It was written, and a sabotage run showed no
+  # test could tell it apart from its absence: both reads of `uniform_err` sit
+  # below the `any(partial)` returns, so a gap never reaches them. Dead, like the
+  # `blocked` check in `.readout_chain()`.
+  uniform_err  <- length(unique(errs)) == 1L
 
   if (per_cmt) {
     cmts <- vapply(listed, function(c) c$value, 0)
@@ -3501,6 +3552,12 @@ bound_name <- function(entries, raw) {
     readout <- if (uniform_pred) list(kind = "expr", y = preds[[1]])
                else list(kind = "per_cmt", entries = Map(function(i, c)
                  list(cmt = i, expr = .expr_text(c$pred)), idx, src))
+    if (any(partial))
+      return(list(readout = readout, warnings = warnings,
+                  why = listed[partial][[1]]$why,
+                  suggestion = .dispatch_suggestion(
+                    ep$col, Map(function(i, c) c(c, list(key = paste0("CMT=", i))),
+                                idx, src))))
     error_model <- if (uniform_err)
       list(list(dv = "DV", type = emitted[[1]]$type, params = emitted[[1]]$params))
       else Map(function(i, c) list(dv = "DV", type = c$type, params = c$params,
@@ -3518,12 +3575,54 @@ bound_name <- function(entries, raw) {
   readout <- list(kind = "expr", y = if (uniform_pred) preds[[1]] else
     Reduce(function(acc, i) paste0("if (", conds[i], ") ", preds[i], " else ", acc),
            rev(seq_len(length(emitted) - 1L)), preds[[length(emitted)]]))
+  if (any(partial))
+    return(list(readout = readout, warnings = warnings,
+                why = listed[partial][[1]]$why,
+                suggestion = .dispatch_suggestion(
+                  ep$col, lapply(seq_along(emitted), function(i)
+                    c(emitted[[i]],
+                      list(key = if (is.na(conds[i])) NA_character_ else conds[i]))))))
   error_model <- if (uniform_err)
     list(list(dv = "DV", type = emitted[[1]]$type, params = emitted[[1]]$params))
     else lapply(seq_along(emitted), function(i)
       list(dv = "DV", type = emitted[[i]]$type, params = emitted[[i]]$params,
            cond = if (is.na(conds[i])) NULL else conds[i]))
   list(readout = readout, error_model = error_model, warnings = warnings)
+}
+
+# A commented-out `[error_model]` for a dispatch where SOME endpoint could not be
+# classified, rendered where the real block would have gone.
+#
+# The single-endpoint suggestion this replaces was wrong in shape as well as in
+# content: it proposed `DV ~ combined(EPS1, EPS2)` for a model that needs one
+# entry per endpoint, and it warned about the sigma DECLARATION order, which is a
+# single-endpoint concern -- measured on 0.3.0, the per-CMT and covariate-selected
+# forms bind by name and ignore declaration order entirely (ferx-core#1001). Both
+# halves of that advice were actively misleading here.
+#
+# `entries` carry `key` (a condition, `CMT=N`, or NA for the bare `else`), and
+# `type`/`src`. An entry whose `type` is NA is the gap: it is marked, and the
+# source expression is put beside it so the reader can see what has to be
+# expressed without going back to the .mod file.
+.dispatch_suggestion <- function(col, entries) {
+  body <- vapply(seq_along(entries), function(i) {
+    e <- entries[[i]]
+    dv <- if (is.na(e$type)) "DV ~ ???"
+          else paste0("DV ~ ", e$type, "(", paste(e$params, collapse = ", "), ")")
+    line <- if (is.na(e$key)) paste0("#   else { ", dv, " }")
+            else if (grepl("^CMT=", e$key)) paste0("#   ", e$key, ": ", dv)
+            else paste0("#   ", if (i == 1L) "if (" else "else if (", e$key,
+                        ") { ", dv, " }")
+    if (is.na(e$type)) paste0(line, "   # <- Y = ", e$src) else line
+  }, "")
+  c(paste0("# ferxtranslate read this $ERROR block as a dispatch on ", col,
+           ", but could"),
+    paste0("# not express every endpoint as a ferx error model -- see the WARNING",
+           " above."),
+    paste0("# The [scaling] readout below IS emitted and is complete; only the",
+           " marked"),
+    paste0("# branch needs you. Fill it in and uncomment this block."),
+    "# [error_model]", body)
 }
 
 # The $ERROR readout chain: the statements 6b consumes, and the names it must

@@ -3029,3 +3029,94 @@ test_that("an epsilon with a zero coefficient is dropped from that endpoint", {
   expect_equal(ep$cases[[1]]$params, "EPS1")
   expect_equal(deparse1(ep$cases[[1]]$pred), "CENT/VC")
 })
+
+test_that("the classifier reports its reason as a field, and names an eps-free prediction", {
+  # `reason` exists so phase 6b can place the explanation in a message naming the
+  # ENDPOINT. Deriving it by stripping the prefix off `warnings` would be string
+  # surgery on a sentence.
+  r <- .classify_error_assignment(quote(F + EPS1 * THETA4), "EPS1")
+  expect_true(is.na(r$type))
+  expect_match(r$reason, "`EPS1` is weighted by `THETA4`", fixed = TRUE)
+  expect_match(r$warnings, r$reason, fixed = TRUE)
+  # The prediction SHOWN is eps-free. `pred` is the raw expression -- zeroing
+  # happens inside the evaluator -- so deparsing it printed the epsilon terms
+  # back and the message read "neither 1 nor the prediction `F + EPS1 * THETA4`".
+  expect_match(r$reason, "the prediction `F`", fixed = TRUE)
+  expect_no_match(r$reason, "the prediction `F + EPS1", fixed = TRUE)
+})
+
+test_that("one unexpressible endpoint yields a readout plus a marked suggestion", {
+  # A clean FLAG dispatch where only the FLAG == 2 endpoint carries a scaled
+  # sigma. The readout is derived per case and independently of the error model,
+  # so it is complete here -- emitting it leaves only the branch a human has to
+  # write. Bailing on the whole dispatch instead sent the model down the
+  # single-endpoint path, which re-diagnosed the UN-substituted `Y` and blamed
+  # EPS1, the epsilon that was fine.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "PERIF", rhs = quote(PERI),    pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("FLAG == 2", c("IPRED", "PERIF")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("FLAG == 1", c("W1", "1")),
+    cnd("FLAG == 2", c("W2", "1")))
+  aux <- c("CENT", "PERI", "CONC", "PERIF", "IPRED", "EPS1", "EPS2")
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, c("CENT", "PERI"))
+  # FLAG == 2 first in source order, so it is cases[[1]].
+  expect_true(is.na(ep$cases[[1]]$type))
+  expect_match(ep$cases[[1]]$why, "the endpoint for FLAG == 2", fixed = TRUE)
+  expect_match(ep$cases[[1]]$why, "`EPS2` is weighted by `THETA3`", fixed = TRUE)
+  expect_equal(ep$cases[[2]]$type, "proportional")
+
+  out <- .assemble_endpoints(ep, c("CENT", "PERI"))
+  # The readout is emitted for real, and it is the complete one.
+  expect_equal(out$readout$y, "if (FLAG == 2) PERI else CENT/VC")
+  expect_null(out$error_model)
+  expect_match(out$why, "FLAG == 2", fixed = TRUE)
+  expect_true(all(grepl("^\\s*#", out$suggestion)))
+  expect_true(any(grepl("if (FLAG == 2) { DV ~ ??? }", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("# <- Y = PERI + EPS2 * THETA3", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("else { DV ~ proportional(EPS1) }", out$suggestion, fixed = TRUE)))
+})
+
+test_that("a failed endpoint is never folded into the else ferx requires", {
+  # The `else` takes no condition, so a gap placed there could not say which
+  # endpoint it belonged to. The last listed case is the one that gets folded in
+  # when the fall-through has no model, so it is the one that must have worked.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 3L),
+    cnd("FLAG == 1", c("W1", "1")),
+    cnd("FLAG == 2", c("W2", "1")))
+  aux <- c("CENT", "IPRED", "EPS1", "EPS2")
+  # EPS2 (FLAG == 2, the LAST listed case) is the scaled one.
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, "CENT")
+  out <- .assemble_endpoints(ep, "CENT")
+  expect_null(out$suggestion)
+  expect_null(out$readout)
+  expect_match(out$why, "the endpoint for FLAG == 2", fixed = TRUE)
+})
+
+test_that("a per-CMT dispatch with a gap keeps its CMT=N keys", {
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "PERIF", rhs = quote(PERI),    pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "PERIF")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PERI", "CONC", "PERIF", "IPRED", "EPS1", "EPS2")
+  ep  <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + W2 * EPS2 * THETA3),
+                          chain, c("EPS1", "EPS2"), aux, c("CENT", "PERI"))
+  out <- .assemble_endpoints(ep, c("CENT", "PERI"))
+  expect_equal(out$readout$kind, "per_cmt")
+  expect_true(any(grepl("CMT=1: DV ~ proportional(EPS1)", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("CMT=2: DV ~ ???", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("# <- Y = PERI + EPS2 * THETA3", out$suggestion, fixed = TRUE)))
+})
