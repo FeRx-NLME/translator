@@ -2,6 +2,25 @@
 
 ## Breaking changes
 
+* The CI engine pin moves to `ferx-r@9c97c13` (from `ferx-r@7889719`), whose
+  committed `Cargo.lock` resolves ferx-core at `25b5f473` -- the merge of
+  ferx-core#1003. That makes `E_DOSE_ATTR_DOUBLE_USE` live in the `engine` job:
+  a bare `F`/`LAGTIME`/`ALAG` or an indexed `F{n}`/`ALAG{n}`/`LAGTIME{n}` READ in
+  `[odes]` (RHS or `init()`), `[scaling]`, or `[adaptive_dosing] observe` is now a
+  parse error on ODE models. The translator emits no such name, so no output
+  changes; the pin is what proves it.
+
+  The rejection is **ODE-models-only** -- an analytical `pk ...` model still
+  accepts the same double use silently (ferx-core#1004, open), so this pin is not
+  a backstop for analytical output. `.deconflict_dose_attr_names()` remains the
+  only guard there.
+
+  `9c97c13` is ferx-r main rather than a tag, because both READMEs install with
+  `pak::pak("FeRx-NLME/ferx-r")`, which takes the default branch. Its DESCRIPTION
+  still reads 0.3.0 despite the parser change, so identify this engine by SHA and
+  not by version. No re-baseline of the concordance reference omegas or the
+  bundled datasets was needed.
+
 * `ode(states=[...])` is now emitted in `$MODEL` COMP order rather than `$DES`
   statement order (issue #25). ferx numbers compartments by their POSITION in
   that list -- measured on 0.3.0, a dose row's `CMT` is applied as

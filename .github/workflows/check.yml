@@ -62,11 +62,18 @@ jobs:
 
   # Engine tier: build a PINNED ferx (Rust) and run the Tier-4 concordance tests
   # so a green check actually proves the engine accepts and fits the emitted
-  # .ferx. The pin (ferx-r@7889719 = ferx 0.3.0, tag v0.3.0) must match the
-  # reference omegas asserted in tests/testthat/test-concordance.R and the bundled
-  # datasets in inst/testdata/ (regenerated with this engine) -- bump them
-  # together. Pin the SHA rather than the tag: a tag can be moved, and this job
-  # is the only thing standing between a silent engine regression and a merge.
+  # .ferx. The pin (ferx-r@9c97c13) must match the reference omegas asserted in
+  # tests/testthat/test-concordance.R and the bundled datasets in inst/testdata/
+  # (regenerated with this engine) -- bump them together. Pin the SHA rather than
+  # the tag: a tag can be moved, and this job is the only thing standing between a
+  # silent engine regression and a merge.
+  #
+  # 9c97c13 is ferx-r MAIN, not a tag, and that is deliberate. Both READMEs tell
+  # users `pak::pak("FeRx-NLME/ferx-r")`, which takes the default branch -- so main
+  # IS the version users install, and pinning the v0.3.0 tag would test a build
+  # nobody runs. Note its DESCRIPTION still reads 0.3.0 even though the parser
+  # changed underneath it, so "ferx 0.3.0" no longer names one engine: identify
+  # this build by SHA, never by version.
   engine:
     runs-on: ubuntu-latest
     env:
@@ -79,7 +86,7 @@ jobs:
           use-public-rspm: true
       - uses: dtolnay/rust-toolchain@stable
       # Install the translator's hard deps plus, EXPLICITLY, the pinned engine
-      # (ferx-r@7889719 = ferx 0.3.0) and the amp.sim benchmark. Installing them
+      # (ferx-r@9c97c13) and the amp.sim benchmark. Installing them
       # as explicit extra-packages (rather than via a DESCRIPTION Remote) lets
       # pak read each repo's own Package name, avoiding the repo-name vs
       # package-name mismatch (ferx-r -> ferx). The first run compiles the ferx
@@ -90,7 +97,7 @@ jobs:
           extra-packages: |
             any::devtools
             any::testthat
-            FeRx-NLME/ferx-r@7889719
+            FeRx-NLME/ferx-r@9c97c13
             LeidenAdvancedPKPD/amp.sim
       # The FULL suite, not filter="concordance". Four of the validation tests are
       # skip_if_not_installed("ferx"), so a filtered run left the entire feature
