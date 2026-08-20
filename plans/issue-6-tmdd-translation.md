@@ -1411,6 +1411,24 @@ required terminating `else` is the fall-through case when that classifies, and
 otherwise the last case folded in with an INFO recording the exhaustiveness
 assumption.
 
+**What must be inlined -- demand, not shape.** Found during implementation, and
+the design above was wrong about it twice. Two classes of name have to be
+inlined out of the readout: an AUXILIARY name, because ferx will not resolve a
+compartment-dependent name in `[scaling]`, and a name appearing in an
+EPSILON'S COEFFICIENT, because those are the indicators -- `dY/dEPS1` of
+`IPRED*(1 + W1*EPS1 + W2*EPS2)` is `IPRED * W1`, and a coefficient carrying `W1`
+is neither 1 nor the prediction until `W1` has a value.
+
+The first attempt inlined whatever ANY conditional in the closure assigned. That
+fails the ordinary PKPD model: `IF (SEX.EQ.1) VC = THETA(2)*THETA(3)` is in the
+readout's backward closure because the readout divides by `VC`, so `SEX` was
+read as a second dispatch column and the whole model failed on "the $ERROR
+conditionals switch on more than one column". The second attempt tested the
+SHAPE of the condition, which does not separate them either: `SEX == 1` is a
+`<column> == <number>` test exactly like a dispatch. What separates them is that
+`VC` never appears in an epsilon's coefficient, so `y` can reference it as the
+individual parameter it is. Covered by a tier-2 fixture.
+
 **Step 7 -- scope check (6e).** Every free symbol of every readout expression
 must be a state, an individual parameter, a known function or an unassigned name.
 Otherwise ERROR and no `y`, which leaves the engine to reject the file on the

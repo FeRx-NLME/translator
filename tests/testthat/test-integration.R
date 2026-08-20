@@ -345,3 +345,120 @@ test_that("every bundled model translates, without a shadowing theta", {
   expect_equal(offenders, character())
   expect_equal(illegal, character())
 })
+
+test_that("a covariate conditional in $PK does not block a $ERROR dispatch", {
+  skip_if_not_installed("nonmem2rx")
+  # The ordinary shape of a PKPD model: a covariate effect on a PK parameter
+  # AND a two-endpoint error model. Both are conditionals, and the readout
+  # divides by the parameter the covariate acts on, so the $PK conditional sits
+  # inside the readout's backward closure. Treating every conditional there as
+  # part of the dispatch reads SEX beside FLAG and fails the whole model on
+  # "more than one column"; only the FLAG conditionals select an endpoint.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "cov_disp.mod")
+  writeLines(c(
+    "$PROBLEM covariate effect plus endpoint dispatch",
+    "$INPUT ID TIME AMT EVID MDV CMT SEX FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  IF (SEX.EQ.1) VC = THETA(2)*THETA(3)",
+    "  KCP = THETA(4)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  PERIF = A(2)",
+    "  IPRED = CONC",
+    "  IF (FLAG.EQ.2) IPRED = PERIF",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  IF (FLAG.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1) + W2*EPS(2))",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.1, 1.2, 3.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "y = if (FLAG == 2) PERI else CENT/VC",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "if (FLAG == 2) { DV ~ proportional(EPS2) }",
+               fixed = TRUE)
+  # The covariate conditional stays where it belongs, referencing the theta it
+  # was written against, and `y` reads VC as an ordinary individual parameter.
+  expect_match(result$ferx_text, "if (SEX == 1) { VC = THETA2 * THETA3 }",
+               fixed = TRUE)
+  expect_match(result$ferx_text, "  VC = THETA2\n", fixed = TRUE)
+  expect_no_match(result$ferx_text, "more than one column", fixed = TRUE)
+})
+
+test_that("a non-dispatch conditional on the readout is reported, not silently dropped", {
+  skip_if_not_installed("nonmem2rx")
+  # A clamp on the prediction. It defines a name the readout must resolve per
+  # case, and it is not an equality test, so no dispatch can be built from it.
+  # Before this phase it reached the generic "nothing reads it, so it has no
+  # effect and is dropped" INFO -- which is wrong twice over: it does have an
+  # effect in NONMEM, and it is not dead. Nothing else about the output changes,
+  # so the report is the whole of the fix.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "clamped.mod")
+  writeLines(c(
+    "$PROBLEM clamped readout",
+    "$INPUT ID TIME AMT EVID MDV CMT FLAG DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PERI)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  IPRED = CONC",
+    "  IF (CONC.LT.0.0) IPRED = 0",
+    "  W1 = 0",
+    "  IF (FLAG.EQ.1) W1 = 1",
+    "  Y = IPRED*(1 + W1*EPS(1))",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  blocked <- grep("^ERROR .*\\$ERROR block is conditional", result$warnings, value = TRUE)
+  expect_length(blocked, 1L)
+  expect_match(blocked, "CONC < 0", fixed = TRUE)
+  expect_match(blocked, "not a `<column> == <number>` test", fixed = TRUE)
+  # Reported, not acted on: no readout is emitted and the pre-6b path runs, so
+  # the engine still gets the file it would have got before. Anchored on the
+  # section header, because the ERROR text itself reaches the file as a
+  # `# WARNING:` comment and names `[scaling]` inside it.
+  expect_no_match(result$ferx_text, "\n[scaling]\n", fixed = TRUE)
+  expect_match(result$ferx_text, "ode(obs_cmt=CENT, states=[CENT, PERI])",
+               fixed = TRUE)
+})

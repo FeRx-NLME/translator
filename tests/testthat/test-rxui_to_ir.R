@@ -3009,3 +3009,23 @@ test_that("a single dispatched value with no fall-through model has no else to e
   out <- .assemble_endpoints(ep, c("CENT", "TISS", "c_RTOT"))
   expect_match(out$why, "no branch could serve as the `else`", fixed = TRUE)
 })
+
+test_that("an epsilon with a zero coefficient is dropped from that endpoint", {
+  # Normally folding removes these first: substituting `W2 = 0` leaves
+  # `0 * EPS2`, which collapses to `0` and takes EPS2 out of the expression
+  # entirely. This is the shape that survives folding -- `.fold_consts()`
+  # deliberately has no `x - x` rule -- so it is the only way to reach the
+  # guard. Without it EPS2 reaches the classifier with coefficient 0, which is
+  # neither 1 nor the prediction, and the whole endpoint is reported
+  # untranslatable over a term the source had already cancelled.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    cnd("FLAG == 1", c("W1", "1")))
+  ep <- .build_endpoints(quote(IPRED * (1 + W1 * EPS1) + EPS2 - EPS2), chain,
+                         c("EPS1", "EPS2"), tmdd_aux, c("CENT", "TISS", "c_RTOT"))
+  expect_null(ep$why)
+  expect_equal(ep$cases[[1]]$type, "proportional")
+  expect_equal(ep$cases[[1]]$params, "EPS1")
+  expect_equal(deparse1(ep$cases[[1]]$pred), "CENT/VC")
+})

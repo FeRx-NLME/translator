@@ -2741,7 +2741,8 @@ bound_name <- function(entries, raw) {
       break
     }
     if (!is.na(y_idx)) {
-      ch <- .readout_chain(y_idx, all_assigns, conditionals, defs, aux_vars)
+      ch <- .readout_chain(y_idx, all_assigns, conditionals, defs, aux_vars,
+                           sigma_names)
       ep <- if (!is.null(ch$why)) ch
             else .build_endpoints(all_assigns[[y_idx]]$rhs_expr_norm, ch$chain,
                                   sigma_names, aux_vars, state_names_emitted)
@@ -3293,6 +3294,19 @@ bound_name <- function(entries, raw) {
 #
 # `why` is NULL when the conditions are simply absent, which means
 # single-endpoint and is not a failure.
+# One conditional read as a dispatch term -- `list(col=, value=)` -- or NULL.
+# Split out because `.readout_chain()` has to ask the question of a SINGLE
+# conditional, to tell a conditional that selects an endpoint from one that
+# merely stands in the closure (a covariate effect on a PK parameter).
+.dispatch_term <- function(st) {
+  if (any(vapply(c(st$then, st$else_),
+                 function(b) identical(b$kind, "if"), logical(1)))) return(NULL)
+  e <- st$cond
+  if (!is.call(e) || !identical(as.character(e[[1]])[1L], "==") ||
+      !is.symbol(e[[2]]) || !is.numeric(e[[3]]) || length(e[[3]]) != 1L) return(NULL)
+  list(col = toupper(as.character(e[[2]])), value = as.numeric(e[[3]]))
+}
+
 .dispatch_conditions <- function(conds) {
   if (length(conds) == 0L) return(list(why = NULL))
   col <- NULL
@@ -3301,21 +3315,18 @@ bound_name <- function(entries, raw) {
     if (any(vapply(c(st$then, st$else_),
                    function(b) identical(b$kind, "if"), logical(1))))
       return(list(why = "a conditional in the $ERROR chain is nested"))
-    e <- st$cond
-    if (!is.call(e) || !identical(as.character(e[[1]])[1L], "==") ||
-        !is.symbol(e[[2]]) || !is.numeric(e[[3]]) || length(e[[3]]) != 1L)
+    term <- .dispatch_term(st)
+    if (is.null(term))
       return(list(why = paste0(
-        "the condition `", .deparse_or(e),
+        "the condition `", .deparse_or(st$cond),
         "` is not a `<column> == <number>` test")))
-    nm <- toupper(as.character(e[[2]]))
-    if (is.null(col)) col <- nm
-    else if (!identical(col, nm))
+    if (is.null(col)) col <- term$col
+    else if (!identical(col, term$col))
       return(list(why = paste0(
         "the $ERROR conditionals switch on more than one column (`", col,
-        "` and `", nm, "`), so the cases are not mutually exclusive")))
-    v <- as.numeric(e[[3]])
-    if (!any(vapply(values, function(x) isTRUE(all.equal(x, v)), logical(1))))
-      values <- c(values, list(v))
+        "` and `", term$col, "`), so the cases are not mutually exclusive")))
+    if (!any(vapply(values, function(x) isTRUE(all.equal(x, term$value)), logical(1))))
+      values <- c(values, list(term$value))
   }
   list(col = col, values = values)
 }
@@ -3528,16 +3539,54 @@ bound_name <- function(entries, raw) {
 # a correct reference with a wrong expansion.
 #
 # The set is closed transitively: `W3 = W1 + W2` inherits from `W1`.
-.readout_chain <- function(y_idx, all_assigns, conditionals, defs, aux_vars) {
+.readout_chain <- function(y_idx, all_assigns, conditionals, defs, aux_vars,
+                           sigma_names) {
   y   <- all_assigns[[y_idx]]
   hit <- .reachable_defs(toupper(.collect_symbols(y$rhs_expr_norm)), defs)
   cl  <- defs[hit]
   cl  <- Filter(function(d) !(identical(d$kind, "assign") && d$idx == y_idx), cl)
 
-  cond_names <- unique(unlist(lapply(cl, function(d)
-    if (identical(d$kind, "cond")) d$defines else character())))
-  inline <- unique(c(intersect(unlist(lapply(cl, function(d) d$defines)), aux_vars),
-                     cond_names))
+  # As chain records, so a condition can be read rather than re-derived.
+  as_cond <- function(i) {
+    st  <- conditionals[[i]]
+    arm <- function(b) lapply(b, function(x)
+      list(kind = x$kind, lhs = x$lhs,
+           rhs = if (identical(x$kind, "assign"))
+                   .normalise_expr(x$rhs_raw, x$map)))
+    list(kind = "if", cond = .normalise_expr(st$cond_raw, st$map),
+         then = arm(st$then), else_ = arm(st$else_), pos = st$pos)
+  }
+  cond_rec <- lapply(cl, function(d)
+    if (identical(d$kind, "cond")) as_cond(d$idx))
+
+  # What has to be inlined, and nothing more. Two classes, for two different
+  # reasons:
+  #
+  #   auxiliary names, because ferx will not resolve a compartment-dependent
+  #   name in [scaling] -- it reads one as a covariate and dies on
+  #   E_MISSING_COVARIATE, but only when a data file is present;
+  #
+  #   names appearing in an EPSILON'S COEFFICIENT, because those are the
+  #   indicators. `dY/dEPS1` of `IPRED*(1 + W1*EPS1 + W2*EPS2)` is `IPRED * W1`,
+  #   and a coefficient carrying `W1` is neither 1 nor the prediction, so the
+  #   endpoint cannot be classified until `W1` has a value.
+  #
+  # Demand, not shape. The first attempt inlined whatever ANY conditional in the
+  # closure assigned, which is wrong for the ordinary PKPD model:
+  # `IF (SEX.EQ.1) VC = THETA(2)*THETA(3)` sits in the closure because the
+  # readout divides by `VC`, and it dragged `SEX` in beside `FLAG` and failed
+  # the model on "more than one column". Testing the SHAPE of the condition does
+  # not separate them either -- `SEX == 1` is a `<column> == <number>` test like
+  # any dispatch. What separates them is that `VC` never appears in an epsilon's
+  # coefficient, so `y` can reference it as the individual parameter it is.
+  eps_syms <- unique(unlist(lapply(
+    intersect(toupper(.collect_symbols(y$rhs_expr_norm)), sigma_names),
+    function(sg) {
+      d <- tryCatch(stats::D(y$rhs_expr_norm, sg), error = function(e) NULL)
+      if (is.null(d)) character() else toupper(.collect_symbols(d))
+    })))
+  declared <- unlist(lapply(cl, function(d) d$defines))
+  inline <- unique(c(intersect(declared, aux_vars), intersect(declared, eps_syms)))
   repeat {
     grew <- FALSE
     for (d in cl) {
@@ -3547,24 +3596,27 @@ bound_name <- function(entries, raw) {
     if (!grew) break
   }
 
-  keep <- Filter(function(d) any(d$defines %in% inline), cl)
+  # A non-dispatch conditional that defines something the readout must inline --
+  # `IF (IPRED.LT.0) IPRED = 0` -- cannot be resolved per case. It is NOT
+  # rejected here: it goes into the chain and `.dispatch_conditions()` rejects
+  # it, with the same message and the same effect on pass 3. A guard here as
+  # well was written first and deleted after a sabotage run showed no test could
+  # tell the two apart, which is the correct reading -- it was duplication, not
+  # missing coverage.
+  wanted <- vapply(cl, function(d) any(d$defines %in% inline), logical(1))
+  keep <- cl[wanted]
   mixed <- Filter(function(d) !all(d$defines %in% inline), keep)
   if (length(mixed) > 0)
     return(list(why = paste0(
       "a $ERROR conditional assigns both dispatch and non-dispatch names (",
       paste(mixed[[1]]$defines, collapse = ", "), ")")))
 
-  chain <- lapply(keep, function(d) {
+  chain <- lapply(which(wanted), function(i) {
+    d <- cl[[i]]
     if (identical(d$kind, "assign")) {
       a <- all_assigns[[d$idx]]
       list(kind = "assign", lhs = a$lhs, rhs = a$rhs_expr_norm, pos = a$pos)
-    } else {
-      st  <- conditionals[[d$idx]]
-      arm <- function(b) lapply(b, function(x)
-        list(lhs = x$lhs, rhs = .normalise_expr(x$rhs_raw, x$map)))
-      list(kind = "if", cond = .normalise_expr(st$cond_raw, st$map),
-           then = arm(st$then), else_ = arm(st$else_), pos = st$pos)
-    }
+    } else cond_rec[[i]]
   })
   chain <- chain[order(vapply(chain, function(x) x$pos, 0L))]
   list(chain = chain,
