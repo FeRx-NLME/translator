@@ -2569,3 +2569,77 @@ test_that("an unused ODE intermediate is dropped rather than emitted", {
   expect_false("CP" %in% .stmt_declared(ir$odes, "ddt", "assign"))
   expect_false("CP" %in% .ip_names(ir$indiv_params))
 })
+
+test_that("the scaffolding drop stays aligned when a conditional is present", {
+  # `.ip_names()` walks into branches, so a conditional contributes as many names
+  # as it assigns. A name-indexed logical then misaligns with the STATEMENT list
+  # and deletes the wrong entry. This fixture forces the mismatch: one
+  # conditional assigning two names, so five names span four statements.
+  ini <- rbind(theta_row("K", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(if (SEX == 1) { aa <- T2; bb <- T2 * 2 }),
+              quote(w1 <- 0),
+              ddt("CENT", quote(-k * CENT * aa * bb)),
+              quote(y <- CENT * (1 + w1 * eps1)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # The scaffolding goes, and nothing else does.
+  expect_false("W1" %in% .ip_names(ir$indiv_params))
+  expect_true(all(c("K", "AA", "BB") %in% .ip_names(ir$indiv_params)))
+  # The conditional itself must survive intact -- both arms, both names.
+  conds <- Filter(function(p) identical(p$kind, "if"), ir$indiv_params)
+  expect_length(conds, 1L)
+  expect_equal(sort(vapply(conds[[1]]$then, function(x) x$lhs, "")), c("AA", "BB"))
+})
+
+test_that("a parameter read only inside a conditional counts as used", {
+  # The `used` set was built from `p$rhs` over the statement list, and a
+  # conditional has no `rhs` -- so every name read inside a branch looked unused.
+  # Combined with the scaffolding rule, which DELETES on the strength of that
+  # set, a parameter referenced only in a branch could be removed and leave the
+  # branch naming something undeclared.
+  ini <- rbind(theta_row("K", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L),
+               sigma_row("eps1", 0.1))
+  lst <- list(quote(k <- K * exp(eta1)),
+              quote(w1 <- T2),                       # read ONLY by the branch...
+              quote(if (SEX == 1) k <- k * w1),      # ...here
+              ddt("CENT", quote(-k * CENT)),
+              quote(y <- CENT * (1 + w1 * eps1)))    # ...and by $ERROR
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  # W1 is referenced by an emitted conditional, so it is NOT scaffolding.
+  expect_true("W1" %in% .ip_names(ir$indiv_params))
+  # And nothing the emitted block names is left undeclared.
+  declared <- c(.ip_names(ir$indiv_params), .ode_states(ir$odes),
+                .stmt_declared(ir$odes, "ddt", "assign"),
+                vapply(ir$thetas, function(t) t$name, ""))
+  expect_true("W1" %in% declared)
+})
+
+test_that("a dose-attribute rename reaches inside a conditional", {
+  # Two review findings in one fixture. The #17 rename pass assumed every
+  # [individual_parameters] entry has `lhs`/`rhs`, so a model carrying BOTH a
+  # $PK conditional and a dose-attribute-shaped name aborted in
+  # `dose_out$map[[NULL]]` -- measured, not hypothetical.
+  #
+  # And `.ip_names()` reports a name assigned both at the top level and in a
+  # branch twice, so the deconflicter renamed it twice, consuming a second
+  # candidate (`F1_PAR` then `F1_PAR_1`) and reporting it twice for one
+  # parameter. One decision per name, not per occurrence.
+  ini <- rbind(theta_row("T1", 0.1), theta_row("T2", 2), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(f1 <- T1),
+              quote(if (SEX == 1) f1 <- T1 * T2),
+              quote(k <- f1 * exp(eta1)),
+              ddt("CENT", quote(-k * CENT)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+
+  expect_false(any(.is_dose_attr_name(.ip_names(ir$indiv_params))))
+  expect_true("F1_PAR" %in% .ip_names(ir$indiv_params))   # not F1_PAR_1
+  # The branch assignment and the downstream reference follow the same rename.
+  cond <- Filter(function(p) identical(p$kind, "if"), ir$indiv_params)[[1]]
+  expect_equal(vapply(cond$then, function(x) x$lhs, ""), "F1_PAR")
+  k <- Filter(function(p) identical(p$lhs, "K"), ir$indiv_params)[[1]]
+  expect_match(k$rhs, "F1_PAR", fixed = TRUE)
+  expect_length(grep("shape of a ferx dose attribute", ir$warnings), 1L)
+})

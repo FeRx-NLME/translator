@@ -967,14 +967,34 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # this code. obs_scale is reachable only through NONMEM `S1 = <param>`, which
     # needs a raw control stream rather than a mock UI; the same `.rewrite_syms()`
     # call is exercised by the [individual_parameters] cross-reference test.
-    expr_out$indiv_params <- lapply(expr_out$indiv_params, function(p) {
+    # Statement-aware since phase 5b: a conditional has no `lhs`/`rhs` of its
+    # own, and `dose_out$map[[NULL]]` aborts rather than returning nothing --
+    # measured, on a model carrying both a $PK conditional and an `F1`. Its
+    # branches declare and read names like any other statement, so they need the
+    # same rename.
+    rn <- function(sts) lapply(sts, function(p) {
+      if (identical(.stmt_kind(p, "assign"), "if")) {
+        p$cond <- .rewrite_syms(p$cond, dose_out$map)
+        p$then <- rn(p$then)
+        if (length(p$else_) > 0) p$else_ <- rn(p$else_)
+        return(p)
+      }
       if (!is.null(dose_out$map[[p$lhs]])) p$lhs <- dose_out$map[[p$lhs]]
       p$rhs <- .rewrite_syms(p$rhs, dose_out$map)
       p
     })
-    expr_out$odes <- lapply(expr_out$odes, function(o) {
-      o$rhs <- .rewrite_syms(o$rhs, dose_out$map); o
+    expr_out$indiv_params <- rn(expr_out$indiv_params)
+    rn_ode <- function(sts) lapply(sts, function(o) {
+      if (identical(.stmt_kind(o, "ddt"), "if")) {
+        o$cond <- .rewrite_syms(o$cond, dose_out$map)
+        o$then <- rn_ode(o$then)
+        if (length(o$else_) > 0) o$else_ <- rn_ode(o$else_)
+        return(o)
+      }
+      o$rhs <- .rewrite_syms(o$rhs, dose_out$map)
+      o
     })
+    expr_out$odes <- rn_ode(expr_out$odes)
     init_conds <- lapply(init_conds, function(x) {
       x$rhs <- .rewrite_syms(x$rhs, dose_out$map); x
     })
@@ -1004,17 +1024,28 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # dropped rather than emitted dead, and the drop is announced so the
   # information is not lost silently.
   if (length(expr_out$error_refs) > 0 && length(expr_out$indiv_params) > 0) {
-    ip_names <- .ip_names(expr_out$indiv_params)
+    sym_of <- function(x) {
+      e <- tryCatch(str2lang(x), error = function(e) NULL)
+      if (is.null(e)) character() else .collect_symbols(e)
+    }
     used <- toupper(c(
       .emitted_ode_symbols(expr_out$odes),
-      unlist(lapply(expr_out$indiv_params, function(p)
-        .collect_symbols(tryCatch(str2lang(p$rhs), error = function(e) quote(.))))),
-      unlist(lapply(init_conds, function(x)
-        .collect_symbols(tryCatch(str2lang(x$rhs), error = function(e) quote(.))))),
-      if (is.character(scaling$obs_scale)) .collect_symbols(
-        tryCatch(str2lang(scaling$obs_scale), error = function(e) quote(.))),
+      .ip_refs(expr_out$indiv_params),
+      unlist(lapply(init_conds, function(x) sym_of(x$rhs))),
+      if (is.character(scaling$obs_scale)) sym_of(scaling$obs_scale),
       unlist(structural$pk_args)))
-    drop <- toupper(ip_names) %in% expr_out$error_refs & !toupper(ip_names) %in% used
+
+    # Per STATEMENT, not per name. `.ip_names()` walks into branches, so a
+    # conditional contributes as many names as it assigns and a name-indexed
+    # logical would misalign with the statement list the moment one appears --
+    # silently deleting the wrong statement. Only a plain assignment is
+    # droppable anyway: a conditional is scaffolding or it is not, as a whole.
+    drop <- vapply(expr_out$indiv_params, function(p) {
+      if (identical(.stmt_kind(p, "assign"), "if")) return(FALSE)
+      toupper(p$lhs) %in% expr_out$error_refs && !toupper(p$lhs) %in% used
+    }, logical(1))
+    ip_names <- vapply(expr_out$indiv_params, function(p)
+      if (identical(.stmt_kind(p, "assign"), "if")) "" else p$lhs, "")
     if (any(drop)) {
       warn <- c(warn, paste0(
         "INFO  | ", paste(ip_names[drop], collapse = ", "),
@@ -1891,7 +1922,11 @@ bound_name <- function(entries, raw) {
 # leaves a reader unable to tell the three apart. It is only reached here as
 # .free_name()'s fallback when `<name>_PAR` is itself taken.
 .deconflict_dose_attr_names <- function(lhs, taken = character()) {
-  bad <- which(.is_dose_attr_name(lhs))
+  # One decision per NAME, not per occurrence. A name assigned both at the top
+  # level and inside a conditional branch appears twice in the declared set, and
+  # renaming it twice consumed a second candidate (`F1_PAR` then `F1_PAR_1`) and
+  # reported it twice, for one parameter.
+  bad <- which(.is_dose_attr_name(lhs) & !duplicated(toupper(lhs)))
   if (length(bad) == 0L) return(list(map = list(), warnings = character()))
 
   map  <- list()
@@ -2742,6 +2777,25 @@ bound_name <- function(entries, raw) {
     warnings     = warnings,
     unsupported  = unsupported
   )
+}
+
+# Every name an [individual_parameters] statement list REFERENCES, including the
+# condition and both arms of a conditional.
+#
+# Reading `p$rhs` over the list misses all of them -- a conditional has no `rhs`
+# field -- so a parameter used only inside a branch looks unused. That matters
+# because the scaffolding rule below DELETES on the strength of this set.
+.ip_refs <- function(ips) {
+  sym <- function(x) {
+    e <- tryCatch(str2lang(x), error = function(e) NULL)
+    if (is.null(e)) character() else .collect_symbols(e)
+  }
+  walk <- function(sts) unlist(lapply(sts, function(p) {
+    if (identical(.stmt_kind(p, "assign"), "if"))
+      c(sym(p$cond), walk(p$then), walk(p$else_))
+    else sym(p$rhs)
+  }))
+  toupper(walk(ips))
 }
 
 # Every name an [individual_parameters] statement list DECLARES, including names
