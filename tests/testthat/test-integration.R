@@ -532,3 +532,68 @@ test_that("an unexpressible endpoint reports once, names the right sigma, and ke
   # ferx still rejects the file, which is what keeps this loud.
   expect_no_match(result$ferx_text, "\n[error_model]\n", fixed = TRUE)
 })
+
+test_that("a per-CMT gap emits keyed y[CMT=N] plus a keyed suggestion, wherever it falls", {
+  skip_if_not_installed("nonmem2rx")
+  # The per-CMT partial path had no pipeline coverage at all, and the unit
+  # fixtures for it both put the failing endpoint FIRST. Here CMT == 2 is seen
+  # first, so the broken endpoint (CMT == 1, a scaled sigma) is the LAST listed
+  # value -- the position that used to send the whole model back to the
+  # single-endpoint path and bring back both the two-ERROR report and a
+  # `DV ~ combined(...)` suggestion of the wrong shape.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "pcgap.mod")
+  writeLines(c(
+    "$PROBLEM per-CMT dispatch, last listed endpoint unexpressible",
+    "$INPUT ID TIME AMT EVID MDV CMT DV",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINES ADVAN13 TOL=9",
+    "$MODEL",
+    "  COMP=(CENT, DEFDOSE, DEFOBS)",
+    "  COMP=(PD)",
+    "$PK",
+    "  KEL = THETA(1)*EXP(ETA(1))",
+    "  VC  = THETA(2)",
+    "  KCP = THETA(3)",
+    "$DES",
+    "  DADT(1) = -KEL*A(1) - KCP*A(1)",
+    "  DADT(2) =  KCP*A(1)",
+    "$ERROR",
+    "  CONC = A(1)/VC",
+    "  RESP = A(2)",
+    "  IPRED = CONC",
+    "  IF (CMT.EQ.2) IPRED = RESP",
+    "  W1 = 0",
+    "  W2 = 0",
+    "  IF (CMT.EQ.1) W1 = 1",
+    "  IF (CMT.EQ.2) W2 = 1",
+    "  Y = IPRED*(1 + W2*EPS(2)) + W1*EPS(1)*THETA(3)",
+    "$THETA",
+    "  (0.001, 0.1, 1.0)",
+    "  (0.5, 5.0, 50.0)",
+    "  (0.01, 0.3, 5.0)",
+    "$OMEGA",
+    "  0.09",
+    "$SIGMA",
+    "  0.0225",
+    "  0.04",
+    "$ESTIMATION METHOD=1 INTER MAXEVAL=9999"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  errs <- grep("^ERROR", result$warnings, value = TRUE)
+  expect_length(errs, 1L)
+  expect_match(errs, "the endpoint for CMT == 1", fixed = TRUE)
+  expect_match(errs, "`EPS1` is weighted by `THETA3`", fixed = TRUE)
+
+  # Both readouts emitted and keyed; ferx checks per-CMT coverage against the
+  # data, so an incomplete set is rejected by name rather than silently.
+  expect_match(result$ferx_text, "  y[CMT=1] = CENT/VC", fixed = TRUE)
+  expect_match(result$ferx_text, "  y[CMT=2] = PD", fixed = TRUE)
+  # The suggestion keeps its CMT keys and marks only the endpoint that failed.
+  expect_match(result$ferx_text, "#   CMT=1: DV ~ ???", fixed = TRUE)
+  expect_match(result$ferx_text, "#   CMT=2: DV ~ proportional(EPS2)", fixed = TRUE)
+  expect_no_match(result$ferx_text, "combined(", fixed = TRUE)
+  # The indicators are consumed, not left dead in the parameter block.
+  expect_no_match(result$ferx_text, "W1", fixed = TRUE)
+  expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE)
+})

@@ -3120,3 +3120,95 @@ test_that("a per-CMT dispatch with a gap keeps its CMT=N keys", {
   expect_true(any(grepl("CMT=2: DV ~ ???", out$suggestion, fixed = TRUE)))
   expect_true(any(grepl("# <- Y = PERI + EPS2 * THETA3", out$suggestion, fixed = TRUE)))
 })
+
+test_that("a per-CMT gap in the LAST listed compartment is still expressible", {
+  # The "never fold a failed case into the `else`" guard is a Form C concern:
+  # per-CMT has no `else`, every entry carries its own key, so a gap in the last
+  # listed compartment is as expressible as one anywhere else. Applying the guard
+  # to both paths sent exactly this model back to the single-endpoint path, which
+  # is where the two-ERROR report and the wrong-shaped `combined()` suggestion
+  # came from.
+  #
+  # Both fixtures written for the gap put the failure FIRST, so neither could
+  # show this. The position is the whole point of this one.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "RESP",  rhs = quote(PD),      pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "RESP")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PD", "CONC", "RESP", "IPRED", "EPS1", "EPS2")
+  # CMT == 2 is seen first, so CMT == 1 is the LAST listed value -- and it is the
+  # one carrying the scaled sigma.
+  ep <- .build_endpoints(quote(IPRED * (1 + W2 * EPS2) + W1 * EPS1 * THETA3),
+                         chain, c("EPS1", "EPS2"), aux, c("CENT", "PD"))
+  expect_equal(unlist(lapply(ep$cases[1:2], function(c) c$value)), c(2, 1))
+  expect_true(is.na(ep$cases[[2]]$type))
+
+  out <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_false(is.null(out$suggestion))
+  expect_equal(out$readout$kind, "per_cmt")
+  expect_true(any(grepl("CMT=1: DV ~ ???", out$suggestion, fixed = TRUE)))
+  expect_true(any(grepl("CMT=2: DV ~ proportional(EPS2)", out$suggestion, fixed = TRUE)))
+
+  # Form C keeps the guard: there the last branch becomes the bare `else`, which
+  # takes no condition, so a gap placed there could not name its endpoint.
+  ep$col <- "FLAG"
+  for (i in seq_along(ep$cases)) ep$cases[[i]]$why <-
+    sub("CMT", "FLAG", ep$cases[[i]]$why %||% NA_character_)
+  ep$cases[[1]]$why <- NULL
+  ep$cases[[3]]$why <- NULL
+  out_c <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_null(out_c$suggestion)
+  expect_match(out_c$why, "FLAG == 1", fixed = TRUE)
+})
+
+test_that("every failing endpoint is reported, not only the first", {
+  # Two gaps in the file and one named in the console is a reader filling in the
+  # branch they were told about and being surprised by the other.
+  chain <- list(
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 2L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 3L),
+    list(kind = "assign", lhs = "W3", rhs = 1, pos = 4L),
+    cnd("FLAG == 1", c("W1", "1"), c("W3", "0")),
+    cnd("FLAG == 2", c("W2", "1"), c("W3", "0")))
+  aux <- c("CENT", "IPRED", "EPS1", "EPS2")
+  # FLAG 1 and 2 both scale their sigma; the fall-through keeps a clean EPS1.
+  ep <- .build_endpoints(
+    quote(IPRED + W1 * EPS1 * THETA3 + W2 * EPS2 * THETA3 + W3 * EPS1),
+    chain, c("EPS1", "EPS2"), aux, "CENT")
+  out <- .assemble_endpoints(ep, "CENT")
+  expect_length(out$why, 2L)
+  expect_match(out$why[[1]], "FLAG == 1", fixed = TRUE)
+  expect_match(out$why[[2]], "FLAG == 2", fixed = TRUE)
+  expect_equal(sum(grepl("DV ~ ???", out$suggestion, fixed = TRUE)), 2L)
+})
+
+test_that("every failing endpoint is reported on the per-CMT path too", {
+  # The per-CMT and Form C returns are separate call sites with the same
+  # expression in them, so one test cannot guard both -- reverting only the
+  # per-CMT one left the suite green.
+  chain <- list(
+    list(kind = "assign", lhs = "CONC",  rhs = quote(CENT/VC), pos = 1L),
+    list(kind = "assign", lhs = "RESP",  rhs = quote(PD),      pos = 2L),
+    list(kind = "assign", lhs = "IPRED", rhs = quote(CONC),    pos = 3L),
+    cnd("CMT == 2", c("IPRED", "RESP")),
+    list(kind = "assign", lhs = "W1", rhs = 0, pos = 5L),
+    list(kind = "assign", lhs = "W2", rhs = 0, pos = 6L),
+    cnd("CMT == 1", c("W1", "1")),
+    cnd("CMT == 2", c("W2", "1")))
+  aux <- c("CENT", "PD", "CONC", "RESP", "IPRED", "EPS1", "EPS2")
+  # BOTH endpoints scale their sigma.
+  ep <- .build_endpoints(
+    quote(IPRED + W1 * EPS1 * THETA3 + W2 * EPS2 * THETA3),
+    chain, c("EPS1", "EPS2"), aux, c("CENT", "PD"))
+  out <- .assemble_endpoints(ep, c("CENT", "PD"))
+  expect_length(out$why, 2L)
+  expect_true(any(grepl("CMT == 2", out$why, fixed = TRUE)))
+  expect_true(any(grepl("CMT == 1", out$why, fixed = TRUE)))
+  expect_equal(sum(grepl("DV ~ ???", out$suggestion, fixed = TRUE)), 2L)
+})

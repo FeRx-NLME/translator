@@ -2760,6 +2760,9 @@ bound_name <- function(entries, raw) {
         # touched rather than the one at fault.
         readout          <- out$readout
         error_suggestion <- out$suggestion
+        # One ERROR per failing endpoint. `out$why` is a vector: more than one
+        # endpoint can fail, and reporting only the first left the file carrying
+        # two `???` gaps while the console named one.
         warnings         <- c(warnings, out$warnings, paste0(
           "ERROR | the $ERROR block dispatches on ", ep$col, ", but ", out$why,
           ". The [scaling] readout is emitted; the [error_model] is left as a ",
@@ -3508,7 +3511,14 @@ bound_name <- function(entries, raw) {
     # The branch folded into the `else` must be one that classified. Folding a
     # FAILED case there would put the gap where ferx allows no condition, and
     # the suggestion could not say which endpoint it belonged to.
-    if (any(partial) && partial[length(partial)])
+    #
+    # Form C ONLY. A per-CMT block has no `else` -- every entry carries its own
+    # `CMT=N` key -- so a gap in the last listed compartment is as expressible as
+    # a gap anywhere else. Applying this to both paths sent exactly that model
+    # back to the single-endpoint path, which is where the two-ERROR report and
+    # the wrong-shaped `combined()` suggestion came from. Both of the tests
+    # written for the gap put the failure FIRST, so neither could show it.
+    if (!per_cmt && any(partial) && partial[length(partial)])
       return(list(why = listed[[length(listed)]]$why))
     warnings <- c(warnings, paste0(
       "INFO  | outside ", ep$col, " in {",
@@ -3554,7 +3564,7 @@ bound_name <- function(entries, raw) {
                  list(cmt = i, expr = .expr_text(c$pred)), idx, src))
     if (any(partial))
       return(list(readout = readout, warnings = warnings,
-                  why = listed[partial][[1]]$why,
+                  why = vapply(listed[partial], function(c) c$why, ""),
                   suggestion = .dispatch_suggestion(
                     ep$col, Map(function(i, c) c(c, list(key = paste0("CMT=", i))),
                                 idx, src))))
@@ -3577,7 +3587,7 @@ bound_name <- function(entries, raw) {
            rev(seq_len(length(emitted) - 1L)), preds[[length(emitted)]]))
   if (any(partial))
     return(list(readout = readout, warnings = warnings,
-                why = listed[partial][[1]]$why,
+                why = vapply(listed[partial], function(c) c$why, ""),
                 suggestion = .dispatch_suggestion(
                   ep$col, lapply(seq_along(emitted), function(i)
                     c(emitted[[i]],
