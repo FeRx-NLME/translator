@@ -10,6 +10,7 @@
 #   1cpt_oral.ctl           : TVCL=0.134, TVV=8.1, TVKA=1.0 (theta initials)
 #   2cpt_iv.ctl             : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
 #   pk_1cmt_oral_ampsim.ctl : KA=0.0825, CL=2.676, V=1.588 (amp.sim NONMEM reference)
+#   cmt_order_gap.ctl       : TVCL=3.0, TVV=50.0, TVKA=1.2 (theta initials)
 
 library(ferxtranslate)
 library(ferx)
@@ -60,7 +61,11 @@ set_line <- function(txt, pattern, replacement, what) {
 # yields zero simulated rows. The placeholder does not reach the output: DV is
 # overwritten with the simulated value on observation rows and restored to "."
 # on dose rows by simulate_dataset() below.
-nm_template <- function(n_subj, dose, cmt, obs_times) {
+# `obs_cmt` defaults to the dose compartment, which is right for a model dosed
+# and observed in the same place. It is separate for a model that is not -- and
+# for issue #25's fixture the two MUST differ, because the dose compartment is
+# the thing under test: CMT=1 has to mean $MODEL compartment 1.
+nm_template <- function(n_subj, dose, cmt, obs_times, obs_cmt = cmt) {
   rows <- vector("list", n_subj * (length(obs_times) + 1))
   i <- 1L
   for (id in seq_len(n_subj)) {
@@ -69,7 +74,7 @@ nm_template <- function(n_subj, dose, cmt, obs_times) {
     i <- i + 1L
     for (t in obs_times) {
       rows[[i]] <- data.frame(ID=id, TIME=t, DV=0, EVID=0L, AMT=".",
-                              CMT=cmt, MDV=0L)
+                              CMT=obs_cmt, MDV=0L)
       i <- i + 1L
     }
   }
@@ -161,6 +166,23 @@ simulate_dataset(
   nm_template(50, dose = 4.0, cmt = 1L,
               obs_times = c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 16, 24)),
   seed = 321L, out_path = "inst/testdata/ode_1cpt_oral_concordance.csv")
+
+# ---- compartment numbering: $MODEL COMP order vs d/dt order (issue #25) -----
+# The dose compartment IS the test. cmt_order_gap.ctl declares DUMMY as $MODEL
+# compartment 2 with no DADT, so nonmem2rx materialises it as `d/dt(DUMMY) = 0`
+# and places it first -- d/dt order [DUMMY, DEPOT, CENTRAL] against COMP order
+# [DEPOT, DUMMY, CENTRAL]. ferx numbers compartments by position in
+# `states=[...]`, so before the renumbering this dataset's CMT=1 dose landed in
+# DUMMY, whose derivative is zero, and every IPRED came back 0.0.
+#
+# Dose CMT=1 (DEPOT) and observation CMT=3 (CENTRAL) are the SOURCE's numbers,
+# which is the whole point: the dataset is a NONMEM dataset and must not be
+# rewritten to suit the translation.
+simulate_dataset(
+  translate_tmp("cmt_order_gap.ctl"),
+  nm_template(40, dose = 100.0, cmt = 1L, obs_cmt = 3L,
+              obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 36, 48)),
+  seed = 425L, out_path = "inst/testdata/cmt_order_gap_concordance.csv")
 
 # ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
 # Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column

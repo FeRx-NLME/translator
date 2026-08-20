@@ -2,6 +2,30 @@
 
 ## Breaking changes
 
+* `ode(states=[...])` is now emitted in `$MODEL` COMP order rather than `$DES`
+  statement order (issue #25). ferx numbers compartments by their POSITION in
+  that list -- measured on 0.3.0, a dose row's `CMT` is applied as
+  `u[CMT - 1] += F*AMT` straight into the state vector -- while NONMEM numbers
+  by `$MODEL`. nonmem2rx hands back `$DES` order, which is neither, so a source
+  whose two orders differ produced a file that read its own dataset's `CMT`
+  column against the wrong numbering: the dose landed in the wrong compartment
+  and `[scaling] obs_scale` bound to another compartment's variable, both
+  silently, in a file that validated clean.
+
+  The two orders differ for a reordered `$DES` and, more commonly, for any
+  `$MODEL` compartment declared without a `DADT` -- nonmem2rx materialises that
+  one as `d/dt(X) = 0` and places it first. Measured on such a model: every
+  prediction came back exactly 0.0, because the dose entered a compartment whose
+  derivative is zero. No bundled model's output changes, and the `[odes]`
+  statement list is deliberately NOT reordered -- ferx has no use-before-def
+  check, so moving a `d/dt` line above an intermediate it reads would silently
+  read a stale slot.
+
+  Renumbering is announced at `INFO`. When the two lists cannot be matched by
+  name -- a `$MODEL` compartment nonmem2rx dropped, say -- nothing is
+  reordered and an `ERROR` plus a `result$unsupported` entry says the numbering
+  could not be reconciled.
+
 * A model that identifies no observed compartment now reports an `ERROR` and a
   `result$unsupported` entry rather than a `WARN` (issue #6, phase 6c). The
   guess itself is unchanged -- the last declared state -- but it is declaration

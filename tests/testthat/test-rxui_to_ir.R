@@ -3225,3 +3225,80 @@ test_that("every failing endpoint is reported on the per-CMT path too", {
   expect_true(any(grepl("CMT == 1", out$why, fixed = TRUE)))
   expect_equal(sum(grepl("DV ~ ???", out$suggestion, fixed = TRUE)), 2L)
 })
+
+# -- issue #25: NONMEM compartment numbering --------------------------------
+
+test_that(".nm_cmt_order permutes the state list into $MODEL COMP order", {
+  # The whole point: ferx numbers compartments by position in `states=[...]`,
+  # NONMEM by $MODEL COMP order, and nonmem2rx hands back $DES order.
+  expect_equal(
+    .nm_cmt_order(state_raw   = c("CENTRAL", "DEPOT"),
+                  state_names = c("CENTRAL", "DEPOT"),
+                  comps       = c("DEPOT", "CENTRAL")),
+    c("DEPOT", "CENTRAL"))
+})
+
+test_that(".nm_cmt_order leaves an order that already agrees alone", {
+  # Must be identical(), not merely equal: the caller decides whether to announce
+  # a renumbering by comparing against the input, so a spurious attribute or a
+  # name carried through here would produce an INFO about a change that did not
+  # happen. unname() in the helper is what makes this hold.
+  st <- c("DEPOT", "CENTRAL")
+  expect_identical(.nm_cmt_order(st, st, c("DEPOT", "CENTRAL")), st)
+})
+
+test_that(".nm_cmt_order matches raw names but returns sanitised ones", {
+  # The trap this guards: matching is done on RAW d/dt names because that is what
+  # .same_cmt_name() compares against a $MODEL COMP name -- it strips a leading
+  # `c.` from one side only, so `c.RTOT` vs its own sanitised form `c_RTOT`
+  # compares FALSE. Match on raw, apply by index. Mixing the two lists up
+  # reorders garbage and still returns a character vector of the right length.
+  expect_equal(
+    .nm_cmt_order(state_raw   = c("CENT", "c.RTOT"),
+                  state_names = c("CENT", "c_RTOT"),
+                  comps       = c("RTOT", "CENT")),
+    c("c_RTOT", "CENT"))
+})
+
+test_that(".nm_cmt_order declines rather than guessing a partial permutation", {
+  st <- c("DEPOT", "CENTRAL")
+  # No COMP list at all -- a non-NONMEM source. d/dt order is all there is, and
+  # it is correct there, because those languages have no separate numbering.
+  expect_null(.nm_cmt_order(st, st, NULL))
+  expect_null(.nm_cmt_order(st, st, character()))
+  # A $MODEL compartment nonmem2rx dropped: 3 declared, 2 states (issue #26).
+  # Note this one is ALSO caught by the per-COMP check below (DUMMY matches no
+  # state), so it does not on its own show the length guard doing anything.
+  expect_null(.nm_cmt_order(st, st, c("DEPOT", "CENTRAL", "DUMMY")))
+  # This one does, and nothing else catches it. A repeated COMP name gives
+  # perm = c(1, 2, 1): every COMP finds exactly one state, so the per-COMP check
+  # passes, and setequal() ignores duplicates so the bijection check passes too.
+  # Without the length guard the helper returns a THREE-element state list for a
+  # two-state model -- a longer states=[...] than the model has compartments.
+  # Verified by mutation: removing the guard makes only this line fail.
+  expect_null(.nm_cmt_order(st, st, c("DEPOT", "CENTRAL", "DEPOT")))
+  # A COMP that matches no state.
+  expect_null(.nm_cmt_order(st, st, c("DEPOT", "PERIPH")))
+  # A state no COMP claims -- caught by the bijection check, not the per-COMP
+  # one: every COMP below finds exactly one state, and DEPOT is still orphaned.
+  expect_null(.nm_cmt_order(st, st, c("CENTRAL", "CENTRAL")))
+})
+
+test_that(".nm_cmt_order declines when two COMP names normalise alike", {
+  # `.same_cmt_name()` folds case and illegal characters, so `C-ENT` and `C.ENT`
+  # are the same string to it. The ordinal they would share is ambiguous, and
+  # picking one is exactly the guessing this exists to remove.
+  expect_null(.nm_cmt_order(state_raw   = c("C.ENT", "C-ENT"),
+                            state_names = c("C_ENT", "C_ENT2"),
+                            comps       = c("C.ENT", "C-ENT")))
+})
+
+test_that(".cmt_index resolves a compartment name case-insensitively", {
+  # Kept as its own function so neither call site drifts into a bare match(),
+  # which would be silently case-sensitive against a lowercased nonmem2rx name.
+  expect_equal(.cmt_index("central", c("DEPOT", "CENTRAL")), 2L)
+  expect_equal(.cmt_index("DEPOT",   c("DEPOT", "CENTRAL")), 1L)
+  expect_true(is.na(.cmt_index("PERIPH", c("DEPOT", "CENTRAL"))))
+  expect_true(is.na(.cmt_index("DEPOT", NULL)))
+  expect_true(is.na(.cmt_index(NA_character_, c("DEPOT"))))
+})

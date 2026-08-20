@@ -504,6 +504,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   obs_cmt_num <- NA_integer_
   if (identical(structural$type, "ode")) {
     state_names <- .ode_states(expr_out$odes)
+    # NONMEM's compartment numbering, when it can be recovered from $MODEL.
+    # Everything below that yields a compartment NUMBER resolves against this
+    # list, and it is what reaches `states=[...]` -- so the source's own CMT
+    # values go on selecting the compartments the source meant. NULL means it
+    # could not be recovered and d/dt order stands; the name cross-checks in
+    # tiers 2 and 3 are what guard that case.
+    cmt_order   <- .nm_cmt_order(state_raw, state_names,
+                                 if (!is.null(obs_hint)) obs_hint$comps else NULL)
     obs_cmt     <- NULL
 
     # WHICH COMPARTMENT IS OBSERVED, in order of authority.
@@ -528,7 +536,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (length(explicit) == 1L) {
       obs_cmt     <- if (explicit %in% names(state_decl)) state_decl[[explicit]]
                      else                                 explicit
-      obs_cmt_num <- match(explicit, state_raw)
+      # A NONMEM compartment number, not a d/dt position. `scaling_hint` is keyed
+      # by S<n>, so matching into state_raw handed it a position and it read the
+      # wrong compartment's scale variable whenever the two orders differed.
+      # NA when the numbering could not be recovered -- the [scaling] lookup
+      # below then falls back to a name match, as it did before.
+      obs_cmt_num <- if (is.null(cmt_order)) NA_integer_
+                     else .cmt_index(obs_cmt, cmt_order)
       # Say so when the source contradicts itself, rather than picking silently.
       if (!is.null(obs_hint) && is.character(obs_hint$name) &&
           !is.na(obs_hint$name) &&
@@ -556,7 +570,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # $MODEL COMP ordinal and state_names is d/dt order. Silently observing
       # the wrong compartment is the failure this exists to remove, so a
       # disagreement refuses the hint rather than believing it.
-      if (.same_cmt_name(state_raw[obs_hint$index], obs_hint$name)) {
+      if (!is.null(cmt_order)) {
+        # The numbering was recovered, so the DEFOBS ordinal indexes it directly
+        # and there is no disagreement left to report: `states=[...]` IS $MODEL
+        # COMP order. The cross-check below is what runs when it was not, and
+        # its warning would be false here -- it would describe a conflict the
+        # emitted file does not have.
+        obs_cmt     <- cmt_order[[obs_hint$index]]
+        obs_cmt_num <- obs_hint$index
+      } else if (.same_cmt_name(state_raw[obs_hint$index], obs_hint$name)) {
         obs_cmt     <- state_names[[obs_hint$index]]
         obs_cmt_num <- obs_hint$index
       } else {
@@ -602,9 +624,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # Measured, that took DEPOT, announced it as the scaled compartment, and
       # attached obs_scale to it -- validating clean and predicting the depot
       # amount over V.
+      # Skipped entirely once the numbering is recovered: S<n> then indexes
+      # cmt_order, which IS $MODEL COMP order, so there is nothing to reconcile.
       comps <- if (!is.null(obs_hint)) obs_hint$comps else NULL
-      if (ok && (is.null(comps) || length(comps) < s_idx ||
-                 !.same_cmt_name(state_raw[s_idx], comps[s_idx]))) {
+      if (ok && is.null(cmt_order) &&
+          (is.null(comps) || length(comps) < s_idx ||
+           !.same_cmt_name(state_raw[s_idx], comps[s_idx]))) {
         ok <- FALSE
         # Only worth saying when there was something to check and it failed;
         # a caller passing scaling_hint without obs_hint gets no COMP list and
@@ -619,7 +644,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
             "[structural_model]."))
       }
       if (ok) {
-        obs_cmt     <- state_names[[s_idx]]
+        obs_cmt     <- if (is.null(cmt_order)) state_names[[s_idx]]
+                       else                    cmt_order[[s_idx]]
         obs_cmt_num <- s_idx
         warn <- c(warn, paste0(
           "INFO  | no DV compartment and no $MODEL DEFOBS, so the observed ",
@@ -674,13 +700,44 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
           obs_cmt, "' from declaration order"))
       }
     }
-    structural$states  <- state_names
+    # `states=[...]` sets ferx's compartment numbering, so this is the line the
+    # dose depends on -- see .nm_cmt_order().
+    structural$states <- if (is.null(cmt_order)) state_names else cmt_order
+    if (!is.null(cmt_order) && !identical(cmt_order, state_names))
+      warn <- c(warn, paste0(
+        "INFO  | the state list was put in $MODEL compartment order (",
+        paste(cmt_order, collapse = ", "), ") rather than $DES statement order (",
+        paste(state_names, collapse = ", "), "), so the source's CMT values ",
+        "still select the compartments it meant. The [odes] block keeps source ",
+        "order."))
+    # Known to disagree and not reconcilable: say so. ferx will read the data's
+    # CMT column against a numbering that is not the source's, which is silent
+    # in the numbers -- a dose can land in the wrong compartment entirely.
+    if (is.null(cmt_order) && !is.null(obs_hint) && length(obs_hint$comps) > 0L &&
+        !all(vapply(seq_along(state_raw), function(i)
+               i <= length(obs_hint$comps) &&
+               .same_cmt_name(state_raw[i], obs_hint$comps[i]), TRUE))) {
+      warn <- c(warn, paste0(
+        "ERROR | $MODEL numbers the compartments (",
+        paste(obs_hint$comps, collapse = ", "), ") differently from the ",
+        "differential equations (", paste(state_names, collapse = ", "),
+        "), and the two could not be reconciled by name. ferx numbers ",
+        "compartments by their position in states=[...], so a CMT column ",
+        "written for the source may select different compartments here -- ",
+        "including the dose. Check states=[] against $MODEL before fitting."))
+      unsp <- c(unsp, paste0(
+        "compartment numbering could not be reconciled with $MODEL -- ",
+        "states=[", paste(state_names, collapse = ", "), "] is $DES order, ",
+        "$MODEL declares [", paste(obs_hint$comps, collapse = ", "), "]"))
+    }
     structural$obs_cmt <- obs_cmt
   }
 
   scaling <- list()
   if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
-    state_names_uc <- toupper(.ode_states(expr_out$odes))
+    # structural$states, NOT .ode_states(): the former is $MODEL COMP order when
+    # that was recoverable, and this index is used as a NONMEM compartment number.
+    state_names_uc <- toupper(structural$states)
     # Prefer the NONMEM compartment NUMBER when $MODEL gave us one. `S2 = V` is
     # keyed by compartment number, so resolving the number by looking the guessed
     # name back up in the state list just re-derives the guess -- and picked the
@@ -1563,6 +1620,70 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   if (length(state_nm) != 1L || is.na(state_nm)) return(FALSE)
   norm <- function(x) toupper(.ferx_ident(sub("^c[.]", "", x)))
   identical(norm(state_nm), norm(model_nm))
+}
+
+# The emitted state list, permuted into $MODEL COMP order -- i.e. into NONMEM's
+# compartment NUMBERING -- or NULL when that permutation cannot be trusted.
+#
+# ferx numbers compartments by POSITION in `states=[...]`: measured on 0.3.0, a
+# dose row's CMT is applied as `u[CMT - 1] += F*AMT` straight into the state
+# vector, and two files identical but for state order put the same dose in
+# different compartments. NONMEM numbers by $MODEL COMP order. nonmem2rx hands
+# back d/dt statement order, which is neither by construction -- it matches COMP
+# order only by coincidence, and the coincidence breaks on a reordered $DES and
+# on any $MODEL compartment that has no DADT (nonmem2rx materialises that one as
+# `d/dt(X) = 0` and places it FIRST). Measured on the latter: the dose lands in a
+# compartment whose derivative is zero and every prediction comes back 0.0, with
+# a file that validates clean.
+#
+# Only `states=[...]` is permuted, never the [odes] statement list. Measured:
+# reordering `states=[...]` alone reproduces the correct predictions exactly and
+# validates with zero diagnostics, while [odes] order carries a correctness
+# property of its own -- see .emit_odes_section(), an intermediate below the d/dt
+# line that reads it is legal ferx and silently reads a stale slot. Reordering
+# the block would trade this defect for that one.
+#
+# `state_raw` and `state_names` are index-aligned (raw name and its sanitised
+# form at the same position); matching is done on RAW names, because that is what
+# .same_cmt_name() compares against a $MODEL COMP name. It does NOT relate a raw
+# name to its own sanitised form -- `c.RTOT` vs `c_RTOT` compares FALSE, since it
+# strips the `c.` prefix from one side only. Match on raw, apply by index.
+#
+# Returns NULL rather than a partial answer whenever the mapping is not a
+# bijection: no COMP list at all (a non-NONMEM source), differing lengths (a
+# $MODEL compartment nonmem2rx dropped -- see issue #26), a COMP matching no
+# state or more than one, or a state no COMP claims. Declining leaves d/dt order
+# in place, which is the status quo and is what the phase 6c cross-checks below
+# are still there to guard. A guessed permutation would be the same class of
+# defect this removes.
+# A compartment NAME's 1-based number in an ordered compartment list.
+#
+# Case-insensitive, because the list is sanitised state names and the caller's
+# name may have come from either side of that. Kept as its own function so the
+# two call sites cannot drift into a bare match(), which would be silently
+# case-sensitive.
+.cmt_index <- function(name, order) {
+  if (is.null(order) || length(name) != 1L || is.na(name)) return(NA_integer_)
+  hit <- which(toupper(order) == toupper(name))
+  if (length(hit) == 0L) NA_integer_ else hit[1L]
+}
+
+.nm_cmt_order <- function(state_raw, state_names, comps) {
+  if (is.null(comps) || length(comps) == 0L) return(NULL)
+  if (length(comps) != length(state_raw))    return(NULL)
+  if (length(state_raw) != length(state_names)) return(NULL)
+  perm <- integer(length(comps))
+  for (i in seq_along(comps)) {
+    hit <- which(vapply(state_raw, .same_cmt_name, TRUE, model_nm = comps[i]))
+    # 0 hits: $MODEL names a compartment the ODEs do not. >1: two COMP names
+    # normalise to the same string, so the ordinal they share is ambiguous.
+    if (length(hit) != 1L) return(NULL)
+    perm[i] <- hit
+  }
+  # Every state claimed exactly once. Guards a COMP list that maps two entries
+  # onto one state, which the per-COMP check above cannot see on its own.
+  if (!setequal(perm, seq_along(state_raw))) return(NULL)
+  unname(state_names[perm])
 }
 
 # nonmem2rx does not inline the value of an f()/alag()/init assignment -- it
