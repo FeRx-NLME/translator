@@ -2990,12 +2990,14 @@ bound_name <- function(entries, raw) {
   if (length(eps) == 0)
     return(undetermined("it references no sigma"))
 
-  # Probe points for the identity test. Kept away from 0 and 1 so a coefficient
-  # of `1` cannot be confused with a symbol that happens to equal 1, and positive
+  # Probe VALUES for the identity test: away from 0 and 1, so a coefficient of
+  # `1` cannot be confused with a symbol that happens to equal 1, and positive,
   # so a `sqrt`/`log` in the readout stays in domain.
-  # Bind the symbols VERBATIM. Uppercasing them here bound `CENTRAL` while the
-  # expression reads `central`, so every probe evaluated to NA and every model
-  # came out undetermined -- including the ones the whole suite covers.
+  #
+  # Probe NAMES are bound verbatim, NOT uppercased. Uppercasing them bound
+  # `CENTRAL` while the expression read `central`, so every probe evaluated to NA
+  # and every model came out undetermined -- including the ones the whole suite
+  # covers.
   free <- setdiff(all.vars(rhs_expr), eps)
   probes <- lapply(list(c(1.7, 0.37), c(2.3, 0.53), c(0.61, 0.29)), function(ab)
     if (!length(free)) list()
