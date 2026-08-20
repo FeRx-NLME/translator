@@ -17,8 +17,11 @@
 
   `9c97c13` is ferx-r main rather than a tag, because both READMEs install with
   `pak::pak("FeRx-NLME/ferx-r")`, which takes the default branch. Its DESCRIPTION
-  still reads 0.3.0 despite the parser change, so identify this engine by SHA and
-  not by version. No re-baseline of the concordance reference omegas or the
+  still reads 0.3.0 -- as it has for ten commits past the `v0.3.0` tag, while
+  ferx-r's own NEWS heading reads `0.3.0.9000` -- so identify this engine by SHA
+  and not by version. The stale version is upstream breakage this pin did not
+  cause (ferx-r#296); what changed here is that it became consequential, this
+  being the first breaking parser change to ride under a released version number. No re-baseline of the concordance reference omegas or the
   bundled datasets was needed.
 
   `engine-pin-drift.yml` now compares the pin against ferx-r's **main HEAD**

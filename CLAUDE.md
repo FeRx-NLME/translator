@@ -297,10 +297,21 @@ shipped, so every green engine job proved only that a build nobody runs accepted
 the output; and pinning the `v0.3.0` tag today would do the same thing again,
 because ferx-r main has moved past it.
 
-Do not identify the pinned engine by its version string. `9c97c13` still reports
-0.3.0 in DESCRIPTION even though ferx-core's parser changed underneath it
-(`E_DOSE_ATTR_DOUBLE_USE`, ferx-core#993/#1003), so "ferx 0.3.0" names two
-different engines. Cite the ferx-r SHA.
+Do not identify the pinned engine by its version string, and note this is upstream
+breakage rather than something the pin introduced. ferx-r's DESCRIPTION has read
+`0.3.0` for ten commits past the `v0.3.0` tag while its own NEWS heading reads
+`0.3.0.9000` - the two disagree and have since before any of this. What `9c97c13`
+changed is that it made the collision CONSEQUENTIAL: it is the first breaking
+parser change to ride under a released version number
+(`E_DOSE_ATTR_DOUBLE_USE`, ferx-core#993/#1003), so "ferx 0.3.0" now names two
+engines that disagree about what parses. Cite the ferx-r SHA. Tracked upstream as
+ferx-r#296; if that lands, something human-readable may become citable again.
+
+While reading tags here, note that ferx-r's are ANNOTATED: `v0.3.0` the tag object
+is `1f60558b`, and the commit it points to is `7889719`. Dereference with
+`^{commit}` or the `repos/:owner/:repo/commits/:ref` endpoint; the `git/ref`
+endpoint hands back the tag object's own SHA, which is not a commit and has no
+`Cargo.lock` to read.
 
 The pin is TRANSITIVE and reading only ferx-r's `Cargo.toml` will mislead you:
 it takes ferx-core as `branch = "main"`, which looks unpinned, while the
