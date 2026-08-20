@@ -2,6 +2,23 @@
 
 ## Breaking changes
 
+* The `sigma` declarations in `[parameters]` are now emitted in the order the
+  `[error_model]` consumes them, rather than in `$SIGMA` order. ferx binds a
+  single-endpoint error model's sigmas POSITIONALLY from the declaration order
+  and discards the names written in `DV ~ combined(A, B)`, so a `$ERROR` that
+  writes its additive term first -- `Y = F + EPS(1) + F*EPS(2)` -- previously
+  produced a file in which the additive SD was applied proportionally and vice
+  versa, with no diagnostic. Only models declaring more than one sigma are
+  affected; the emitted output of every bundled model is unchanged.
+
+* An error expression that cannot be translated no longer produces a guessed
+  `proportional` model. `emit_ferx()` omits the `[error_model]` block entirely
+  and writes a commented-out suggestion in its place, so the engine rejects the
+  file (`E_MISSING_BLOCK`) and `to_ferx(strict = TRUE)` aborts. Previously this
+  was a `WARN` on a file that fit and returned numbers. `ferx_ir` gains an
+  `error_suggestion` field carrying those comment lines.
+
+
 * Thetas whose name matches an individual parameter are now renamed
   (`theta CL` becomes `theta TVCL`, with `CL = TVCL * exp(ETA_CL)` unchanged).
   In ferx a theta silently shadows an identically named individual parameter in
@@ -19,6 +36,16 @@
   the check.
 
 ## New features
+
+* NONMEM `$ERROR` expressions are classified by STRUCTURE rather than by counting
+  epsilons (issue #6, defects 10 and 11). The coefficient of each epsilon decides
+  its role, so `Y = F + F*EPS(1)` is now proportional rather than additive, and a
+  two-sigma model is emitted as `combined(proportional, additive)` whichever
+  order the source wrote them in. Expressions with no single ferx equivalent --
+  indicator-weighted multi-endpoint errors, exponential error, a scaled sigma --
+  are reported with the offending coefficient named, instead of being reduced to
+  a confident guess.
+
 
 * `ferx_ir`'s `indiv_params` and `odes` are now ordered STATEMENT lists rather
   than flat assignment lists, and `emit_ferx()` renders them. A statement

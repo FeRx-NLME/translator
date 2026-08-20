@@ -33,7 +33,8 @@ emit_ferx <- function(ir) {
     if (length(ir$structural)    > 0) .emit_structural_section(ir),
     if (length(ir$odes)          > 0) .emit_odes_section(ir),
     if (length(ir$diffusion)     > 0) .emit_diffusion_section(ir),
-    if (length(ir$error_model)   > 0) .emit_error_model_section(ir),
+    if (length(ir$error_model)   > 0) .emit_error_model_section(ir)
+    else if (length(ir$error_suggestion) > 0) paste(ir$error_suggestion, collapse = "\n"),
     if (!is.null(ir$scaling$obs_scale)) .emit_scaling_section(ir),
     if (length(ir$fit_options)   > 0) .emit_fit_options_section(ir)
   )

@@ -48,6 +48,11 @@
 #' @param error_model List of error model entries. Each element is a list
 #'   with `dv` (character), `type` (`"proportional"`, `"additive"`, or
 #'   `"combined"`), and `params` (character vector of parameter names).
+#' @param error_suggestion Character vector of comment lines rendered where the
+#'   `[error_model]` block would have gone, when the source error expression
+#'   could not be translated. The block itself is omitted so the engine rejects
+#'   the file rather than accepting a guess; these lines carry the source
+#'   expression and a plausible reading the user can uncomment after checking it.
 #' @param scaling List with `obs_scale` (numeric or `NULL`).
 #' @param fit_options List with named elements such as `method`, `maxiter`,
 #'   `covariance`, and (when IOV is present) `iov_column`.
@@ -90,6 +95,7 @@ new_ferx_ir <- function(
   initial_conditions = list(),
   diffusion     = list(),
   error_model   = list(),
+  error_suggestion = character(),
   scaling       = list(),
   fit_options   = list(),
   warnings      = character(),
@@ -110,6 +116,7 @@ new_ferx_ir <- function(
       initial_conditions = initial_conditions,
       diffusion     = diffusion,
       error_model   = error_model,
+      error_suggestion = error_suggestion,
       scaling       = scaling,
       fit_options   = fit_options,
       warnings      = warnings,
@@ -200,6 +207,21 @@ validate_ferx_ir <- function(ir) {
       cli::cli_abort(
         "structural$pk_args must be a named list when structural$type is {.val pk_macro}."
       )
+  }
+
+  # Every error_suggestion line must be a comment. The suggestion is a plausible
+  # reading of an error expression we could NOT translate, printed where the
+  # block would have gone; one uncommented line makes the engine parse a guess as
+  # though it were the translation, which is the exact failure this field exists
+  # to avoid. Checked here rather than left to the emitter because the emitter
+  # joins the lines verbatim and cannot tell the difference.
+  if (length(ir$error_suggestion) > 0) {
+    bad <- ir$error_suggestion[!grepl("^\\s*#", ir$error_suggestion)]
+    if (length(bad) > 0)
+      cli::cli_abort(c(
+        "error_suggestion must contain only comment lines.",
+        x = "Not a comment: {.val {bad[1]}}"
+      ))
   }
 
   invisible(ir)

@@ -1063,6 +1063,256 @@ those; never reference an ODE intermediate (5.4).
 plus an `unsupported` entry, which phase 1 then blocks on. A guess that looks
 like a translation is the failure mode this whole issue is about.
 
+#### Phase 6 measurement pass (done before implementation)
+
+Taken against ferx 0.3.0 (the shipped version) on 2026-08-20, after phases 5a
+and 5b landed. Every variant below **validates**, so validation proved nothing
+and each claim is settled numerically instead -- a `maxiter = 0` fit, comparing
+`PRED` (eta-free, so comparable across models whose readouts differ; `IPRED` is
+not, because a different readout changes the EBEs).
+
+**The Form C readout dispatches per row, and the test can tell right from wrong.**
+For the reporter's model:
+
+```
+[scaling]
+  y = if (FLAG == 2) c_RTOT else CENT/VC
+```
+
+| comparison | max abs diff in `PRED` |
+|---|---|
+| `FLAG==1` rows vs a model hardcoded to `y = CENT/VC` | **0** |
+| `FLAG==2` rows vs a model hardcoded to `y = c_RTOT` | **0** |
+| `FLAG==2` rows vs the `CENT/VC` model (wrong branch) | 9.98 |
+| `FLAG==1` rows vs the `c_RTOT` model (wrong branch) | 9.98 |
+
+Both arms are really evaluated and the condition really selects per observation.
+The wrong-branch rows are the control that makes the zeros mean something.
+
+**`obs_scale` and `y` together silently double-scale.** Validates clean, max
+`PRED` difference 11.37 against the same model with `obs_scale` removed. Defect
+15 confirmed: once a `y` readout is emitted, `[scaling] obs_scale` must not also
+appear.
+
+**`obs_cmt` is silently ignored once `y` is present** -- `PRED` identical to
+every digit with and without it. Harmless numerically, but it is a guess that no
+longer means anything and should be dropped, as 6c says.
+
+**`gradient = fd` is not required, contrary to the shipped example.**
+`emax_pkpd.ferx` comments that it is required for a per-CMT / Form C readout. The
+engine logs `gradient: FD  [requested: FD]` without it -- it already selects FD
+for this readout -- and forcing it moves `PRED` by 2.75e-05. Emit it or not; do
+not treat the example's comment as a constraint.
+
+**Per-CMT and covariate-selected forms agree.** On a dataset where `CMT` and
+`FLAG` are perfectly correlated, `y[CMT=n]` + `CMT=n: DV ~ ...` and
+`y = if (FLAG...)` + a covariate-selected `[error_model]` differ by 3.5e-04 (FD
+noise). Both forms are available; the decision rule in 6b is about which column
+the source dispatches on, not about which the engine prefers.
+
+**`y[...]` accepts only `CMT=N`.** `parse_scaling_key` in
+`ferx-core/src/parser/model_parser.rs` rejects any other key with
+``expected `BASE[CMT=N]` ``. There is no `y[FLAG=1]`. Dispatch on any other
+column must go through Form C plus the selector.
+
+**Covariate-selected `[error_model]` grammar** (`parse_selected_error_model`,
+issue #658):
+
+```
+[error_model]
+  if (FLAG == 2) { DV ~ proportional(EPS2) }
+  else { DV ~ proportional(EPS1) }
+```
+
+`else if` chains are allowed; a terminating bare `else { ... }` is **required**
+("so every observation maps to an error model"). Each branch body is exactly one
+`DV ~ TYPE(...)` statement. LTBS (`log(DV) ~ ...` / `log_additive`) is rejected
+inside a branch, and the whole form is rejected on SDE/`[diffusion]` models.
+Conditions are covariate-only: every bare identifier in the condition is read as
+a covariate.
+
+**ferx has an inline `if (c) a else b` *expression*,** distinct from the `[odes]`
+`if` *statement*. It is what makes the Form C readout possible, and ferx-core
+uses it in its own magnitude expressions (`combined(PROP*(if (TIME>24) T else 1),
+ADD)`, #484).
+
+**An ODE intermediate referenced from `y` is read as a covariate** -- confirming
+5.4 on 0.3.0. `y = if (FLAG == 2) RT else CT` where `CT`/`RT` are `[odes]`
+intermediates: model-only validation says **VALID**; with `data=` it is
+`E_MISSING_COVARIATE: ... not found in data (case-sensitive): CT, RT`. So 6e
+needs an engine-free check in the translator -- the analogue of
+`.emitted_ode_symbols()` for the `y` scope -- because the engine only catches it
+when a data file happens to be available.
+
+A miscased selector column behaves the same way: caught with data, silent
+without.
+
+**Defect 10 names a lever that does not exist.** The issue and section 3.10 above
+both say the emitted `combined()` arguments are transposed. Measured on ferx
+0.3.0 with `maxiter = 0`, they are not transposable at all: `combined(EPS1, EPS2)`
+and `combined(EPS2, EPS1)` fit to the same OFV to every printed digit.
+
+ferx consumes a single-endpoint error model's sigmas **positionally, from the
+declaration order**, and discards the names. `build_error_spec`
+(`ferx-core/src/parser/model_parser.rs:11328`) says so in its own comment --
+"Single-endpoint sigmas are consumed positionally from the global sigma vector" --
+validates each argument with `arg_sigma_name` and then returns
+`ErrorSpec::Single(model)`, retaining no name. The per-CMT branch twenty lines
+below does the opposite, resolving each name with `position(|s| s == nm)`. Two
+paths, opposite rules, and only the single-endpoint one is silent about it.
+
+How far it goes, declaring `EPS1 ~ 2.0 (sd)` before `EPS2 ~ 0.05 (sd)`:
+
+| model | OFV |
+|---|---|
+| `DV ~ proportional(EPS2)` | 103.217 |
+| `DV ~ proportional(EPS1)` | 103.217 |
+| `DV ~ proportional(EPS1)`, EPS1 declared alone | 103.217 |
+| `DV ~ proportional(EPS2)`, EPS2 declared alone | -41.979 |
+
+`proportional(EPS2)` uses **EPS1's value**. The name is decorative.
+
+The transposition defect 10 describes is real -- it is just caused by the order
+of the `sigma` lines, not the order of the `combined()` arguments. So the fix is
+to emit the declarations in the order the error model consumes them
+(`.order_sigmas_for_error()`), and a test written against the argument order
+would pass whether or not the bug were fixed. This is the discriminating-fixture
+rule biting at the level of the *plan* rather than the test: the fix as specified
+would have been inert, shipped green, and read as done.
+
+**The two multi-endpoint paths are immune, and the disagreement is measurable in
+both directions.** Same model, two sigmas 40x apart, `maxiter = 0`:
+
+| `[error_model]` form | swap the `sigma` DECLARATION order | swap the NAMES in `[error_model]` |
+|---|---|---|
+| single-endpoint `combined(a, b)` | **103.209 -> 36.181** | no change |
+| per-CMT `CMT=n: DV ~ ...` | no change (409.550) | **409.550 -> 3508.421** |
+| covariate-selected `if (COV...) {...}` | no change (409.549) | **409.549 -> 3508.395** |
+
+Exactly complementary: single-endpoint binds by position and ignores the names,
+the other two bind by name and ignore the position. The name-swap column is the
+control -- without it, "declaration order does not matter" would be equally
+consistent with the names being ignored too.
+
+Consequence for phase 6b: a model 6b converts to per-CMT or covariate-selected is
+immune to this by construction, and `.order_sigmas_for_error()` correctly turns
+itself off for them (it is guarded to a single-entry error model). 6b therefore
+neither needs nor fixes this. What stays exposed is every single-endpoint model,
+which is most of them -- 6a makes *our* emitted order right, but a hand-edited
+file, a hand-written model, or one from another tool has no such protection.
+
+Worth raising with ferx-core separately: accepting a sigma name, checking it
+exists, and then ignoring it is a silent-wrong-answer generator independent of
+anything this package does. The fix is on the engine side -- either bind by name
+on the single-endpoint path as the other two already do, or reject an argument
+list whose order does not match the declaration order.
+
+**Defects 10 and 11 are live on `main`, and 11 is the common case.** Measured by
+translating the reporter's model with only its `$ERROR` `Y=` line changed:
+
+| source `Y =` | correct | emitted today |
+|---|---|---|
+| `IPRED + EPS(1) + IPRED*EPS(2)` | `combined(EPS2, EPS1)` | `combined(EPS1, EPS2)` -- **transposed** |
+| `IPRED + IPRED*EPS(1)` | `proportional(EPS1)` | `additive(EPS1)` |
+
+`ErrorModel::Combined => vec![SigmaType::Proportional, SigmaType::Additive]`
+(`ferx-core/src/types.rs:1702`) is unchanged on 0.3.0, so the first row applies
+the additive SD proportionally and vice versa. The second row is
+`Y = F + F*EPS(1)`, which is arguably the most common way to write proportional
+error in NONMEM at all -- this is not an exotic spelling.
+
+**The bundled corpus cannot show either defect.** All 14 models in
+`inst/testmodels/nonmem/` write `Y = IPRED * (1 + EPS(1))` (13) or
+`Y = IPRE + ERR(1)` (1). Both are spellings the counting classifier gets right.
+So 6a moves no snapshot -- and no existing fixture can distinguish a fixed
+classifier from a broken one. New fixtures are mandatory, and each must be
+sabotage-checked, per the discriminating-fixture rule in CLAUDE.md.
+
+There is also no multi-endpoint model in the corpus (`pkpd_ir.mod` is
+single-endpoint), so 6b needs a new bundled model as well.
+
+**6f's stated mechanism does not exist.** The phase text says the fallback
+"becomes an `ERROR` plus an `unsupported` entry, which phase 1 then blocks on".
+It does not: `strict` aborts on `.report_validation()`, which is driven purely by
+*engine* rejections. `ir$unsupported` never blocks -- and merging the two is
+explicitly rejected at `translate.R:105`, because `unsupported` means "ferx
+cannot express this, wait for it" while a `$ERROR` we cannot parse means the
+opposite, "file a ferxtranslate bug". Routing 6f through `unsupported` would be
+both inert and semantically backwards.
+
+The mechanism that does work: emit no `[error_model]` at all when none can be
+derived, plus an `ERROR` warning and a `# WARNING:` comment. The engine then
+rejects the file (`Missing [error_model] block`, `model_parser.rs:1127`) and
+`strict` aborts on that. The block comes from the engine, which is where phase 1
+put it.
+
+**Two classifiers, not one.** `.classify_error_assignment()` handles the NONMEM
+`Y = ...` assignment form and is the one that counts epsilons (defects 10, 11).
+`.parse_error_rhs()` handles the nlmixr2/Monolix `~ prop()/add()` tilde form; it
+is already structural and already emits `c(prop, add)` in ferx's order. Only its
+fallback (`"complex $ERROR -- classified as proportional, verify"`) is in scope,
+as 6f. That fallback has no test.
+
+**State of the `$ERROR` block in the IR today.** Nothing is lost upstream --
+`ui$lstExpr` items 28-36 carry the whole chain. It is discarded in pass 3:
+everything transitively feeding the `Y` assignment lands in `aux_vars` and is
+skipped, and `Y` itself is reduced to a `(type, params)` pair at the moment it is
+seen. What survives, and where:
+
+| source | today | needed by 6b |
+|---|---|---|
+| `CTOT = A(1)/VC`, `RTOT = A(3)` | dropped (aux) | the two readouts |
+| `IPRED = CTOT` | dropped (aux) | the default readout |
+| `IF (FLAG.EQ.2) IPRED = RTOT` | dropped, with an `INFO` | the dispatch |
+| `W1 = 0`, `W2 = 0` | dropped by the scaffolding rule | reconstructible (an indicator no conditional sets is 0) |
+| `IF (FLAG.EQ.1) W1 = 1` | **retained**, leaking into `[individual_parameters]` | the selector |
+| `Y = IPRED*(1 + W1*EPS1 + W2*EPS2)` | collapsed to `combined(EPS1,EPS2)` | the per-endpoint error structure |
+
+So the retention work is *not* mainly about `W1`/`W2` -- those conditionals are
+already retained, in the wrong block. What is genuinely gone is the readout chain
+and the structure of `Y`.
+
+**`.inline_aux_vars()` was never actually deleted.** 5b's comment at
+`rxui_to_ir.R:2610` says it is gone; the function body is still at 2250, dead and
+uncalled. It is also close to what 6e needs -- the readout chain has to be
+inlined down to states and individual parameters, because that is all `y` can
+see. Either resurrect it under a name that says so, or delete it; leaving a
+comment that claims a deletion that did not happen is worse than either.
+
+#### Phase 6 split -- 6a then 6b
+
+Mirrors 5a/5b. 6a is a prerequisite for 6b, not merely independent: 6b derives a
+*per-endpoint* error model from the structure of `Y`, which is exactly what 6a
+builds.
+
+**PR 6a -- error-model structure (defects 10, 11, 6f).** Single-endpoint only,
+no dispatch, no readout retention. Replace the epsilon count in
+`.classify_error_assignment()` with a term-wise decomposition of the `Y` RHS:
+each term is additive (a bare `+ EPS`) or proportional (`* EPS` against the
+prediction). Emit `combined(prop, add)` in ferx's fixed order regardless of
+traversal order. Turn `.parse_error_rhs()`'s fallback guess into an `ERROR` plus
+an `unsupported` entry, which phase 1 then blocks on. Expected snapshot change:
+none. New tier-1 fixtures for the two rows of the defect table above, plus a
+tier-4 A/B that can tell transposed sigmas apart -- note that equal sigma values
+make that fixture a tautology, so they must differ clearly.
+
+**PR 6b -- endpoint dispatch (defects 5, 12, 15).** Retain the `$ERROR` readout
+chain through pass 3 instead of absorbing it into `aux_vars`. Fold the sequential
+assignments into one expression with inline `if`s. Inline down to states and
+individual parameters, with an engine-free scope check (6e). Choose the dispatch
+form by the column the source switches on: `CMT` -> `y[CMT=n]` + `CMT=n:` bodies;
+anything else -> Form C `y =` + covariate-selected `[error_model]`. Derive each
+endpoint's error model from the indicator structure. Drop `obs_scale` and
+`obs_cmt` whenever a `y` is emitted. Single-endpoint models must be byte-identical
+to today. Needs a new bundled multi-endpoint test model.
+
+**Out of scope, tracked separately.** The engine's own warning text reaches the
+emitted `.ferx` with its em-dash mangled to the literal seven characters
+`U+2014` inside a `# WARNING:` comment. Cosmetic, unrelated to this issue, and a
+separate fix.
+
+---
+
 ### Phase 7 -- `inits = c("control", "final")`
 
 `nonmem2rx(..., updateFinal = FALSE)` is the knob; its roxygen reads "Update the

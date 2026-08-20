@@ -17,6 +17,7 @@ new_ferx_ir(
   initial_conditions = list(),
   diffusion = list(),
   error_model = list(),
+  error_suggestion = character(),
   scaling = list(),
   fit_options = list(),
   warnings = character(),
@@ -80,6 +81,12 @@ rather than emitting a file the engine rejects.}
 \item{error_model}{List of error model entries. Each element is a list
 with \code{dv} (character), \code{type} (\code{"proportional"}, \code{"additive"}, or
 \code{"combined"}), and \code{params} (character vector of parameter names).}
+
+\item{error_suggestion}{Character vector of comment lines rendered where the
+\verb{[error_model]} block would have gone, when the source error expression
+could not be translated. The block itself is omitted so the engine rejects
+the file rather than accepting a guess; these lines carry the source
+expression and a plausible reading the user can uncomment after checking it.}
 
 \item{scaling}{List with \code{obs_scale} (numeric or \code{NULL}).}
 

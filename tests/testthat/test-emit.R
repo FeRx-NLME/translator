@@ -417,3 +417,26 @@ test_that("each if arm is rendered once, not once per layout decision", {
                  "  }",
                  "  d/dt(CENTRAL) = -KE * CENTRAL * X"))
 })
+
+test_that("a suggestion is not rendered alongside a real [error_model]", {
+  # Only reachable from a hand-built IR: rxui_to_ir() never populates both, so a
+  # pipeline test of this cannot fail however the emitter is written. Measured --
+  # rendering the suggestion unconditionally left the whole suite green.
+  #
+  # It matters because the suggestion says "no [error_model] is emitted". Printed
+  # above a block that IS emitted, it tells the reader the opposite of the truth.
+  ir <- new_ferx_ir(
+    source_format = "nonmem", source_file = "m.ctl",
+    thetas = list(list(name = "TVCL", init = 1, lower = 0, upper = 10)),
+    omegas = list(list(type = "diagonal", names = "ETA_CL", values = 0.09)),
+    sigmas = list(list(name = "EPS1", value = 0.04, scale = "sd")),
+    indiv_params = list(list(lhs = "CL", rhs = "TVCL * exp(ETA_CL)")),
+    structural = list(type = "pk_macro", pk_call = "one_cpt_iv",
+                      pk_args = list(cl = "CL", v = "CL")),
+    error_model = list(list(dv = "DV", type = "proportional", params = "EPS1")),
+    error_suggestion = c("# could not translate", "# [error_model]",
+                         "#   DV ~ additive(EPS1)"))
+  txt <- emit_ferx(ir)
+  expect_match(txt, "\\[error_model\\]\n  DV ~ proportional\\(EPS1\\)")
+  expect_no_match(txt, "could not translate")
+})
