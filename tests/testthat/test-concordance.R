@@ -261,6 +261,67 @@ test_that("ODE 1-cpt oral with S2=V: structural thetas recover within 15% of tru
   expect_gt(abs(om[["ETA_CL"]] / start_cl - 1), 0.20, label = "omega ETA_CL moved")
 })
 
+test_that("issue #25: the dose reaches the right compartment when $MODEL and d/dt order differ", {
+  # The only tier that can catch this. cmt_order_gap.ctl declares DUMMY as
+  # $MODEL compartment 2 with no DADT, so nonmem2rx materialises `d/dt(DUMMY) =
+  # 0` and places it FIRST: d/dt order is [DUMMY, DEPOT, CENTRAL], $MODEL order
+  # is [DEPOT, DUMMY, CENTRAL]. ferx numbers compartments by position in
+  # `states=[...]`, so emitting d/dt order put this dataset's CMT=1 dose into
+  # DUMMY, whose derivative is zero.
+  #
+  # This fixture is unusually discriminating and that is deliberate: the broken
+  # case does not merely estimate badly, it makes IPRED identically 0 for every
+  # subject at every time, because no drug ever enters the system. No choice of
+  # starting values can rescue that, which is why the structural thetas are
+  # asserted against nominal truth here without the perturbation the omega
+  # guards need. Measured on ferx 0.3.0: 0.000000 at every observation time
+  # before the fix, and the reference profile after it.
+  ferx_file <- .translate_to_tmp("cmt_order_gap.ctl")
+  data_file <- .conc_data("cmt_order_gap_concordance.csv")
+
+  # The emitted numbering is what the dataset is read against, so pin it here
+  # too -- a fit that passed with the states in some other order would mean the
+  # dataset had been regenerated to match the bug.
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_match(txt, "states=[DEPOT, DUMMY, CENTRAL]", fixed = TRUE)
+
+  # Every theta started at HALF its true value, and this is not optional.
+  #
+  # An earlier version of this test asserted nominal truth from the model's own
+  # initials and was a tautology, which a sabotage run caught: with the dose in
+  # DUMMY there is no gradient at all, so the optimiser returns every theta
+  # exactly where it started -- and cmt_order_gap.ctl's $THETA initials ARE the
+  # simulation truth. Measured, broken: theta = (3, 50, 1.2), deviation ~0, test
+  # green. Starting away from the truth makes "never moved" and "recovered it"
+  # different observations. Same trap as the omega guard below, in the tier
+  # above it. See CLAUDE.md's discriminating-fixture rule.
+  start <- c(TVCL = 1.5, TVV = 25.0, TVKA = 0.6)
+  for (nm in names(start)) {
+    pat <- sprintf("theta %s\\([^)]+\\)", nm)
+    if (!grepl(pat, txt))
+      stop("no theta '", nm, "' in the emitted .ferx -- has the naming changed?")
+    txt <- sub(pat, sprintf("theta %s(%s, 0.0, 1e15)", nm, start[[nm]]), txt)
+  }
+  writeLines(txt, ferx_file)
+
+  fit <- ferx_fit(ferx_file, data_file,
+                  method     = "focei",
+                  covariance = FALSE,
+                  verbose    = FALSE)
+
+  ref <- c(TVCL = 3.0, TVV = 50.0, TVKA = 1.2)
+  .report_deviations(fit$theta, ref, "issue #25 compartment numbering")
+  expect_lt(abs(fit$theta["TVCL"] / ref["TVCL"] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta["TVV"]  / ref["TVV"]  - 1), 0.15, label = "V")
+  expect_lt(abs(fit$theta["TVKA"] / ref["TVKA"] - 1), 0.15, label = "KA")
+  # A dead parameter cannot move off its start; a live one must. This is what
+  # separates a fit from a frozen optimiser, and it is the assertion that fails
+  # first when the dose stops reaching the system.
+  for (nm in names(start))
+    expect_gt(abs(fit$theta[[nm]] / start[[nm]] - 1), 0.20,
+              label = paste0("theta ", nm, " moved off its start"))
+})
+
 # ===========================================================================
 # ENGINE VALIDATION SWEEP (Tier 4)
 # Validates every bundled model's emitted .ferx with the engine and fails on

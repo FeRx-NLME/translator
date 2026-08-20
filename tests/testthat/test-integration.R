@@ -786,14 +786,18 @@ test_that("a one-compartment model is not guessing and says nothing", {
   expect_length(result$unsupported, 0L)
 })
 
-test_that("S<n> is not trusted when $MODEL order and d/dt order disagree", {
+test_that("a reordered $DES is renumbered into $MODEL order, not declined", {
   skip_if_not_installed("nonmem2rx")
-  # `n` in `S<n>` is a $MODEL COMP ordinal; state_names is d/dt order. nonmem2rx
-  # keeps $DES statement order, so a block writing DADT(2) first yields states
-  # [CENTRAL, DEPOT] while S2 still means CENTRAL. Indexing one with the other
-  # took DEPOT, announced it as the scaled compartment, and attached obs_scale
-  # to it -- a file that validates clean and predicts the depot amount over V.
-  # This is the same cross-check the DEFOBS tier makes, for the same reason.
+  # `n` in `S<n>` is a $MODEL COMP ordinal; d/dt order is not. nonmem2rx keeps
+  # $DES statement order, so a block writing DADT(2) first yields states
+  # [CENTRAL, DEPOT] while S2 still means CENTRAL.
+  #
+  # Phase 6c DECLINED here, because it had no way to reconcile the two. Issue
+  # #25 supplies one: `states=[...]` is what ferx numbers compartments by, so
+  # emitting it in $MODEL COMP order makes S2 mean CENTRAL again -- and makes
+  # the source's own CMT column keep selecting the compartments it meant.
+  # Measured on ferx 0.3.0: before the renumbering this file's CMT=1 dose landed
+  # in CENTRAL rather than DEPOT, and predictions moved ~40% at t=1.
   dir <- tmp_ctl_dir()
   ctl <- file.path(dir, "des_reordered.ctl")
   writeLines(c(
@@ -821,14 +825,122 @@ test_that("S<n> is not trusted when $MODEL order and d/dt order disagree", {
     "$EST METHOD=1"), ctl)
 
   result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
-  # Declined, and said why rather than answering confidently.
-  expect_length(grep("taken from \\$PK's S", result$warnings), 0L)
-  dis <- grep("^WARN .*orderings disagree", result$warnings, value = TRUE)
-  expect_length(dis, 1L)
-  expect_match(dis, "compartment 2 ('CENTRAL')", fixed = TRUE)
-  expect_match(dis, "differential equation is for 'DEPOT'", fixed = TRUE)
-  # Having declined, it falls through to the fallback, which reports as a gap.
-  expect_length(grep("obs_cmt guessed", result$unsupported), 1L)
+  # states=[...] carries NONMEM's numbering, NOT the $DES statement order.
+  expect_match(result$ferx_text, "states=[DEPOT, CENTRAL]", fixed = TRUE)
+  # The [odes] block keeps source order -- deliberately. ferx has no
+  # use-before-def check, so an intermediate moved below the d/dt line that
+  # reads it would silently read a stale slot; see .emit_odes_section().
+  expect_lt(regexpr("d/dt(CENTRAL)", result$ferx_text, fixed = TRUE),
+            regexpr("d/dt(DEPOT)",   result$ferx_text, fixed = TRUE))
+  # S2 resolves to CENTRAL again, so the scaling is emitted rather than dropped.
+  expect_match(result$ferx_text, "obs_cmt=CENTRAL", fixed = TRUE)
+  expect_match(result$ferx_text, "obs_scale = V",   fixed = TRUE)
+  # Renumbering is a correctness change to the emitted file, so it is announced.
+  ren <- grep("^INFO .*put in \\$MODEL compartment order", result$warnings,
+              value = TRUE)
+  expect_length(ren, 1L)
+  expect_match(ren, "DEPOT, CENTRAL", fixed = TRUE)
+  # Nothing is declined any more, so neither the 6c disagreement WARN nor the
+  # positional fallback fires.
+  expect_length(grep("orderings disagree", result$warnings), 0L)
+  expect_length(grep("obs_cmt guessed", result$unsupported), 0L)
+})
+
+test_that("two S<n> entries bind to the right one when $DES is reordered", {
+  skip_if_not_installed("nonmem2rx")
+  # Issue #25's headline case, and the reason it needs TWO scaling entries.
+  #
+  # $ERROR names A(2) outright, so obs_cmt resolves at the top of the cascade and
+  # is CENTRAL either way -- this is not an obs_cmt defect. The defect is that
+  # obs_cmt_num was a d/dt POSITION handed to a lookup keyed by NONMEM
+  # compartment NUMBER: CENTRAL sits at position 1 of [CENTRAL, DEPOT], so the
+  # lookup read S1 and emitted the DEPOT's scale variable, announcing it at INFO
+  # as a success. Every prediction was then off by V/VD, here a factor of ~7.1.
+  #
+  # With only S2 present the same bug drops the scaling LOUDLY instead of
+  # substituting the wrong variable, so a one-scaling fixture cannot tell "wrong
+  # variable" from "no variable" and proves nothing. VD must differ from V.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "two_scalings_reordered.ctl")
+  writeLines(c(
+    "$PROBLEM two S<n> entries with DADT written in reverse index order",
+    "$INPUT ID TIME DV AMT EVID MDV CMT",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT)",
+    "  COMP=(CENTRAL)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "  VD = THETA(4)",
+    "  S1 = VD",
+    "  S2 = V",
+    "$DES",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "  DADT(1) = -KA*A(1)",
+    "$ERROR",
+    "  Y = A(2)*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1) (0,7)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_match(result$ferx_text, "obs_cmt=CENTRAL", fixed = TRUE)
+  # The observed compartment is CENTRAL and NONMEM scales it by S2 = V. VD is
+  # the depot's, and is what the defect emitted.
+  expect_match(result$ferx_text, "obs_scale = V\n", perl = TRUE)
+  expect_no_match(result$ferx_text, "obs_scale = VD", fixed = TRUE)
+  # Announced against the right compartment number, too.
+  expect_length(grep("INFO .*S2 = V detected", result$warnings), 1L)
+  expect_length(grep("S1 = VD detected", result$warnings), 0L)
+})
+
+test_that("a $MODEL that cannot be reconciled by name reports the numbering as a gap", {
+  skip_if_not_installed("nonmem2rx")
+  # The decline path. A $MODEL compartment declared AFTER every DADT-bearing one
+  # makes nonmem2rx drop it and lose the remaining names (issue #26), so the COMP
+  # list and the state list cannot be matched up: 3 compartments against 2
+  # placeholder-named states. No permutation is available, so d/dt order stands
+  # -- and ferx will then read a CMT column against a numbering that is not the
+  # source's, which is silent in the numbers. That has to be said out loud.
+  dir <- tmp_ctl_dir()
+  ctl <- file.path(dir, "trailing_gap.ctl")
+  writeLines(c(
+    "$PROBLEM a trailing $MODEL compartment with no DADT",
+    "$INPUT ID TIME DV AMT EVID MDV CMT",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT, DEFDOSE)",
+    "  COMP=(CENTRAL, DEFOBS)",
+    "  COMP=(DUMMY)",
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    "  KA = THETA(3)",
+    "  S2 = V",
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "$ERROR",
+    "  Y = A(2)*(1 + EPS(1))",
+    "$THETA (0,5) (0,50) (0,1)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  num <- grep("^ERROR .*numbers the compartments", result$warnings, value = TRUE)
+  expect_length(num, 1L)
+  expect_match(num, "DEPOT, CENTRAL, DUMMY", fixed = TRUE)
+  expect_match(num, "including the dose", fixed = TRUE)
+  # An action list entry, not just a console message.
+  expect_length(grep("numbering could not be reconciled", result$unsupported), 1L)
+  # Declined, so d/dt order is left exactly as it was -- no half-permutation.
+  expect_length(grep("put in \\$MODEL compartment order", result$warnings), 0L)
 })
 
 test_that("an unnamed scaling_hint does not abort the translation", {
