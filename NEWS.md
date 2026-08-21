@@ -2,6 +2,37 @@
 
 ## Breaking changes
 
+* `[scaling] obs_scale` is no longer emitted when the source's `$ERROR` reads a
+  bare `A(n)` (issue #32). NONMEM applies `S<n>` to `F`, not to a compartment
+  amount -- anchored against NONMEM 7.6.0 in `tests/nonmem-anchor/`, where two
+  control streams differing only in that one line give a ratio of exactly `V` at
+  every timepoint. Emitting `obs_scale` there divided by a scale NONMEM never
+  applied, putting every prediction low by a factor of `S<n>`, silently, in a
+  file that validated and fit.
+
+  The three `$ERROR` shapes are now distinguished: a prediction reached through
+  `F` is scaled, an expression that divides explicitly (`A(n)/S<n>`) is scaled,
+  and a bare `A(n)` is not. The suppression is announced at `INFO` -- the source
+  declares `S<n>`, so a reader diffing the two files would otherwise ask where
+  the block went -- and the "scaling declared but not for the observed
+  compartment" `WARN` no longer fires for an unscaled readout, where the absence
+  is correct.
+
+  One bundled model changes: `cmt_order_gap.ctl` now reads `Y = F*(1+EPS(1))`.
+  With a bare `A(3)` and no scaling, `CL` and `V` are not separately
+  identifiable -- `V` enters the ODE only as `CL/V` -- so its Tier-4 fit sat at
+  its starting values. The bare-`A(n)` case has its own fixture,
+  `amount_readout.ctl`, checked by emitted text rather than by fitting.
+
+* `inst/testdata/cmt_order_gap_concordance.csv` is now simulated by **NONMEM
+  7.6.0**, not by `ferx_simulate()` on our own output. It is the first dataset
+  here that is not self-referential, and the reason matters: every other one
+  bakes whatever the translator decided into both the data and the model under
+  test, so those tests check internal consistency rather than fidelity to
+  NONMEM. Issue #32 passed the entire Tier-4 suite untouched for exactly that
+  reason. Do not regenerate this one with `simulate_dataset()`; see
+  `data-raw/generate_concordance_data.R` and `tests/nonmem-anchor/README.md`.
+
 * The CI engine pin moves to `ferx-r@9c97c13` (from `ferx-r@7889719`), whose
   committed `Cargo.lock` resolves ferx-core at `25b5f473` -- the merge of
   ferx-core#1003. That makes `E_DOSE_ATTR_DOUBLE_USE` live in the `engine` job:
