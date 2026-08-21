@@ -42,7 +42,19 @@ $DES
   DADT(1) = -KA*A(1)
   DADT(3) =  KA*A(1) - (CL/V)*A(3)
 $ERROR
-  Y = A(3)*(1 + EPS(1))
+; `F`, not a bare `A(3)`, and that is load-bearing twice over.
+;
+; NONMEM applies `S<n>` to F and NOT to a bare A(n) -- anchored against NONMEM
+; 7.6.0 in tests/nonmem-anchor/, ratio exactly V at every timepoint. So with
+; `Y = A(3)` this model would be unscaled, and then CL and V are not separately
+; identifiable: V enters the ODE only as CL/V, so amount data determines the
+; ratio and nothing more, and the concordance fit sits at its starting values.
+; The scaled prediction A(3)/V is what makes V identifiable at all.
+;
+; Change this line and the Tier-4 test below it stops meaning anything. The bare
+; A(n) case has its own fixture -- see amount_readout.ctl -- which is checked by
+; simulation rather than by fitting, for exactly this reason.
+  Y = F*(1 + EPS(1))
 $THETA
   (0, 3)     ; CL
   (0, 50)    ; V

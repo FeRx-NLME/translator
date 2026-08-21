@@ -3302,3 +3302,44 @@ test_that(".cmt_index resolves a compartment name case-insensitively", {
   expect_true(is.na(.cmt_index("DEPOT", NULL)))
   expect_true(is.na(.cmt_index(NA_character_, c("DEPOT"))))
 })
+
+
+# -- issue #32: does the source's DV expression already carry S<n>? -----------
+
+test_that(".dv_is_scaled reports NA when there is no DV expression to read", {
+  # NA means "leave the existing behaviour alone", NOT "unscaled". Both guesses
+  # are wrong by a factor of S<n> and neither is safe, so the caller must be able
+  # to tell "the source does not scale" from "I could not tell". Returning FALSE
+  # here would silently suppress scaling for any model whose DV we fail to find.
+  expect_true(is.na(.dv_is_scaled(list())))
+  expect_true(is.na(.dv_is_scaled(list(quote(x <- 1)))))
+})
+
+test_that(".dv_is_scaled follows the DV chain through f, unlike .explicit_obs_states", {
+  # `y <- f * (1 + eps1)` with `f <- CENTRAL/scale2` is NONMEM's `Y = F`, which
+  # IS scaled. .explicit_obs_states() deliberately stops at `f` -- it asks which
+  # compartment is named outright, and nonmem2rx's synthetic `f` names one in
+  # every model. This asks whether the value is scaled, and `f` is exactly where
+  # the scaling lives. Two questions, two walks.
+  lst <- list(quote(f <- CENTRAL/scale2), quote(y <- f * (1 + eps1)))
+  expect_true(.dv_is_scaled(lst))
+})
+
+test_that(".dv_is_scaled distinguishes the three DV shapes", {
+  # Anchored against NONMEM 7.6.0, tests/nonmem-anchor/: S<n> applies to F and
+  # not to a bare A(n), a ratio of exactly V at every timepoint.
+  scaled_f    <- list(quote(f <- CENTRAL/scale2), quote(y <- f * (1 + eps1)))
+  scaled_expr <- list(quote(f <- CENTRAL/scale2), quote(y <- CENTRAL/scale2 * (1 + eps1)))
+  bare        <- list(quote(f <- CENTRAL/scale2), quote(y <- CENTRAL * (1 + eps1)))
+  expect_true(.dv_is_scaled(scaled_f))
+  expect_true(.dv_is_scaled(scaled_expr))
+  expect_false(.dv_is_scaled(bare))
+})
+
+test_that(".dv_is_scaled does not mistake a name containing 'scale' for scale<n>", {
+  # `scalef` is an ordinary parameter. A substring match would read this model as
+  # already scaled; the suffix must be digits and nothing else.
+  lst <- list(quote(f <- CENTRAL/scale2),
+              quote(y <- CENTRAL * scalef * (1 + eps1)))
+  expect_false(.dv_is_scaled(lst))
+})

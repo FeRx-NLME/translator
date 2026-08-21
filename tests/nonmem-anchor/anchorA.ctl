@@ -1,0 +1,25 @@
+$PROBLEM A: Y = F (scaled prediction)
+$INPUT ID TIME AMT DV MDV CMT
+$DATA anchor.csv IGNORE=@
+$SUBROUTINES ADVAN13 TOL=9
+$MODEL
+  COMP=(DEPOT, DEFDOSE)
+  COMP=(CENTRAL, DEFOBS)
+$PK
+  KA = THETA(1)*EXP(ETA(1))
+  CL = THETA(2)
+  V  = THETA(3)
+  S2 = V
+$DES
+  DADT(1) = -KA*A(1)
+  DADT(2) =  KA*A(1) - (CL/V)*A(2)
+$ERROR
+  Y = F*(1 + EPS(1))
+$THETA
+  1.0 FIX   ; KA
+  3.0 FIX   ; CL
+  10.0 FIX  ; V   <- the whole point: ratio should be V if A(2) is unscaled
+$OMEGA 0 FIX
+$SIGMA 0.0001 FIX
+$ESTIMATION METHOD=0 MAXEVAL=0 PRINT=1
+$TABLE ID TIME CMT DV PRED NOPRINT ONEHEADER NOAPPEND FILE=anchorA.tab

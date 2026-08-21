@@ -881,7 +881,13 @@ test_that("two S<n> entries bind to the right one when $DES is reordered", {
     "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
     "  DADT(1) = -KA*A(1)",
     "$ERROR",
-    "  Y = A(2)*(1 + EPS(1))",
+    # `A(2)/S2`, not a bare `A(2)`. Both name compartment 2 outright, so either
+    # resolves obs_cmt through the explicit tier, which is what this test is
+    # about -- but only the dividing spelling is SCALED. NONMEM applies S<n> to
+    # `F` and not to a bare `A(n)` (anchored in tests/nonmem-anchor/), so with
+    # the bare spelling the correct output has no [scaling] block at all and
+    # there is no binding left to get right. See issue #32.
+    "  Y = A(2)/S2*(1 + EPS(1))",
     "$THETA (0,5) (0,50) (0,1) (0,7)",
     "$OMEGA 0.09",
     "$SIGMA 0.04",
@@ -896,6 +902,124 @@ test_that("two S<n> entries bind to the right one when $DES is reordered", {
   # Announced against the right compartment number, too.
   expect_length(grep("INFO .*S2 = V detected", result$warnings), 1L)
   expect_length(grep("S1 = VD detected", result$warnings), 0L)
+})
+
+test_that("S<n> is applied to F but not to a bare A(n)", {
+  skip_if_not_installed("nonmem2rx")
+  # Anchored against NONMEM 7.6.0 (tests/nonmem-anchor/): two control streams
+  # differing only in $ERROR, with S2 = V and V = 10, give a ratio of exactly 10
+  # at every timepoint. `F` is A(n)/S<n>; a bare `A(n)` is the raw amount and
+  # S<n> does not touch it.
+  #
+  # Three shapes, and the middle one is the defect: emitting obs_scale there
+  # divides by a scale NONMEM never applied, putting every prediction low by a
+  # factor of S<n>, silently, in a file that validates and fits.
+  shapes <- list(
+    list(err = "Y = F*(1 + EPS(1))",       scaled = TRUE,  what = "F"),
+    list(err = "Y = A(2)*(1 + EPS(1))",    scaled = FALSE, what = "bare A(n)"),
+    list(err = "Y = A(2)/S2*(1 + EPS(1))", scaled = TRUE,  what = "A(n)/S<n>"))
+
+  dir <- tmp_ctl_dir()
+  for (sh in shapes) {
+    ctl <- file.path(dir, paste0("shape_", make.names(sh$what), ".ctl"))
+    writeLines(c(
+      "$PROBLEM S<n> application by DV shape",
+      "$INPUT ID TIME DV AMT EVID MDV CMT",
+      "$DATA d.csv IGNORE=@",
+      "$SUBROUTINE ADVAN6 TOL=6",
+      "$MODEL",
+      "  COMP=(DEPOT, DEFDOSE)",
+      "  COMP=(CENTRAL, DEFOBS)",
+      "$PK",
+      "  KA = THETA(1)",
+      "  CL = THETA(2)",
+      "  V  = THETA(3)",
+      "  S2 = V",
+      "$DES",
+      "  DADT(1) = -KA*A(1)",
+      "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+      "$ERROR",
+      paste0("  ", sh$err),
+      "$THETA (0,1) (0,3) (0,10)",
+      "$OMEGA 0.09",
+      "$SIGMA 0.04",
+      "$EST METHOD=1"), ctl)
+
+    result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+    body   <- grep("^#", strsplit(result$ferx_text, "\n")[[1]],
+                   value = TRUE, invert = TRUE)
+    has_scaling <- any(grepl("obs_scale", body, fixed = TRUE))
+    expect_equal(has_scaling, sh$scaled,
+                 label = paste0("obs_scale emitted for ", sh$what))
+    # Silence is not acceptable for the unscaled case: the source declares S<n>,
+    # so a reader diffing the two files will ask where the block went.
+    if (!sh$scaled)
+      expect_length(grep("reads the compartment amount", result$warnings), 1L)
+  }
+})
+
+.scale_shape_ctl <- function(dir, name, pk_extra, err) {
+  ctl <- file.path(dir, name)
+  writeLines(c(
+    "$PROBLEM scaling by DV shape",
+    "$INPUT ID TIME DV AMT EVID MDV CMT",
+    "$DATA d.csv IGNORE=@",
+    "$SUBROUTINE ADVAN6 TOL=6",
+    "$MODEL",
+    "  COMP=(DEPOT, DEFDOSE)",
+    "  COMP=(CENTRAL, DEFOBS)",
+    "$PK",
+    "  KA = THETA(1)",
+    "  CL = THETA(2)",
+    "  V  = THETA(3)",
+    pk_extra,
+    "$DES",
+    "  DADT(1) = -KA*A(1)",
+    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
+    "$ERROR",
+    paste0("  ", err),
+    "$THETA (0,1) (0,3) (0,10)",
+    "$OMEGA 0.09",
+    "$SIGMA 0.04",
+    "$EST METHOD=1"), ctl)
+  ctl
+}
+
+test_that("an unscaled readout does not warn that its scaling block is missing", {
+  skip_if_not_installed("nonmem2rx")
+  # The no-entry WARN exists for a scaling that SHOULD have been emitted and was
+  # not. When the DV is an unscaled amount the absence is correct, and warning
+  # about it sends the user looking for a bug that is not there.
+  #
+  # The fixture needs `S<n>` for a compartment OTHER than the observed one, or
+  # the no-entry branch is never reached and the test proves nothing. That is not
+  # hypothetical: this test first used amount_readout.ctl, whose S2 matches the
+  # observed compartment, so `scaling_hint[["2"]]` exists, the branch is skipped,
+  # and removing the guard changed nothing. Caught by mutation, not by review.
+  dir <- tmp_ctl_dir()
+  ctl <- .scale_shape_ctl(dir, "other_cmt_scaled.ctl",
+                          "  S1 = V", "Y = A(2)*(1 + EPS(1))")
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  expect_length(grep("declares scaling for compartment", result$warnings), 0L)
+})
+
+test_that("only a scale<n> symbol counts as the source having scaled the DV", {
+  skip_if_not_installed("nonmem2rx")
+  # nonmem2rx spells the $PK `S<n>` assignment `scale<n>`, and the predicate
+  # matches that exactly. A user parameter whose name merely CONTAINS "scale"
+  # must not be mistaken for it -- here `SCALEF`, an ordinary multiplier, in a
+  # model whose $ERROR reads a bare A(2). A substring match would read this as
+  # already scaled and emit obs_scale, dividing by V on top of a prediction
+  # NONMEM never divided.
+  dir <- tmp_ctl_dir()
+  ctl <- .scale_shape_ctl(dir, "scalef.ctl",
+                          "  SCALEF = 2.0\n  S2 = V",
+                          "Y = A(2)*SCALEF*(1 + EPS(1))")
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  body <- grep("^#", strsplit(result$ferx_text, "\n")[[1]],
+               value = TRUE, invert = TRUE)
+  expect_false(any(grepl("obs_scale", body, fixed = TRUE)))
+  expect_length(grep("reads the compartment amount", result$warnings), 1L)
 })
 
 test_that("a $MODEL that cannot be reconciled by name reports the numbering as a gap", {

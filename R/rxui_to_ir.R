@@ -734,6 +734,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
 
   scaling <- list()
+  # Whether NONMEM itself scaled the prediction. `S<n>` applies to `F`, not to a
+  # bare `A(n)` -- anchored against NONMEM 7.6.0, see .dv_is_scaled(). Computed
+  # once here so the two exits below (emit, and the no-entry WARN) agree.
+  dv_scaled <- if (identical(structural$type, "ode")) .dv_is_scaled(lst) else NA
   if (identical(structural$type, "ode") && length(scaling_hint) > 0L) {
     # structural$states, NOT .ode_states(): the former is $MODEL COMP order when
     # that was recoverable, and this index is used as a NONMEM compartment number.
@@ -762,7 +766,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         } else if (norm_svar %in% indiv_lhs_uc) {
           .ip_names(expr_out$indiv_params)[match(norm_svar, indiv_lhs_uc)]
         } else NULL
-        if (!is.null(matched)) {
+        if (isFALSE(dv_scaled)) {
+          # The source declares S<n> but its $ERROR reads the compartment AMOUNT,
+          # which NONMEM does not scale. Emitting obs_scale here would divide by a
+          # scale the source never applied and put every prediction out by that
+          # factor. Say so rather than saying nothing: the source looks like it
+          # wants scaling, and a reader comparing the two files will ask why the
+          # block is missing.
+          warn <- c(warn, paste0(
+            "INFO  | $PK sets S", obs_idx, " = ", svar, ", but the $ERROR block ",
+            "reads the compartment amount rather than F, and NONMEM applies S", obs_idx,
+            " only to F. No [scaling] block was emitted, so the prediction is the ",
+            "amount -- as it is in the source. If the data are concentrations, the ",
+            "source model was already predicting amounts."))
+        } else if (!is.null(matched)) {
           scaling <- list(obs_scale = matched)
           warn    <- c(warn, paste0("INFO  | S", obs_idx, " = ", svar,
                                     " detected -- emitting [scaling] obs_scale = ", matched))
@@ -783,8 +800,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # class. Success was announced at INFO and failure said nothing at all,
     # which is exactly inverted; the `else` above covers the resolvable-name
     # half and this covers the no-entry-at-all half.
+    # Not when the DV expression is an unscaled amount: there the absence of a
+    # [scaling] block is correct, and warning about it would send the user looking
+    # for a bug that is not there.
     if (!is.na(obs_idx) && is.null(scaling_hint[[as.character(obs_idx)]]) &&
-        length(scaling_hint) > 0L)
+        length(scaling_hint) > 0L && !isFALSE(dv_scaled))
       warn <- c(warn, paste0(
         "WARN  | $PK declares scaling for compartment(s) ",
         paste(names(scaling_hint), collapse = ", "), " but not for the observed ",
@@ -1608,6 +1628,65 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
   walk(seed, 0L)
   unique(hits)
+}
+
+# Does the source's DV expression already carry the `S<n>` division?
+#
+# NONMEM applies `S<n>` to `F`, NOT to a bare `A(n)`. Anchored against NONMEM
+# 7.6.0: two control streams differing only in `$ERROR`, with `S2 = V`, `V = 10`,
+# all thetas FIX and MAXEVAL=0, give
+#
+#   Y = F    *(1+EPS(1))   ->  3.6311  5.3277  ...   (this is A(2)/S2)
+#   Y = A(2) *(1+EPS(1))   -> 36.311  53.277   ...   (this is A(2))
+#
+# a ratio of exactly 10 = V at every timepoint. So emitting `obs_scale` for a
+# source whose `$ERROR` reads a bare `A(n)` divides by a scale NONMEM never
+# applied, and every prediction comes out low by that factor -- silently, in a
+# file that validates and fits.
+#
+# nonmem2rx makes the three shapes distinguishable, which is what makes this
+# decidable at all:
+#
+#   Y = F        ->  f <- CENTRAL/scale2 ; y <- f * (1 + eps1)
+#   Y = A(2)/S2  ->                        y <- CENTRAL/scale2 * (1 + eps1)
+#   Y = A(2)     ->                        y <- CENTRAL * (1 + eps1)
+#
+# so the question is whether the DV expression's chain REACHES a `scale<n>`
+# symbol. Note this walks THROUGH `f`/`ipred`/`pred`, where
+# `.explicit_obs_states()` deliberately stops at them -- that function asks which
+# compartment is named outright and must not follow nonmem2rx's synthetic `f`
+# (which names one in every model); this one asks whether the value is scaled,
+# and `f` is precisely where the scaling lives. Two different questions about the
+# same expression, so two walks rather than one with a flag.
+#
+# Returns NA when no DV expression could be found, which callers treat as "leave
+# the existing behaviour alone" rather than guessing in either direction -- both
+# guesses are wrong by a factor of `S<n>` and neither is safe.
+.dv_is_scaled <- function(lst) {
+  defs <- list()
+  for (e in lst)
+    if (.is_assignment(e) && is.symbol(e[[2]]))
+      defs[[as.character(e[[2]])]] <- e[[3]]
+  seed <- NULL
+  for (e in lst) {
+    if (.is_tilde(e)) { seed <- e; break }
+    if (.is_assignment(e) && is.symbol(e[[2]]) &&
+        tolower(as.character(e[[2]])) == "y") seed <- e[[3]]
+  }
+  if (is.null(seed)) return(NA)
+  seen <- character(); found <- FALSE
+  walk <- function(ex, depth) {
+    if (found || depth > 20L) return(invisible(NULL))
+    for (sym in .collect_symbols(ex)) {
+      # nonmem2rx spells the $PK `S<n>` assignment `scale<n>`.
+      if (grepl("^scale[0-9]+$", sym, ignore.case = TRUE)) { found <<- TRUE; return(invisible(NULL)) }
+      if (sym %in% seen) next
+      seen <<- c(seen, sym)
+      if (!is.null(defs[[sym]])) walk(defs[[sym]], depth + 1L)
+    }
+  }
+  walk(seed, 0L)
+  found
 }
 
 # Does a d/dt state name refer to the same compartment $MODEL called `model_nm`?

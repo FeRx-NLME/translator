@@ -178,11 +178,33 @@ simulate_dataset(
 # Dose CMT=1 (DEPOT) and observation CMT=3 (CENTRAL) are the SOURCE's numbers,
 # which is the whole point: the dataset is a NONMEM dataset and must not be
 # rewritten to suit the translation.
-simulate_dataset(
-  translate_tmp("cmt_order_gap.ctl"),
-  nm_template(40, dose = 100.0, cmt = 1L, obs_cmt = 3L,
-              obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 36, 48)),
-  seed = 425L, out_path = "inst/testdata/cmt_order_gap_concordance.csv")
+# DO NOT regenerate this one with simulate_dataset(). It is the ONLY dataset here
+# that is not simulated from our own output, and that is the entire point of it.
+#
+# Every other dataset below is produced by translating the model and simulating
+# the RESULT, so whatever the translator decided is baked into both the data and
+# the model under test and cancels. Those are internal-consistency checks. Issue
+# #32 -- an obs_scale applied where NONMEM applies none, putting every prediction
+# out by a factor of S<n> -- passed the entire Tier-4 suite untouched for exactly
+# that reason.
+#
+# This dataset is simulated by NONMEM 7.6.0, so a translation that disagrees with
+# NONMEM fails the fit. Regenerate it by running the bundled .ctl through NONMEM
+# with $SIMULATION over the design below, and taking its DV:
+#
+#   design: 40 subjects, AMT=100 into CMT=1 at t=0, observations in CMT=3 at
+#           0.5, 1, 2, 4, 8, 12, 24, 36, 48
+#
+#   sed -e 's/^[$]DATA .*/$DATA design.csv IGNORE=@/' \
+#       -e 's/^[$]EST METHOD=1$/$SIMULATION (20260821) ONLYSIM\n$TABLE ID TIME \
+#            AMT CMT DV MDV NOPRINT ONEHEADER NOAPPEND FILE=sim.tab/' \
+#       inst/testmodels/nonmem/cmt_order_gap.ctl > sim.ctl
+#
+#   docker run --rm -v "$PWD":/w -w /w --user "$(id -u):$(id -g)" \
+#     nonmemdocker:V0.1 bash -lc '/opt/NONMEM/nm760/run/nmfe76 sim.ctl sim.lst'
+#
+# then write ID,TIME,DV,EVID,AMT,CMT,MDV with DV="." on dose rows. See
+# tests/nonmem-anchor/README.md.
 
 # ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
 # Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column
