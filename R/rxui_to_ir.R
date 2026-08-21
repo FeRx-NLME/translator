@@ -766,13 +766,21 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         } else if (norm_svar %in% indiv_lhs_uc) {
           .ip_names(expr_out$indiv_params)[match(norm_svar, indiv_lhs_uc)]
         } else NULL
-        if (isFALSE(dv_scaled)) {
+        if (isFALSE(dv_scaled) && is.null(expr_out$readout)) {
           # The source declares S<n> but its $ERROR reads the compartment AMOUNT,
           # which NONMEM does not scale. Emitting obs_scale here would divide by a
           # scale the source never applied and put every prediction out by that
           # factor. Say so rather than saying nothing: the source looks like it
           # wants scaling, and a reader comparing the two files will ask why the
           # block is missing.
+          #
+          # Not when a readout exists. `obs_scale` is discarded below in favour of
+          # the `y` block whatever this decides, so the message would announce a
+          # suppression that drove nothing -- and its wording is flatly false
+          # there, since the file DOES get a [scaling] block, just a `y` one.
+          # Measured on qss_tmdd.mod, whose $ERROR divides by the PARAMETER `VC`
+          # rather than by `scale1`: this fired while the emitted file carried
+          # `y = if (FLAG == 2) c_RTOT else CENT/VC`.
           warn <- c(warn, paste0(
             "INFO  | $PK sets S", obs_idx, " = ", svar, ", but the $ERROR block ",
             "reads the compartment amount rather than F, and NONMEM applies S", obs_idx,

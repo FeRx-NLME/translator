@@ -1003,6 +1003,26 @@ test_that("an unscaled readout does not warn that its scaling block is missing",
   expect_length(grep("declares scaling for compartment", result$warnings), 0L)
 })
 
+test_that("the unscaled-readout INFO does not fire when a y readout is emitted", {
+  skip_if_not_installed("nonmem2rx")
+  # The INFO explains why no `obs_scale` was emitted. When the $ERROR block
+  # produces a readout, `obs_scale` is discarded in favour of the `y` block
+  # regardless of what the scaling decision was -- so the message would be
+  # announcing a suppression that drove nothing, and its wording ("No [scaling]
+  # block was emitted") is simply false: the file does get one.
+  #
+  # qss_tmdd.mod is the case that showed it. Its $ERROR divides by the PARAMETER
+  # VC rather than by `scale1`, so the DV reads as unscaled, while the emitted
+  # file carries `y = if (FLAG == 2) c_RTOT else CENT/VC`.
+  ctl <- system.file("testmodels/nonmem/qss_tmdd.mod", package = "ferxtranslate")
+  skip_if(ctl == "", "fixture not installed")
+  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
+  body <- grep("^#", strsplit(result$ferx_text, "\n")[[1]],
+               value = TRUE, invert = TRUE)
+  expect_true(any(grepl("^  y( |[[])", body)))
+  expect_length(grep("reads the compartment amount", result$warnings), 0L)
+})
+
 test_that("only a scale<n> symbol counts as the source having scaled the DV", {
   skip_if_not_installed("nonmem2rx")
   # nonmem2rx spells the $PK `S<n>` assignment `scale<n>`, and the predicate
