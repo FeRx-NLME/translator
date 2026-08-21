@@ -751,6 +751,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # Both halves are required. With a CMT column the data decides and DEFDOSE
     # never applies; with DEFDOSE on compartment 1 the two rules agree.
     #
+    # This is a COLUMN-level test and does not close the whole divergence. A
+    # dose ROW whose CMT cell is `0` or `.` hits the identical mismatch: NM-TRAN
+    # sends it to DEFDOSE, while ferx-core reads the cell as None (`.`/empty,
+    # datareader.rs) or as the CMT=0 convention (types.rs `cmt_idx`), and both
+    # land on compartment 1. Detecting that means reading the dataset row by
+    # row, which this function does not do and often cannot -- the .ctl's $DATA
+    # frequently names a file that is not there. Tracked as #35 rather than
+    # widened into here, so the guard is not read as complete.
+    #
     # Deliberately NOT fixed by floating the DEFDOSE compartment into position 1
     # of states=[...]. That would fight #25, which pins the emitted order to
     # $MODEL COMP order precisely so the source's own CMT values keep meaning
