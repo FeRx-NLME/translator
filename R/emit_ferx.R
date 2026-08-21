@@ -246,6 +246,12 @@ emit_ferx <- function(ir) {
     obs <- if (is.null(s$obs_cmt)) "" else paste0("obs_cmt=", s$obs_cmt, ", ")
     paste0("  ode(", obs, "states=[", states_str, "])")
   }
+  # A note goes ABOVE the line it explains, as an init()'s does. `states=[...]`
+  # is what fixes ferx's compartment numbering, so it is where a reader asks
+  # which compartment a dose reaches -- and the header warning block is thirty
+  # lines away and does not travel with the eye.
+  if (!is.null(s$note) && nzchar(s$note))
+    body <- paste0("  # ", s$note, "\n", body)
   paste0("[structural_model]\n", body)
 }
 

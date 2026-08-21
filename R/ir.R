@@ -24,7 +24,10 @@
 #'   field held before statement lists. Order is preserved exactly.
 #' @param structural List describing the structural model. Must have `type`:
 #'   `"pk_macro"` (add `pk_call` and `pk_args`) or `"ode"` (add `obs_cmt`
-#'   and `states`). May be empty during incremental construction.
+#'   and `states`). May be empty during incremental construction. An optional
+#'   `note` is emitted as a comment line directly above the `ode(...)` /
+#'   `pk ...` line, for a warning that belongs where a reader looks rather than
+#'   only in the header block.
 #' @param odes Ordered list of statements forming the `[odes]` block. Each
 #'   element is a list with a `kind`: `"ddt"` (`state`, `rhs`), `"assign"`
 #'   (`lhs`, `rhs`) for an ODE-block intermediate, or `"if"` (`cond`, `then`,

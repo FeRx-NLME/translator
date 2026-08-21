@@ -85,8 +85,13 @@ to_ferx <- function(source,
   # surface it, and without it obs_cmt is a positional guess that also picks the
   # compartment number the scaling lookup uses.
   obs_hint     <- if (read_ctl) .extract_nm_defobs(source) else NULL
+  # Whether $INPUT gives NONMEM a CMT data item. Without one NM-TRAN doses
+  # $MODEL's DEFDOSE compartment and ferx doses compartment 1, and nothing in
+  # the emitted file can say which was meant -- see .nm_input_has_cmt().
+  has_cmt_col  <- if (read_ctl) .nm_input_has_cmt(source) else NA
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
-                   scaling_hint = scaling_hint, obs_hint = obs_hint)
+                   scaling_hint = scaling_hint, obs_hint = obs_hint,
+                   has_cmt_col = has_cmt_col)
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

@@ -8,14 +8,20 @@
 #' @param source_format One of `"nonmem"`, `"nlmixr2"`, `"monolix"`, or `NA`.
 #' @param source_file Path to the source file, or `NA`.
 #' @param obs_hint Optional list with `index` (integer, 1-based `$MODEL` COMP
-#'   ordinal), `name` (character) and `n_comp` (integer), as returned by
-#'   `.extract_nm_defobs()`. Names the observed compartment when the source is a
-#'   NONMEM control stream; `NULL` falls back to inference.
+#'   ordinal), `name` (character), `defdose` (integer, 1-based COMP ordinal) and
+#'   `n_comp` (integer), as returned by `.extract_nm_defobs()`. Names the
+#'   observed compartment when the source is a NONMEM control stream; `NULL`
+#'   falls back to inference.
 #' @param scaling_hint Named list mapping compartment number (as a character
 #'   string) to the NONMEM `Sn=` scaling variable name, as returned by
 #'   `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
 #'   where the observed compartment is scaled (e.g. `S2=V`). The default empty
 #'   list disables scaling translation.
+#' @param has_cmt_col `TRUE`, `FALSE` or `NA` -- whether `$INPUT` declares a
+#'   `CMT` data item NONMEM will read, as returned by `.nm_input_has_cmt()`.
+#'   `FALSE` together with a `$MODEL` DEFDOSE compartment other than 1 is the
+#'   one combination where NM-TRAN and ferx route doses differently; `NA` means
+#'   unknown and reports nothing.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -35,7 +41,8 @@
 #' }
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
-                       scaling_hint = list(), obs_hint = NULL) {
+                       scaling_hint = list(), obs_hint = NULL,
+                       has_cmt_col = NA) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -729,6 +736,55 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         "compartment numbering could not be reconciled with $MODEL -- ",
         "states=[", paste(state_names, collapse = ", "), "] is $DES order, ",
         "$MODEL declares [", paste(obs_hint$comps, collapse = ", "), "]"))
+    }
+    # A dose row with no CMT column: NM-TRAN sends it to $MODEL's DEFDOSE
+    # compartment, ferx-core sends it to compartment 1
+    # (`cmt_col.and_then(...).unwrap_or(1)`, three sites in src/io/datareader.rs).
+    # Measured on defdose_no_cmt.ctl: a factor of ~6 at t=1, and nothing said so.
+    #
+    # There is no keyword to emit instead. ferx has no model-side
+    # dose-compartment binding on the fitting path at all -- `dose_cmt` exists
+    # only on SimulationSpec, parsed from [simulation] and read only by the
+    # simulation path -- so this is a ferx feature gap and goes on $unsupported,
+    # per CLAUDE.md's rule for a construct we detect but cannot express.
+    #
+    # Both halves are required. With a CMT column the data decides and DEFDOSE
+    # never applies; with DEFDOSE on compartment 1 the two rules agree.
+    #
+    # Deliberately NOT fixed by floating the DEFDOSE compartment into position 1
+    # of states=[...]. That would fight #25, which pins the emitted order to
+    # $MODEL COMP order precisely so the source's own CMT values keep meaning
+    # what the source meant -- and would break every dataset that HAS a CMT
+    # column to buy nothing for the one that does not.
+    #
+    # Scoped to ODE models because that is where the evidence lives: DEFDOSE is
+    # a $MODEL attribute, and a $MODEL block means a general ADVAN. What ferx's
+    # pk macro path does with a dose compartment is a separate question this has
+    # not measured, and firing on it would be a guess.
+    dd <- if (is.null(obs_hint)) NA_integer_ else obs_hint$defdose
+    if (isFALSE(has_cmt_col) && is.integer(dd) && length(dd) == 1L &&
+        !is.na(dd) && dd != 1L && length(structural$states) > 0L) {
+      dd_name  <- obs_hint$comps[dd]
+      ferx_cmt <- structural$states[[1L]]
+      warn <- c(warn, paste0(
+        "ERROR | $MODEL declares compartment ", dd, " ('", dd_name,
+        "') as DEFDOSE and $INPUT has no CMT data item, so NONMEM doses '",
+        dd_name, "'. ferx resolves a dose row with no CMT column to ",
+        "compartment 1 ('", ferx_cmt, "') and has no way to say otherwise -- ",
+        "there is no model-side dose-compartment binding on the fitting path. ",
+        "Add a CMT column to the dataset naming compartment ", dd,
+        " before fitting; the doses land in the wrong compartment silently ",
+        "otherwise."))
+      unsp <- c(unsp, paste0(
+        "no model-side dose compartment (ferx-core#1009) -- $MODEL doses ",
+        "compartment ", dd, " ('", dd_name, "') by DEFDOSE with no CMT column, ",
+        "and ferx doses compartment 1 ('", ferx_cmt, "')"))
+      # And at the line, not only in the header block: [structural_model] is
+      # where a dose-compartment binding would appear, and the .ferx file is
+      # what gets run and diffed months later while result$warnings is not.
+      structural$note <- paste0(
+        "WARNING: doses land in '", ferx_cmt, "' here; NONMEM dosed '", dd_name,
+        "' (compartment ", dd, ", $MODEL DEFDOSE, no CMT column)")
     }
     structural$obs_cmt <- obs_cmt
   }

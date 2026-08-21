@@ -1560,6 +1560,112 @@ test_that(".extract_nm_defobs tolerates the legal $MODEL spellings", {
   expect_null(.extract_nm_defobs(f))
 })
 
+# -- $MODEL DEFDOSE and the $INPUT CMT item (issue #27) -----------------------
+
+test_that(".extract_nm_defobs reads DEFDOSE in every legal abbreviation", {
+  n  <- 0L
+  mk <- function(...) {
+    n <<- n + 1L
+    f <- file.path(tmp_ctl_dir(), paste0("dd", n, ".ctl"))
+    writeLines(c("$PROBLEM x", "$MODEL", ..., "$PK"), f); f
+  }
+  # DEFDOSE and DEFOBSERVATION diverge at the fourth character, so DEFD is the
+  # shortest unambiguous prefix. `^DEFOBS` once rejected the legal `DEFO`, which
+  # is the same bug one attribute over -- cover the short spellings here so it
+  # cannot repeat.
+  for (sp in c("DEFD", "DEFDOS", "DEFDOSE"))
+    expect_equal(.extract_nm_defobs(mk("  COMP=(A)",
+                                       paste0("  COMP=(B, ", sp, ")")))$defdose,
+                 2L, info = sp)
+  # DEFOBS must not answer the DEFDOSE question.
+  only_obs <- .extract_nm_defobs(mk("  COMP=(A)", "  COMP=(B, DEFOBS)"))
+  expect_true(is.na(only_obs$defdose))
+  expect_equal(only_obs$index, 2L)
+  # No attributes anywhere. NA, not 1: NONMEM's own default IS compartment 1 and
+  # so is ferx's, so the two agree and there is nothing to report -- filling the
+  # NA in here would turn that agreement into a claim the source never made.
+  expect_true(is.na(.extract_nm_defobs(mk("  COMP=(A)", "  COMP=(B)"))$defdose))
+  # Both attributes on different compartments, which is the shape #27 needs.
+  both <- .extract_nm_defobs(mk("  COMP=(PERIPH)",
+                                "  COMP=(CENTRAL, DEFDOSE, DEFOBS)"))
+  expect_equal(both$defdose, 2L)
+  expect_equal(both$index, 2L)
+})
+
+test_that(".nm_input_has_cmt reads the $INPUT data items", {
+  n  <- 0L
+  mk <- function(...) {
+    n <<- n + 1L
+    f <- file.path(tmp_ctl_dir(), paste0("inp", n, ".ctl"))
+    writeLines(c("$PROBLEM x", ..., "$PK"), f); f
+  }
+  expect_true(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT")))
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV")))
+  # Synonym pairs, both directions: NONMEM reads the column as CMT either way.
+  expect_true(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT=COMPT")))
+  expect_true(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV COMPT=CMT")))
+  # A DROPped item is not read by NONMEM, so NM-TRAN falls back to DEFDOSE
+  # exactly as if the column were absent -- which is the question being asked.
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT=DROP")))
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT=SKIP")))
+  # Exact match on the item name. `CMTX` is a different column.
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMTX")))
+  # Comma-separated items are legal.
+  expect_true(.nm_input_has_cmt(mk("$INPUT ID,TIME,AMT,DV,MDV,CMT")))
+  # Items may continue onto following lines -- pk_1cmt_oral.mod is written that
+  # way, so reading only the $INPUT line would answer FALSE for a real model.
+  expect_true(.nm_input_has_cmt(mk("$INPUT", "ID TIME AMT DV MDV CMT")))
+  # A CMT that appears only in a comment is not a data item.
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV ; no CMT here")))
+  # `$INP` is the shortest unambiguous abbreviation ($IN collides with $INFN).
+  expect_true(.nm_input_has_cmt(mk("$INP ID TIME AMT DV MDV CMT")))
+  # Unknown, not FALSE: with no $INPUT there is no evidence either way, and
+  # reporting a divergence on no evidence is worse than staying quiet.
+  expect_true(is.na(.nm_input_has_cmt(mk("$DATA x.csv"))))
+  expect_true(is.na(.nm_input_has_cmt(mk("$INPUT"))))
+})
+
+test_that("the DEFDOSE/CMT divergence needs BOTH halves to fire", {
+  skip_if_not_installed("nonmem2rx")
+  # Neither half alone discriminates: with a CMT column the data decides and
+  # DEFDOSE never applies, and with DEFDOSE on compartment 1 the wrong code
+  # gives the right answer. So the guard is exercised through all four
+  # combinations, not just the one that fires.
+  p  <- nm_path("defdose_no_cmt.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  mk <- function(has_cmt) suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = .extract_nm_defobs(p), has_cmt_col = has_cmt))
+
+  # Targeted on DEFDOSE rather than on `length(unsupported) == 0`: dropping
+  # obs_hint below removes the DEFOBS evidence too, and the pre-existing
+  # obs_cmt-guess ERROR then fires for reasons that have nothing to do with
+  # this guard. A silence assertion that counts unrelated entries fails for
+  # unrelated reasons.
+  quiet <- function(ir) expect_false(any(grepl("DEFDOSE", ir$unsupported)))
+
+  fires <- mk(FALSE)
+  expect_true(any(grepl("DEFDOSE", fires$unsupported)))
+  expect_true(any(grepl("^ERROR.*DEFDOSE", fires$warnings)))
+
+  # CMT column present -> the data decides -> silence.
+  quiet(mk(TRUE))
+  # Unknown -> silence. NA must not be read as FALSE.
+  quiet(mk(NA))
+
+  # DEFDOSE on compartment 1 -> the two rules agree -> silence, even with no
+  # CMT column.
+  hint <- .extract_nm_defobs(p)
+  hint$defdose <- 1L
+  quiet(suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = hint, has_cmt_col = FALSE)))
+  # No $MODEL evidence at all -> silence.
+  quiet(suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = NULL, has_cmt_col = FALSE)))
+})
+
 test_that("the observation expression outranks DEFOBS when they disagree", {
   skip_if_not_installed("nonmem2rx")
   # NONMEM's DEFOBS is the default observation compartment for records with no

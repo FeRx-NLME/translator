@@ -9,7 +9,8 @@ rxui_to_ir(
   source_format = NA_character_,
   source_file = NA_character_,
   scaling_hint = list(),
-  obs_hint = NULL
+  obs_hint = NULL,
+  has_cmt_col = NA
 )
 }
 \arguments{
@@ -26,9 +27,16 @@ where the observed compartment is scaled (e.g. \code{S2=V}). The default empty
 list disables scaling translation.}
 
 \item{obs_hint}{Optional list with \code{index} (integer, 1-based \verb{$MODEL} COMP
-ordinal), \code{name} (character) and \code{n_comp} (integer), as returned by
-\code{.extract_nm_defobs()}. Names the observed compartment when the source is a
-NONMEM control stream; \code{NULL} falls back to inference.}
+ordinal), \code{name} (character), \code{defdose} (integer, 1-based COMP ordinal) and
+\code{n_comp} (integer), as returned by \code{.extract_nm_defobs()}. Names the
+observed compartment when the source is a NONMEM control stream; \code{NULL}
+falls back to inference.}
+
+\item{has_cmt_col}{\code{TRUE}, \code{FALSE} or \code{NA} -- whether \verb{$INPUT} declares a
+\code{CMT} data item NONMEM will read, as returned by \code{.nm_input_has_cmt()}.
+\code{FALSE} together with a \verb{$MODEL} DEFDOSE compartment other than 1 is the
+one combination where NM-TRAN and ferx route doses differently; \code{NA} means
+unknown and reports nothing.}
 }
 \value{
 A \code{ferx_ir} object.
