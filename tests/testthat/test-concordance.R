@@ -65,6 +65,20 @@ library(ferx)
 }
 `%||%` <- function(a, b) if (is.null(a)) b else a
 
+# Named sigmas. Measured on ferx 0.3.0, `fit$sigma` is an UNNAMED numeric vector
+# and the names live in a parallel `fit$sigma_names` -- so unlike the omega
+# matrix there is not even a dimname to fall back on, and `fit$sigma[[1]]` is
+# purely positional. It is right today only because the model under test has one
+# sigma; a second endpoint, or a reordering upstream, would silently move the
+# assertion onto a different parameter while still passing. Same defect
+# .omega_diag() exists to prevent, one field over.
+.sigma_named <- function(fit) {
+  sg <- unlist(fit$sigma)
+  nm <- fit$sigma_names %||% names(sg)
+  if (!is.null(nm) && length(nm) == length(sg)) names(sg) <- nm
+  sg
+}
+
 .conc_data <- function(name) {
   system.file(file.path("testdata", name), package = "ferxtranslate")
 }
@@ -726,7 +740,11 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   # a fixed one is not optimised at all, so it returns its initial bit for bit.
   expect_equal(om[["ETA_CL"]], 0.05, tolerance = 1e-10)
   expect_equal(unname(fit$theta[["V"]]), 1.0, tolerance = 1e-10)
-  expect_equal(unname(fit$sigma[[1]]), sqrt(0.3), tolerance = 1e-10)
+  sg <- .sigma_named(fit)
+  # By NAME, and assert the name is actually there -- indexing a vector that
+  # turned out to be unnamed would silently fall back to a positional guess.
+  expect_true("EPS1" %in% names(sg))
+  expect_equal(unname(sg[["EPS1"]]), sqrt(0.3), tolerance = 1e-10)
 
   # The control. Without this the test passes against a build in which NOTHING
   # is estimated -- every assertion above would still hold.

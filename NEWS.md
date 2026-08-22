@@ -27,6 +27,13 @@
   and with it NONMEM's `(v FIX)` / `DIAGONAL(n)` / `SAME` / multi-record
   spellings never have to be re-implemented here.
 
+  The `lotriFix` attribute is read defensively, because it is upstream state
+  this package does not control. It is used only when its dimensions match
+  `ui$sigma` exactly and, when it carries dimnames, only by NAME -- a lotriFix
+  whose dimnames are ordered differently would otherwise pin one sigma and free
+  another, silently, which is the very failure being fixed. A mismatch declines
+  (every sigma estimated, the pre-existing behaviour) rather than guessing.
+
   Note that kappas must read `iniDf$fix` and NOT the omega attribute:
   `attr(ui$omega, "lotriFix")` is NULL for a model that has IOV, so the
   attribute channel answers FALSE for every fixed kappa.

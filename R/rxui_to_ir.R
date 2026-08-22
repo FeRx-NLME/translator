@@ -2488,9 +2488,16 @@ bound_name <- function(entries, raw) {
         "partially fixed $OMEGA BLOCK (", paste(nms, collapse = ", "),
         ") -- ferx fixes a block_omega all or nothing"))
     }
+    # `length(fx) > 0L &&` because all(logical(0)) is TRUE in R, and the safe
+    # default for this field is FREE, not fixed. NOT REACHABLE and therefore NOT
+    # TESTED: `lt` is selected from a block that exists only because
+    # .detect_blocks() found an off-diagonal, so it always has rows. This is a
+    # belt against a future change to that selection, and it should not be read
+    # as covered behaviour -- there is no fixture that can reach it, and adding
+    # one would mean faking an input the function cannot receive.
     omegas <- c(omegas, list(list(type = "block", names = nms,
                                   raw = unname(raws), values = lt$est,
-                                  fixed = all(fx))))
+                                  fixed = length(fx) > 0L && all(fx))))
   }
 
   for (i in seq_len(nrow(diag))) {
@@ -2593,7 +2600,13 @@ bound_name <- function(entries, raw) {
       list(name = .norm(.strip_prefix(row$name)), value = row$est, scale = "sd",
            fixed = .ini_fixed(rows, i))
     })
-    return(list(sigmas = sigmas, raw_names = as.character(rows$name)))
+    # warnings/unsupported returned on EVERY path, not only the one that can
+    # populate them. `c(warn, NULL)` is a silent no-op, so an absent field works
+    # today by accident of R rather than by contract -- and stops working the
+    # moment a caller uses length(), vapply() or startsWith() on it, all of
+    # which the surrounding code already does to other warning vectors.
+    return(list(sigmas = sigmas, raw_names = as.character(rows$name),
+                warnings = character(), unsupported = character()))
   }
   # nonmem2rx: sigma lives in the ui$sigma matrix (variance scale); convert to SD.
   if (!is.null(ui_sigma) && is.matrix(ui_sigma) && nrow(ui_sigma) > 0) {
@@ -2606,13 +2619,39 @@ bound_name <- function(entries, raw) {
     # $SIGMA records and $SIGMA BLOCK alike. Reading it here is what makes
     # parsing the raw $SIGMA record out of the control stream unnecessary.
     #
-    # Guarded on shape rather than trusted: it is an upstream attribute this
-    # package does not control, and a NULL or mis-shaped one must answer FALSE
+    # Guarded rather than trusted: it is an upstream attribute this package does
+    # not control, and a NULL, mis-shaped or mis-aligned one must answer FALSE
     # (the parameter is estimated, which is what happens today) rather than
-    # error or index out of bounds.
+    # error, index out of bounds, or -- worst -- pin the wrong parameter.
+    #
+    # Two things the obvious guard misses, both established by construction:
+    #
+    #   - Dimensions must match EXACTLY, not `>=`. A differently sized attribute
+    #     does not describe this matrix, and reading its top-left corner is a
+    #     guess. A 3x3 lotriFix on a 2x2 sigma passed a `>=` check and was read
+    #     at [1,1] and [2,2].
+    #   - Alignment is by NAME, not position. A lotriFix whose dimnames are
+    #     ordered differently from rownames(ui$sigma) sends `lfix[i, i]` to the
+    #     wrong parameter: built one with reversed dimnames and it reported EPS2
+    #     fixed when the source had fixed EPS1 -- silently pinning one parameter
+    #     and freeing another, which is the exact failure this whole change
+    #     exists to remove.
+    #
+    # Names present but naming something else entirely is a mismatch, so it
+    # declines. Names absent is not: positional is then the only reading
+    # available, and an exact dim match is what makes it defensible.
     lfix   <- attr(ui_sigma, "lotriFix")
     ok_fix <- is.matrix(lfix) && is.logical(lfix) &&
-              nrow(lfix) >= length(nms) && ncol(lfix) >= length(nms)
+              identical(dim(lfix), dim(ui_sigma))
+    lf_nms <- if (ok_fix) rownames(lfix) else NULL
+    if (ok_fix && !is.null(lf_nms) && !setequal(lf_nms, nms)) ok_fix <- FALSE
+    sig_fixed <- if (!ok_fix) {
+      rep(FALSE, length(nms))
+    } else if (!is.null(lf_nms)) {
+      vapply(nms, function(n) isTRUE(lfix[n, n]), TRUE, USE.NAMES = FALSE)
+    } else {
+      vapply(seq_along(nms), function(i) isTRUE(lfix[i, i]), TRUE)
+    }
     # Only the DIAGONAL of ui$sigma is read below, so a `$SIGMA BLOCK` loses its
     # residual covariances. That drop is older than this change and is not fixed
     # here -- emitting `block_sigma` is a different job, because ferx does not
@@ -2631,7 +2670,7 @@ bound_name <- function(entries, raw) {
       pairs <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
       shown <- paste(vapply(seq_len(nrow(pairs)), function(k) paste0(
         .norm(nms[pairs[k, 1]]), "/", .norm(nms[pairs[k, 2]]), " = ",
-        format(ui_sigma[pairs[k, 1], pairs[k, 2]])), ""), collapse = ", ")
+        .fmt_num(ui_sigma[pairs[k, 1], pairs[k, 2]])), ""), collapse = ", ")
       sig_warn <- paste0(
         "ERROR | $SIGMA BLOCK declares residual covariances (", shown,
         ") and only the diagonal is emitted, so the residual errors become ",
@@ -2649,15 +2688,16 @@ bound_name <- function(entries, raw) {
       list(name  = .norm(nms[i]),
            value = sqrt(ui_sigma[i, i]),
            scale = "sd",
-           fixed = ok_fix && isTRUE(lfix[i, i]))
+           fixed = sig_fixed[[i]])
     )
+    sig_unsp <- if (length(sig_warn) > 0) paste0(
+      "residual covariances on $SIGMA BLOCK -- block_sigma is not emitted, so ",
+      "the residuals are treated as independent") else character()
     return(list(sigmas = sigmas, raw_names = nms, warnings = sig_warn,
-                unsupported = if (length(sig_warn) > 0) paste0(
-                  "residual covariances on $SIGMA BLOCK -- block_sigma is not ",
-                  "emitted, so the residuals are treated as independent")
-                else character()))
+                unsupported = sig_unsp))
   }
-  list(sigmas = list(), raw_names = character())
+  list(sigmas = list(), raw_names = character(), warnings = character(),
+       unsupported = character())
 }
 
 # -- expression classifiers ---------------------------------------------------

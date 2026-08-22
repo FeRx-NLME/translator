@@ -3586,18 +3586,6 @@ test_that(".dv_is_scaled does not mistake a name containing 'scale' for scale<n>
 # A fixture covering one of them leaves the other two unguarded, so each gets
 # its own test against its own channel.
 
-# Minimal iniDf. Only the columns the extractors read; building the real 12-column
-# frame would assert nothing extra and would drift with upstream.
-.mk_ini <- function(...) {
-  rows <- list(...)
-  do.call(rbind, lapply(rows, function(r) data.frame(
-    ntheta = r$ntheta %||% NA_integer_, neta1 = r$neta1 %||% NA_integer_,
-    neta2  = r$neta2  %||% NA_integer_, name = r$name, est = r$est,
-    fix = r$fix, err = r$err %||% NA_character_,
-    condition = r$condition %||% NA_character_,
-    stringsAsFactors = FALSE)))
-}
-
 test_that(".extract_omegas carries iniDf$fix onto diagonal entries", {
   ini <- .mk_ini(
     list(neta1 = 1, neta2 = 1, name = "eta.cl", est = 0.09, fix = TRUE,  condition = "id"),
@@ -3687,6 +3675,60 @@ test_that(".extract_sigmas reads lotriFix on the nonmem2rx branch", {
     sg2 <- expect_no_error(.extract_sigmas(empty, m2)$sigmas)
     expect_false(sg2[[1]]$fixed)
   }
+
+  # An attribute LARGER than the sigma matrix does not describe it. Reading its
+  # top-left corner is a guess, so it must decline. A `>=` dimension check
+  # accepted a 3x3 attribute on a 2x2 sigma and read [1,1] and [2,2].
+  big <- m
+  lf_big <- matrix(TRUE, 3, 3)
+  attr(big, "lotriFix") <- lf_big
+  expect_false(any(vapply(.extract_sigmas(empty, big)$sigmas,
+                          function(s) s$fixed, TRUE)))
+
+  # Alignment is by NAME. A lotriFix ordered differently from
+  # rownames(ui$sigma) must not send the flag to the wrong parameter -- read
+  # positionally, this exact input reported EPS2 fixed when the source fixed
+  # EPS1: one parameter silently pinned and another silently freed.
+  rev <- m
+  attr(rev, "lotriFix") <- matrix(c(FALSE, FALSE, FALSE, TRUE), 2, 2,
+                                  dimnames = list(c("eps2", "eps1"),
+                                                  c("eps2", "eps1")))
+  sg_rev <- .extract_sigmas(empty, rev)$sigmas
+  expect_true(sg_rev[[1]]$fixed)   # EPS1 -- what the attribute actually says
+  expect_false(sg_rev[[2]]$fixed)  # EPS2 -- what a positional read would pin
+
+  # Names that describe something else entirely are a mismatch, not a
+  # reordering, so it declines rather than guessing an alignment.
+  alien <- m
+  attr(alien, "lotriFix") <- matrix(c(TRUE, FALSE, FALSE, TRUE), 2, 2,
+                                    dimnames = list(c("zzz", "qqq"),
+                                                    c("zzz", "qqq")))
+  expect_false(any(vapply(.extract_sigmas(empty, alien)$sigmas,
+                          function(s) s$fixed, TRUE)))
+
+  # No dimnames at all is not a mismatch: positional is then the only reading
+  # available, and the exact dimension match is what makes it defensible.
+  bare <- m
+  attr(bare, "lotriFix") <- matrix(c(TRUE, FALSE, FALSE, FALSE), 2, 2)
+  sg_bare <- .extract_sigmas(empty, bare)$sigmas
+  expect_true(sg_bare[[1]]$fixed)
+  expect_false(sg_bare[[2]]$fixed)
+})
+
+test_that(".extract_sigmas returns warnings and unsupported on every path", {
+  # `c(warn, NULL)` is a silent no-op, so an absent field works by accident of R
+  # rather than by contract -- and breaks the moment a caller uses length(),
+  # vapply() or startsWith() on it, as the surrounding code does elsewhere.
+  nlmixr2 <- .extract_sigmas(.mk_ini(
+    list(ntheta = 1, name = "prop.sd", est = 0.2, fix = TRUE, err = "prop",
+         condition = "cp")))
+  empty_in <- .extract_sigmas(.mk_ini(
+    list(neta1 = 1, neta2 = 1, name = "eta.cl", est = 0.09, fix = FALSE,
+         condition = "id")))
+  for (out in list(nlmixr2, empty_in)) {
+    expect_type(out$warnings, "character")
+    expect_type(out$unsupported, "character")
+  }
 })
 
 test_that(".ini_fixed answers FALSE for an iniDf with no fix column", {
@@ -3711,6 +3753,16 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
   expect_match(out$warnings, "0.001", fixed = TRUE)
   expect_match(out$warnings, "block_sigma", fixed = TRUE)
   expect_length(out$unsupported, 1L)
+
+  # The covariance is rendered with .fmt_num(), not format(). Under a negative
+  # scipen, format(0.001) is "1e-03" and under a small `digits` it truncates --
+  # so a bare format() would make both the warning text a user reads and this
+  # assertion depend on an unrelated global. Set the option that breaks it.
+  op <- options(scipen = -5, digits = 3)
+  on.exit(options(op), add = TRUE)
+  scoped <- .extract_sigmas(empty, m)
+  expect_match(scoped$warnings, "0.001", fixed = TRUE)
+  options(op)
 
   # A diagonal $SIGMA must stay quiet, or every ordinary model gains a warning.
   diag_only <- .extract_sigmas(empty, matrix(c(0.04, 0, 0, 0.01), 2, 2,

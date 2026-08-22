@@ -31,3 +31,20 @@ tmp_ctl_dir <- function() {
   dir.create(d)
   d
 }
+
+# Minimal iniDf for the .extract_* unit tests. Only the columns those extractors
+# read; building the real 12-column frame would assert nothing extra and would
+# drift with upstream.
+#
+# Here rather than in one test file because issues #39, #40 and #41 each need a
+# synthetic iniDf too, and a helper defined mid-file gets copy-pasted instead of
+# reused -- which is what the note at the top of this file exists to prevent.
+.mk_ini <- function(...) {
+  rows <- list(...)
+  do.call(rbind, lapply(rows, function(r) data.frame(
+    ntheta = r$ntheta %||% NA_integer_, neta1 = r$neta1 %||% NA_integer_,
+    neta2  = r$neta2  %||% NA_integer_, name = r$name, est = r$est,
+    fix = r$fix, err = r$err %||% NA_character_,
+    condition = r$condition %||% NA_character_,
+    stringsAsFactors = FALSE)))
+}

@@ -1263,3 +1263,38 @@ test_that("FIX survives the whole NONMEM pipeline for thetas, omegas and sigmas"
   # ever gains an entry, something is being reported as a ferx gap that is not.
   expect_length(result$unsupported, 0L)
 })
+
+test_that("FIX on a $OMEGA BLOCK survives the pipeline, and a free block stays free", {
+  skip_if_not_installed("nonmem2rx")
+  # The block path end to end. Tier 1 covers .extract_omegas() with a synthetic
+  # iniDf and .emit_omega() with a hand-built IR, but neither reaches the other:
+  # nothing else drives a real $OMEGA BLOCK ... FIX from a control stream through
+  # to emitted text, so a regression in how .detect_blocks() orders the lower
+  # triangle against the flag vector would pass every other test.
+  result <- suppressWarnings(nm_to_ferx(nm_path("fix_variances_block.ctl"),
+                                        validate = FALSE))
+  expect_match(result$ferx_text,
+               "block_omega (ETA1, ETA2) = [0.09, 0.01, 0.04] FIX", fixed = TRUE)
+  # The free block is the discriminator -- an emitter appending FIX to every
+  # block satisfies the assertion above on its own.
+  expect_match(result$ferx_text,
+               "block_omega (ETA3, ETA4) = [0.02, 0.005, 0.03]\n", fixed = TRUE)
+  # A wholly fixed block is expressible in ferx, so nothing is unsupported and
+  # the partial-block ERROR must not fire.
+  expect_length(result$unsupported, 0L)
+  expect_length(grep("mixes fixed", result$warnings), 0L)
+})
+
+test_that("FIX on an IOV kappa survives the pipeline, and a free kappa stays free", {
+  skip_if_not_installed("rxode2")
+  # Kappas are reachable only from an nlmixr2 source: nonmem2rx reads NONMEM's
+  # ETA-coded IOV as ordinary IIV, so no control stream produces a
+  # `condition != "id"` row. This is the only end-to-end cover for kappa FIX.
+  fn     <- source(r2_path("fix_kappa_nlmixr2.R"))$value
+  result <- suppressWarnings(nlmixr2_to_ferx(fn))
+  expect_match(result$ferx_text, "kappa IOV_CL ~ 0.05 FIX", fixed = TRUE)
+  expect_match(result$ferx_text, "kappa IOV_V ~ 0.03\n",    fixed = TRUE)
+  # Reading attr(ui$omega, "lotriFix") instead of iniDf$fix would make BOTH
+  # kappas free -- that attribute is NULL on any model carrying IOV.
+  expect_match(result$ferx_text, "iov_column = occ", fixed = TRUE)
+})
