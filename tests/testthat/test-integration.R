@@ -1242,3 +1242,24 @@ test_that("DEFDOSE on compartment 1 with no CMT column reports nothing", {
   expect_equal(.extract_nm_defobs(nm_path("defobs_not_last.ctl"))$defdose, 1L)
   expect_length(grep("DEFDOSE", result$unsupported), 0L)
 })
+
+test_that("FIX survives the whole NONMEM pipeline for thetas, omegas and sigmas", {
+  skip_if_not_installed("nonmem2rx")
+  # End to end on a bundled fixture, which is the only tier that exercises the
+  # nonmem2rx channels as they actually arrive: iniDf$fix for the omegas, and
+  # attr(ui$sigma, "lotriFix") for the sigma -- iniDf carries no sigma row at
+  # all for a NONMEM source, so a Tier-1 test on iniDf alone cannot reach it.
+  result <- suppressWarnings(nm_to_ferx(nm_path("fix_variances.ctl"),
+                                        validate = FALSE))
+  expect_match(result$ferx_text, "theta V(1.0, 0.0, 1e15, FIX)", fixed = TRUE)
+  expect_match(result$ferx_text, "omega ETA_CL ~ 0.05 FIX", fixed = TRUE)
+  expect_match(result$ferx_text, "sigma EPS1 ~ 0.547722557505166 FIX (sd)",
+               fixed = TRUE)
+  # The free eta in the same model is the discriminator: an emitter that
+  # appended FIX unconditionally would satisfy every assertion above.
+  expect_match(result$ferx_text, "omega ETA_KA ~ 0.01\n", fixed = TRUE)
+
+  # A model that merely FIXes parameters uses no unsupported feature. If this
+  # ever gains an entry, something is being reported as a ferx gap that is not.
+  expect_length(result$unsupported, 0L)
+})

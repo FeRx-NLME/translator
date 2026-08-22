@@ -500,3 +500,66 @@ test_that("obs_cmt is omitted from ode() when a readout carries the observation"
     list(dv = "DV", type = "proportional", params = "EPS1")), obs_cmt = "CENT"))
   expect_match(without, "  ode(obs_cmt=CENT, states=[CENT, PD])", fixed = TRUE)
 })
+
+# -- FIX on variance parameters (#31) -----------------------------------------
+#
+# One test per emitted form, each asserting the fixed AND the free spelling.
+# Asserting only the fixed one would pass against an emitter that appended FIX
+# unconditionally, which is the same class of error in the other direction.
+
+test_that("FIX is emitted for every variance parameter kind, and only when set", {
+  ir <- new_ferx_ir(
+    omegas = list(
+      list(type = "diagonal", names = "ETA_CL", values = 0.07, fixed = TRUE),
+      list(type = "diagonal", names = "ETA_V",  values = 0.02, fixed = FALSE),
+      list(type = "block", names = c("ETA_Q", "ETA_V2"),
+           values = c(0.07, 0.02, 0.05), fixed = TRUE),
+      list(type = "block", names = c("ETA_A", "ETA_B"),
+           values = c(0.01, 0.00, 0.01), fixed = FALSE)
+    ),
+    kappas = list(
+      list(name = "KAPPA_CL", value = 0.05, fixed = TRUE),
+      list(name = "KAPPA_V",  value = 0.03, fixed = FALSE)
+    ),
+    sigmas = list(
+      list(name = "EPS1", value = 0.2, scale = "sd",  fixed = TRUE),
+      list(name = "EPS2", value = 0.3, scale = "sd",  fixed = FALSE),
+      list(name = "EPS3", value = 0.4, scale = "var", fixed = TRUE)
+    )
+  )
+  out <- emit_ferx(ir)
+
+  expect_match(out, "omega ETA_CL ~ 0.07 FIX", fixed = TRUE)
+  expect_match(out, "block_omega (ETA_Q, ETA_V2) = [0.07, 0.02, 0.05] FIX",
+               fixed = TRUE)
+  expect_match(out, "kappa KAPPA_CL ~ 0.05 FIX", fixed = TRUE)
+  # FIX precedes the scale annotation. ferx accepts either position, but the
+  # emitter must pick one and this is the spelling validated against the engine.
+  expect_match(out, "sigma EPS1 ~ 0.2 FIX (sd)", fixed = TRUE)
+  expect_match(out, "sigma EPS3 ~ 0.4 FIX", fixed = TRUE)
+
+  # The free ones must carry no FIX at all. Matching the line and then negating
+  # FIX, rather than grepl("FIX", out) on the whole file, which the fixed lines
+  # above would satisfy.
+  lines <- strsplit(out, "\n")[[1]]
+  free  <- c("omega ETA_V ~", "block_omega (ETA_A, ETA_B)", "kappa KAPPA_V ~",
+             "sigma EPS2 ~")
+  for (f in free) {
+    ln <- grep(f, lines, fixed = TRUE, value = TRUE)
+    expect_length(ln, 1L)
+    expect_false(grepl("FIX", ln, fixed = TRUE), label = paste("no FIX on:", ln))
+  }
+})
+
+test_that("an entry with no fixed field emits no FIX", {
+  # Every hand-built IR written before `fixed` existed omits it, and NULL inside
+  # an `if` is an error rather than FALSE. This is the regression guard for that
+  # -- it fails with "argument is of length zero", not with a wrong string.
+  ir <- new_ferx_ir(
+    omegas = list(list(type = "diagonal", names = "ETA_CL", values = 0.07)),
+    kappas = list(list(name = "KAPPA_CL", value = 0.05)),
+    sigmas = list(list(name = "EPS1", value = 0.2, scale = "sd"))
+  )
+  out <- expect_no_error(emit_ferx(ir))
+  expect_false(grepl("FIX", out, fixed = TRUE))
+})

@@ -8,15 +8,21 @@
 #'   or `NA`.
 #' @param source_file Path to the source file, or `NA`.
 #' @param thetas List of theta entries. Each element is a list with fields
-#'   `name` (character), `init` (numeric), `lower` (numeric), `upper` (numeric).
+#'   `name` (character), `init` (numeric), `lower` (numeric), `upper` (numeric),
+#'   and optionally `fixed` (logical scalar, rendered as the `FIX` keyword).
 #' @param omegas List of omega entries. Each element is a list with `type`
 #'   (`"diagonal"` or `"block"`), `names` (character vector), and `values`
 #'   (numeric). For `"diagonal"`: one name, one value. For `"block"`:
-#'   multiple names, lower-triangular values.
+#'   multiple names, lower-triangular values. May carry `fixed` (logical
+#'   scalar). For a `"block"` that flag covers the whole declaration: ferx
+#'   fixes a `block_omega` all or nothing, and rejects an eta marked `FIX`
+#'   that belongs to a block that is not.
 #' @param kappas List of IOV kappa entries. Each element is a list with
-#'   `name` (character) and `value` (numeric).
+#'   `name` (character), `value` (numeric), and optionally `fixed` (logical
+#'   scalar).
 #' @param sigmas List of sigma entries. Each element is a list with `name`
-#'   (character), `value` (numeric), and `scale` (`"sd"` or `"var"`).
+#'   (character), `value` (numeric), `scale` (`"sd"` or `"var"`), and
+#'   optionally `fixed` (logical scalar).
 #' @param indiv_params Ordered list of statements. Each element is a list with
 #'   a `kind`: `"assign"` (`lhs`, `rhs`, both character) or `"if"` (`cond`,
 #'   character; `then`, and optionally `else_`, each a nested statement list).
@@ -173,6 +179,20 @@ validate_ferx_ir <- function(ir) {
         "structural$type must be {.or {.val {valid_types}}}, not {.val {ir$structural$type}}."
       )
   }
+
+  # `fixed` decides whether a parameter is estimated or held, and both the
+  # emitter and every reader of the emitted file take it on trust. A malformed
+  # one must not reach .fix_suffix(), whose isTRUE() answers FALSE for NA and
+  # for a length-2 vector alike -- silently emitting a FREE parameter, which is
+  # exactly the defect this field was added to close. Rejecting here keeps that
+  # failure loud and at the boundary rather than inside sprintf().
+  for (grp in c("thetas", "omegas", "kappas", "sigmas"))
+    for (el in ir[[grp]])
+      if (!is.null(el$fixed) &&
+          (!is.logical(el$fixed) || length(el$fixed) != 1L || is.na(el$fixed)))
+        cli::cli_abort(
+          "{grp}: {.field fixed} must be a single non-NA logical when present."
+        )
 
   if (length(ir$odes) > 0 && !identical(ir$structural$type, "ode"))
     cli::cli_abort(

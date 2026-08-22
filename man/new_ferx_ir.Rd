@@ -32,18 +32,24 @@ or \code{NA}.}
 \item{source_file}{Path to the source file, or \code{NA}.}
 
 \item{thetas}{List of theta entries. Each element is a list with fields
-\code{name} (character), \code{init} (numeric), \code{lower} (numeric), \code{upper} (numeric).}
+\code{name} (character), \code{init} (numeric), \code{lower} (numeric), \code{upper} (numeric),
+and optionally \code{fixed} (logical scalar, rendered as the \code{FIX} keyword).}
 
 \item{omegas}{List of omega entries. Each element is a list with \code{type}
 (\code{"diagonal"} or \code{"block"}), \code{names} (character vector), and \code{values}
 (numeric). For \code{"diagonal"}: one name, one value. For \code{"block"}:
-multiple names, lower-triangular values.}
+multiple names, lower-triangular values. May carry \code{fixed} (logical
+scalar). For a \code{"block"} that flag covers the whole declaration: ferx
+fixes a \code{block_omega} all or nothing, and rejects an eta marked \code{FIX}
+that belongs to a block that is not.}
 
 \item{kappas}{List of IOV kappa entries. Each element is a list with
-\code{name} (character) and \code{value} (numeric).}
+\code{name} (character), \code{value} (numeric), and optionally \code{fixed} (logical
+scalar).}
 
 \item{sigmas}{List of sigma entries. Each element is a list with \code{name}
-(character), \code{value} (numeric), and \code{scale} (\code{"sd"} or \code{"var"}).}
+(character), \code{value} (numeric), \code{scale} (\code{"sd"} or \code{"var"}), and
+optionally \code{fixed} (logical scalar).}
 
 \item{indiv_params}{Ordered list of statements. Each element is a list with
 a \code{kind}: \code{"assign"} (\code{lhs}, \code{rhs}, both character) or \code{"if"} (\code{cond},

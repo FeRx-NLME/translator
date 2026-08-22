@@ -54,10 +54,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, theta_out$warnings)
 
   omega_out <- .extract_omegas(ini)
+  warn      <- c(warn, omega_out$warnings)
+  unsp      <- c(unsp, omega_out$unsupported)
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
 
   sigma_out <- .extract_sigmas(ini, tryCatch(ui$sigma, error = function(e) NULL))
+  warn      <- c(warn, sigma_out$warnings)
+  unsp      <- c(unsp, sigma_out$unsupported)
 
   # One uniqueness pass over ALL THREE random-effect channels together, not
   # three per-channel ones: an omega and a sigma normalising onto the same
@@ -2406,19 +2410,35 @@ bound_name <- function(entries, raw) {
        warnings = character())
 }
 
+# `fix` is read through .ini_fixed() rather than `ini$fix` directly. The column
+# is present on every rxUi this package has been measured against -- nonmem2rx
+# 0.1.9 and rxode2 5.1.2 both emit it -- but `ini$fix` on a frame that lacks it
+# is NULL, and NULL[i] is NULL, which isTRUE() then reads as FALSE. That is the
+# silent-drop this whole change exists to remove, reintroduced one layer down.
+# Answering FALSE for an absent column is the same answer, but it is a decision
+# made once here instead of implied at four call sites.
+.ini_fixed <- function(ini, i) {
+  if (is.null(ini$fix)) return(FALSE)
+  isTRUE(ini$fix[i])
+}
+
 .extract_omegas <- function(ini) {
   iiv <- ini[!is.na(ini$neta1) & ini$condition == "id", , drop = FALSE]
-  if (nrow(iiv) == 0) return(list(omegas = list()))
+  if (nrow(iiv) == 0) return(list(omegas = list(), warnings = character(),
+                                  unsupported = character()))
 
   off   <- iiv[iiv$neta1 != iiv$neta2, , drop = FALSE]
   diag  <- iiv[iiv$neta1 == iiv$neta2, , drop = FALSE]
+  warn  <- character()
+  unsp  <- character()
 
   if (nrow(off) == 0) {
     omegas <- lapply(seq_len(nrow(diag)), function(i) {
       list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])),
-           raw = diag$name[i], values = diag$est[i])
+           raw = diag$name[i], values = diag$est[i],
+           fixed = .ini_fixed(diag, i))
     })
-    return(list(omegas = omegas))
+    return(list(omegas = omegas, warnings = warn, unsupported = unsp))
   }
 
   blocks        <- .detect_blocks(off)
@@ -2433,19 +2453,56 @@ bound_name <- function(entries, raw) {
       as.character(row$name[1])
     }, "")
     nms   <- unname(vapply(raws, function(r) .norm(.strip_prefix(r)), ""))
+    # Every element of the block, diagonal and off-diagonal alike, decides one
+    # flag -- ferx flags the whole declaration or none of it. Measured on both
+    # sources, a block is always uniform: NONMEM's FIX is a $OMEGA RECORD
+    # attribute, and nlmixr2's fix() wraps the entire `a + b ~ ...` line. So the
+    # mixed arm below is not reachable from a control stream or a model
+    # function, and its test builds an iniDf by hand rather than pretending some
+    # source spelling produces it.
+    fx <- vapply(seq_len(nrow(lt)), function(i) .ini_fixed(lt, i), TRUE)
+    if (any(fx) && !all(fx)) {
+      # Emitted FREE, and loudly. Neither choice is right: FIX would pin
+      # elements the source left free, and no FIX frees elements it pinned.
+      # Free is the one the user can SEE -- a pinned parameter that moved off
+      # its value is visible in the output, whereas an over-constrained fit
+      # reports a zero SE and a converged-looking OFV that says nothing.
+      # Named by ETA, which means reading each eta's own DIAGONAL row rather
+      # than `fx` positionally -- `fx` is indexed over the lower triangle and
+      # its off-diagonal entries belong to a pair, not to one name. A block
+      # whose only fixed element is a covariance leaves this empty, so it gets
+      # a phrase instead of a dangling list.
+      diag_fixed <- vapply(bg, function(e)
+        isTRUE(fx[which(lt$neta1 == e & lt$neta2 == e)[1]]), TRUE)
+      lost <- if (any(diag_fixed)) paste(nms[diag_fixed], collapse = ", ")
+              else "its fixed covariance element(s)"
+      warn <- c(warn, paste0(
+        "ERROR | $OMEGA BLOCK (", paste(nms, collapse = ", "), ") mixes fixed ",
+        "and estimated elements. ferx flags a block_omega all or nothing -- ",
+        "`block_omega (...) = [...] FIX` fixes every eta in it, and an eta ",
+        "marked FIX inside a block that is not is rejected outright. The block ",
+        "is emitted WITHOUT FIX, so ", lost, " will be estimated rather than ",
+        "held. Split the fixed elements into their own $OMEGA, or fix the ",
+        "whole block."))
+      unsp <- c(unsp, paste0(
+        "partially fixed $OMEGA BLOCK (", paste(nms, collapse = ", "),
+        ") -- ferx fixes a block_omega all or nothing"))
+    }
     omegas <- c(omegas, list(list(type = "block", names = nms,
-                                  raw = unname(raws), values = lt$est)))
+                                  raw = unname(raws), values = lt$est,
+                                  fixed = all(fx))))
   }
 
   for (i in seq_len(nrow(diag))) {
     if (!diag$neta1[i] %in% block_eta_set)
       omegas <- c(omegas, list(
         list(type = "diagonal", names = .norm(.strip_prefix(diag$name[i])),
-             raw = diag$name[i], values = diag$est[i])
+             raw = diag$name[i], values = diag$est[i],
+             fixed = .ini_fixed(diag, i))
       ))
   }
 
-  list(omegas = omegas)
+  list(omegas = omegas, warnings = warn, unsupported = unsp)
 }
 
 # Union-find over off-diagonal eta pairs; returns list of sorted integer vectors.
@@ -2487,9 +2544,14 @@ bound_name <- function(entries, raw) {
                            paste(iov_col, collapse = ", "), " -- using first"))
   iov_col <- iov_col[1]
 
+  # Kappas read iniDf$fix and NOT attr(ui$omega, "lotriFix"). Measured on
+  # rxode2 5.1.2: an `iov ~ fix(0.05) | occ` model has the flag on its iniDf row
+  # but `attr(ui$omega, "lotriFix")` is NULL for that same model -- the presence
+  # of IOV is what drops the attribute. So the two channels are not
+  # interchangeable, and the one that survives IOV is the one to read here.
   kappas <- lapply(seq_len(nrow(diag)), function(i)
     list(name = .norm(.strip_prefix(diag$name[i])), raw = diag$name[i],
-         value = diag$est[i])
+         value = diag$est[i], fixed = .ini_fixed(diag, i))
   )
   list(kappas = kappas, iov_column = iov_col, warnings = warn)
 }
@@ -2528,13 +2590,57 @@ bound_name <- function(entries, raw) {
   if (nrow(rows) > 0) {
     sigmas <- lapply(seq_len(nrow(rows)), function(i) {
       row <- rows[i, ]
-      list(name = .norm(.strip_prefix(row$name)), value = row$est, scale = "sd")
+      list(name = .norm(.strip_prefix(row$name)), value = row$est, scale = "sd",
+           fixed = .ini_fixed(rows, i))
     })
     return(list(sigmas = sigmas, raw_names = as.character(rows$name)))
   }
   # nonmem2rx: sigma lives in the ui$sigma matrix (variance scale); convert to SD.
   if (!is.null(ui_sigma) && is.matrix(ui_sigma) && nrow(ui_sigma) > 0) {
     nms    <- rownames(ui_sigma)
+    # The FIX flags for a NONMEM $SIGMA ride on the matrix as an attribute, not
+    # in iniDf -- which carries no sigma row at all for a nonmem2rx source, and
+    # is byte-identical for `$SIGMA 0.04` and `$SIGMA 0.04 FIX`. Measured on
+    # nonmem2rx 0.1.9: attr(ui$sigma, "lotriFix") is a logical matrix of the
+    # same shape, TRUE where the record carried FIX, and it resolves multiple
+    # $SIGMA records and $SIGMA BLOCK alike. Reading it here is what makes
+    # parsing the raw $SIGMA record out of the control stream unnecessary.
+    #
+    # Guarded on shape rather than trusted: it is an upstream attribute this
+    # package does not control, and a NULL or mis-shaped one must answer FALSE
+    # (the parameter is estimated, which is what happens today) rather than
+    # error or index out of bounds.
+    lfix   <- attr(ui_sigma, "lotriFix")
+    ok_fix <- is.matrix(lfix) && is.logical(lfix) &&
+              nrow(lfix) >= length(nms) && ncol(lfix) >= length(nms)
+    # Only the DIAGONAL of ui$sigma is read below, so a `$SIGMA BLOCK` loses its
+    # residual covariances. That drop is older than this change and is not fixed
+    # here -- emitting `block_sigma` is a different job, because ferx does not
+    # take the off-diagonals as covariances at all ("off-diagonal entries are
+    # converted to fixed correlations", model_parser.rs) and that mapping needs
+    # measuring rather than assuming. What IS fixed here is the silence: the
+    # translation reported character(0) warnings and character(0) unsupported
+    # while discarding them, which is the one outcome CLAUDE.md rules out.
+    #
+    # Sigma was the outlier of the three random-effect channels. Omega emits its
+    # block in full; .extract_kappas() warns when it drops an off-diagonal; only
+    # this branch said nothing.
+    off_diag <- ui_sigma
+    diag(off_diag) <- 0
+    if (any(abs(off_diag) > 0, na.rm = TRUE)) {
+      pairs <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
+      shown <- paste(vapply(seq_len(nrow(pairs)), function(k) paste0(
+        .norm(nms[pairs[k, 1]]), "/", .norm(nms[pairs[k, 2]]), " = ",
+        format(ui_sigma[pairs[k, 1], pairs[k, 2]])), ""), collapse = ", ")
+      sig_warn <- paste0(
+        "ERROR | $SIGMA BLOCK declares residual covariances (", shown,
+        ") and only the diagonal is emitted, so the residual errors become ",
+        "independent. ferx can hold them with `block_sigma`, which this ",
+        "translator does not emit yet; the fit will run and report a ",
+        "plausible OFV computed under the wrong residual structure.")
+    } else {
+      sig_warn <- character()
+    }
     sigmas <- lapply(seq_along(nms), function(i)
       # .norm(), matching the nlmixr2 branch above. This was the last emitted-name
       # channel that only uppercased: the name comes from rownames(ui$sigma),
@@ -2542,9 +2648,14 @@ bound_name <- function(entries, raw) {
       # [error_model].
       list(name  = .norm(nms[i]),
            value = sqrt(ui_sigma[i, i]),
-           scale = "sd")
+           scale = "sd",
+           fixed = ok_fix && isTRUE(lfix[i, i]))
     )
-    return(list(sigmas = sigmas, raw_names = nms))
+    return(list(sigmas = sigmas, raw_names = nms, warnings = sig_warn,
+                unsupported = if (length(sig_warn) > 0) paste0(
+                  "residual covariances on $SIGMA BLOCK -- block_sigma is not ",
+                  "emitted, so the residuals are treated as independent")
+                else character()))
   }
   list(sigmas = list(), raw_names = character())
 }
