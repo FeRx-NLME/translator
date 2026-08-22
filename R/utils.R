@@ -82,7 +82,12 @@
   sub(";.*$", "", body)
 }
 
-# The compartment $MODEL marks DEFOBS, as a 1-based index into the COMP list.
+# The compartment $MODEL marks DEFOBS, as a 1-based index into the COMP list --
+# and, from the same parse, the compartment it marks DEFDOSE. The name says
+# defobs and the return value says more than that: `comps`, `n_comp` and
+# `defdose` come back too, because all four are read off the one COMP list and a
+# second parser for the same record is how two readers start disagreeing about
+# where it ends. See .nm_block_lines() below on that.
 #
 # Read from the raw control stream for the same reason .extract_nm_scaling() is:
 # nonmem2rx does not surface it. `ui$central` is NULL for both nonmem2rx and
@@ -98,6 +103,12 @@
 # fall back to NONMEM's own default (compartment 1 when DEFOBS is omitted): the
 # caller has better evidence than that -- the compartment the DV expression
 # names -- and a quiet assumption about NONMEM semantics would outrank it.
+#
+# `defdose` is NA on the same terms and for a different reason. NONMEM's default
+# when no compartment is marked DEFDOSE is compartment 1, which is exactly what
+# ferx does with a dose row it cannot resolve, so the two agree and there is
+# nothing for a caller to report. Filling the NA in with 1 here would turn that
+# agreement into a claim the control stream never made.
 .extract_nm_defobs <- function(ctl_file) {
   # `$MOD` is a legal abbreviation of `$MODEL`.
   body <- .nm_block_lines(ctl_file, "MOD")
@@ -115,8 +126,9 @@
   m  <- gregexpr(re, txt, ignore.case = TRUE, perl = TRUE)
   decls <- regmatches(txt, m)[[1]]
   if (length(decls) == 0L) return(NULL)
-  comps  <- character(length(decls))
-  defobs <- NA_integer_
+  comps   <- character(length(decls))
+  defobs  <- NA_integer_
+  defdose <- NA_integer_
   for (i in seq_along(decls)) {
     inner <- sub("^\\bCOMP(ARTMENT)?\\s*=?\\s*", "", decls[i],
                  ignore.case = TRUE, perl = TRUE)
@@ -135,9 +147,78 @@
     # silently reverted the caller to its guess.
     if (is.na(defobs) && any(grepl("^DEFO", toks[-1], ignore.case = TRUE)))
       defobs <- i
+    # DEFDOSE diverges from DEFOBSERVATION at the fourth character, so `DEFD` is
+    # the shortest unambiguous prefix and the two anchors cannot cross-match.
+    if (is.na(defdose) && any(grepl("^DEFD", toks[-1], ignore.case = TRUE)))
+      defdose <- i
   }
-  list(index  = defobs,
-       name   = if (is.na(defobs)) NA_character_ else comps[defobs],
-       n_comp = length(decls),
-       comps  = comps)
+  list(index   = defobs,
+       name    = if (is.na(defobs)) NA_character_ else comps[defobs],
+       defdose = defdose,
+       n_comp  = length(decls),
+       comps   = comps)
+}
+
+# Does $INPUT declare a CMT data item that NONMEM will actually read?
+#
+# TRUE / FALSE / NA, where NA means the question could not be answered (no
+# $INPUT record, or one with no data items) and callers should stay silent
+# rather than guess.
+#
+# This decides which rule assigns a dose row to a compartment. With a CMT item
+# the data does, and NONMEM and ferx agree. Without one they diverge: NM-TRAN
+# uses $MODEL's DEFDOSE compartment, while ferx-core reads
+# `cmt_col.and_then(...).unwrap_or(1)` and uses compartment 1.
+#
+# `$INP` and not `$INPUT`: NM-TRAN accepts any unambiguous prefix, and `$IN`
+# alone is ambiguous with `$INFN` while `$INP` is not.
+#
+# A data item may be written `CMT`, as a synonym pair `CMT=X` or `X=CMT`, or
+# dropped with `CMT=DROP` / `CMT=SKIP`. A dropped item is NOT read by NONMEM, so
+# it answers FALSE here -- for the dose-compartment question that is the right
+# answer, because NM-TRAN falls back to DEFDOSE exactly as if the column were
+# absent.
+#
+# What this canNOT answer is what the DATASET holds, and callers must not word a
+# diagnostic as though it could. $INPUT names columns by POSITION; ferx binds
+# them by CSV HEADER NAME and never reads $INPUT at all. So the two answers come
+# apart in both directions:
+#
+#   - FALSE via `CMT=DROP` means NONMEM ignores a column that is physically
+#     there, and ferx will happily read it. "ferx doses compartment 1" is false
+#     for that spelling, and "add a CMT column" sends the user to add one that
+#     already exists.
+#   - TRUE means only that $INPUT named an item `CMT`. If the CSV header spells
+#     that column something else, ferx still falls to compartment 1 and this
+#     answers TRUE, so the divergence goes unreported. Tracked as #36.
+#
+# Settling either needs the dataset. `.extract_nm_data_path()` could supply it
+# and a one-line header read would close the second case; until then the
+# caller's remedy says what the dataset must CONTAIN rather than claiming to
+# have looked.
+.nm_input_has_cmt <- function(ctl_file) {
+  body <- .nm_block_lines(ctl_file, "INP")
+  if (length(body) == 0L) return(NA)
+  # Items may continue onto following lines, which is why this reads the whole
+  # record body rather than the `$INPUT` line.
+  txt  <- sub("^\\s*[$]INP[A-Za-z]*", "", paste(body, collapse = " "),
+              ignore.case = TRUE)
+  # Whitespace around a synonym pair's `=` is collapsed FIRST. Splitting on
+  # whitespace before parsing the `=` handed `CMT = DROP` back as three tokens,
+  # of which the bare `CMT` answered TRUE -- so the DROP rule below applied to
+  # `CMT=DROP` and not to `CMT = DROP`, and one spelling of one item silently
+  # changed the answer.
+  txt  <- gsub("[[:space:]]*=[[:space:]]*", "=", txt)
+  toks <- trimws(strsplit(txt, "[,[:space:]]+")[[1]])
+  toks <- toks[nzchar(toks)]
+  if (length(toks) == 0L) return(NA)
+  any(vapply(toks, .nm_item_is_cmt, TRUE))
+}
+
+.nm_item_is_cmt <- function(tok) {
+  parts <- toupper(trimws(strsplit(tok, "=")[[1]]))
+  parts <- parts[nzchar(parts)]
+  if (length(parts) == 0L) return(FALSE)
+  if (any(parts %in% c("DROP", "SKIP"))) return(FALSE)
+  any(parts == "CMT")
 }

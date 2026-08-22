@@ -101,6 +101,89 @@ peer working there has already raised the expressiveness gap with their user.
   compartment 1 and DEFDOSE), so **nothing existing can show this** -- new
   fixtures are mandatory and each must be shown to fail first.
 
+### During implementation -- where this section was incomplete
+
+Landed on `fix/issue-27-defdose-no-cmt`, measured against `main` `f55d1fe` with
+`ferx` installed locally. The design above survived intact; five things it did
+not say came up.
+
+**Silence on a missing DEFDOSE is CORRECT, not merely cautious.** The plan
+framed the guard as "fires only when both hold" and left `defdose = NA` implicit.
+It matters, because two bundled models reach it (`ode_warfarin.ctl`,
+`s_scaling_not_last.ctl`): `$MODEL` present, no `DEFDOSE` attribute anywhere.
+NONMEM's own default there is compartment 1, which is exactly what ferx does, so
+the two agree and there is nothing to report. `.extract_nm_defobs()` returns
+`NA_integer_` rather than filling in the 1, on the same principle its `defobs`
+already follows -- filling it in would turn an agreement into a claim the control
+stream never made.
+
+**`CMT=DROP` needed a decision the plan did not anticipate.** NM-TRAN's `DROP` /
+`SKIP` marks a column it will not read, so for the dose-compartment question a
+DROPped `CMT` is identical to an absent one and `.nm_input_has_cmt()` answers
+FALSE. That leaves one narrower divergence deliberately unreported and named in
+the code: ferx binds columns by CSV header and knows nothing of `$INPUT`, so a
+DROPped `CMT` column is still read by ferx even when `DEFDOSE` is compartment 1,
+where this guard stays quiet. Chasing that would have widened #27 into a
+different defect.
+
+**`$INP`, not `$INPUT`.** NM-TRAN accepts any unambiguous record prefix, and
+`$IN` collides with `$INFN`. `$INP` is the shortest that does not. The corpus
+already contains a continuation-style `$INPUT` whose data items are on the NEXT
+line (`pk_1cmt_oral.mod`), so reading only the `$INPUT` line would have answered
+FALSE for a real model -- pinned by a unit test and by mutation m6.
+
+**The `# WARNING:` comment needed a new mechanism.** `emit_ferx()` had a
+per-statement `note` for `[odes]` and `init()` lines but nothing for
+`[structural_model]`, so the header block was the only place a warning could
+land. `ir$structural$note` now renders as a comment line directly above the
+`ode(...)` line. The test for it is anchored by POSITION, not by slicing the
+block out with a regex: `sub()` returns its whole input when it fails to match,
+so a slice that silently degrades to the entire file still finds the note in the
+header and passes.
+
+**Scoped to ODE models.** `DEFDOSE` is a `$MODEL` attribute and a `$MODEL` block
+means a general ADVAN, so the evidence only exists there. What ferx's pk macro
+path does with a dose compartment was not measured, and firing on it would have
+been a guess.
+
+Reported the way CLAUDE.md prescribes, with the upstream gap now filed as
+ferx-core#1009 (open, no comments): if that lands, this report becomes an
+emission.
+
+#### Mutation results
+
+Ten mutations, each run against the full `rxui_to_ir` + `integration` suites.
+
+| mutation | verdict |
+|---|---|
+| `isFALSE(has_cmt_col)` -> `!isTRUE(...)`, so NA fires | CAUGHT |
+| drop the CMT half of the guard | CAUGHT |
+| drop the `dd != 1L` half of the guard | CAUGHT |
+| `^DEFD` -> `^DEFDOSE`, rejecting the legal abbreviations | CAUGHT |
+| drop the `DROP`/`SKIP` check | CAUGHT |
+| read only the first `$INPUT` line, not the record | CAUGHT |
+| do not set `structural$note` | CAUGHT |
+| `parts == "CMT"` -> `grepl("CMT", parts)` | CAUGHT |
+| delete the `unsupported` append | CAUGHT |
+| emit the note BELOW the `ode()` line | CAUGHT |
+
+Two harness faults surfaced first and are worth recording, because both read as
+a green result:
+
+- `reporter = "summary"` prints failures as `1. Failure (...)`, so a harness
+  matching lines that START with `Failure` found none and reported the first
+  mutation VACUOUS when the suite had in fact caught it. Parse the
+  `[ FAIL n | ... | PASS n ]` line instead -- every reporter emits it.
+- The first attempt at the `unsupported` mutation renamed the entry's PREFIX and
+  left `DEFDOSE` in the string, which is exactly what the assertions match on.
+  It read VACUOUS while testing nothing. A mutation has to remove the thing the
+  test asserts, not edit text next to it.
+
+That is three harness faults across two PRs now (the `str.replace(..., 1)` that
+hit the wrong function on #32 was the first). A VACUOUS verdict should be
+treated as a claim about the harness until the mutation is confirmed applied at
+the intended site.
+
 ---
 
 ## Part 2 -- #26: a trailing `$MODEL` gap destroys every state name

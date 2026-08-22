@@ -24,7 +24,10 @@
 #'   field held before statement lists. Order is preserved exactly.
 #' @param structural List describing the structural model. Must have `type`:
 #'   `"pk_macro"` (add `pk_call` and `pk_args`) or `"ode"` (add `obs_cmt`
-#'   and `states`). May be empty during incremental construction.
+#'   and `states`). May be empty during incremental construction. An optional
+#'   `note` is emitted as a comment line directly above the `ode(...)` /
+#'   `pk ...` line, for a warning that belongs where a reader looks rather than
+#'   only in the header block.
 #' @param odes Ordered list of statements forming the `[odes]` block. Each
 #'   element is a list with a `kind`: `"ddt"` (`state`, `rhs`), `"assign"`
 #'   (`lhs`, `rhs`) for an ODE-block intermediate, or `"if"` (`cond`, `then`,
@@ -209,6 +212,18 @@ validate_ferx_ir <- function(ir) {
         x = "ferx rejects this with {.code E_PARSE: Observable compartment not in states}."
       ))
   }
+
+  # `structural$note` is an optional comment line, so it is validated only when
+  # present -- but validated by LENGTH as well as type. `nzchar()` in the
+  # emitter aborts on character(0) and on a length-2 vector with a base-R
+  # message naming neither field nor function, which is the same trap this
+  # validator records for `obs_cmt` above and exists to keep out.
+  if (!is.null(ir$structural$note) &&
+      (!is.character(ir$structural$note) || length(ir$structural$note) != 1L ||
+       is.na(ir$structural$note)))
+    cli::cli_abort(
+      "structural$note must be a single non-NA character string when present."
+    )
 
   # A readout and `obs_scale` must never appear together. ferx applies the scale
   # on TOP of the readout expression: measured on 0.3.0 the file validates clean

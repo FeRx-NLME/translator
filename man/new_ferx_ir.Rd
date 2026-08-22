@@ -53,7 +53,10 @@ field held before statement lists. Order is preserved exactly.}
 
 \item{structural}{List describing the structural model. Must have \code{type}:
 \code{"pk_macro"} (add \code{pk_call} and \code{pk_args}) or \code{"ode"} (add \code{obs_cmt}
-and \code{states}). May be empty during incremental construction.}
+and \code{states}). May be empty during incremental construction. An optional
+\code{note} is emitted as a comment line directly above the \code{ode(...)} /
+\verb{pk ...} line, for a warning that belongs where a reader looks rather than
+only in the header block.}
 
 \item{odes}{Ordered list of statements forming the \verb{[odes]} block. Each
 element is a list with a \code{kind}: \code{"ddt"} (\code{state}, \code{rhs}), \code{"assign"}

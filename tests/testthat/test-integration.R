@@ -1163,3 +1163,82 @@ test_that("a $MODEL with no DEFOBS is not reported as contradicting the DV expre
   expect_length(grep("declares 'NA' as DEFOBS", result$warnings), 0L)
   expect_length(grep("but \\$MODEL declares", result$warnings), 0L)
 })
+
+# -- issue #27: DEFDOSE with no CMT column ------------------------------------
+
+test_that("a CMT-less dataset with DEFDOSE elsewhere reports where the dose lands", {
+  skip_if_not_installed("nonmem2rx")
+  # NM-TRAN doses $MODEL's DEFDOSE compartment when the dataset has no CMT
+  # item; ferx-core doses compartment 1 and has no model-side dose-compartment
+  # binding on the fitting path to say otherwise. Measured on this model: the
+  # dose lands in PERIPH instead of CENTRAL, a factor of ~6 at t=1, and before
+  # this guard nothing anywhere said so -- the emitted file was correct in
+  # every respect the translator checked.
+  result <- suppressWarnings(nm_to_ferx(nm_path("defdose_no_cmt.ctl"),
+                                        validate = FALSE))
+
+  expect_length(grep("^ERROR.*DEFDOSE", result$warnings), 1L)
+  # The remedy states what the DATASET must contain, and says so in ferx's own
+  # terms: ferx binds columns by CSV header name and never reads $INPUT. It
+  # must NOT say "ferx doses compartment 1 because there is no CMT column" --
+  # for a `CMT=DROP` item the column is physically there and ferx reads it, so
+  # that phrasing is false and its fix is a no-op.
+  expect_match(result$warnings, "HEADER names CMT", all = FALSE)
+  expect_length(grep("Add a CMT column to the dataset", result$warnings), 0L)
+  expect_length(grep("DEFDOSE", result$unsupported), 1L)
+  # Names both compartments: the one NONMEM dosed and the one ferx will.
+  expect_match(result$unsupported, "CENTRAL", all = FALSE)
+  expect_match(result$unsupported, "PERIPH",  all = FALSE)
+
+  # And in the artefact, at the line -- [structural_model] is where a dose
+  # binding would appear, and the .ferx is what gets run months later while
+  # result$warnings is not.
+  #
+  # Anchored by POSITION, not by a regex slice of the block. A sub() that fails
+  # to match returns its whole input, so slicing the block out and then matching
+  # the note inside it passes just as well when the slice silently degrades to
+  # the entire file -- and the note's text appears nowhere else, so nothing
+  # would notice. These two lines assert the note sits immediately above the
+  # ode() line, which is the property being claimed.
+  ln  <- strsplit(result$ferx_text, "\n")[[1]]
+  hdr <- which(ln == "[structural_model]")
+  expect_length(hdr, 1L)
+  expect_equal(ln[hdr + 1L],
+               paste0("  # WARNING: doses land in 'PERIPH' here; NONMEM dosed ",
+                      "'CENTRAL' (compartment 2, $MODEL DEFDOSE, no CMT item ",
+                      "on $INPUT)"))
+  expect_equal(ln[hdr + 2L], "  ode(obs_cmt=CENTRAL, states=[PERIPH, CENTRAL])")
+
+  # The states are NOT reordered to float DEFDOSE into position 1. That would
+  # fight issue #25, which pins the emitted order to $MODEL COMP order so the
+  # source's own CMT values keep meaning what the source meant.
+  expect_match(result$ferx_text, "states=[PERIPH, CENTRAL]", fixed = TRUE)
+})
+
+test_that("the same model with a CMT column reports nothing", {
+  skip_if_not_installed("nonmem2rx")
+  # defdose_cmt_present.ctl differs from defdose_no_cmt.ctl in exactly one
+  # token. Without this, a guard keyed on DEFDOSE alone -- ignoring the CMT
+  # half -- passes the test above and reports a divergence that does not exist
+  # on every IV-into-central model in the world.
+  result <- suppressWarnings(nm_to_ferx(nm_path("defdose_cmt_present.ctl"),
+                                        validate = FALSE))
+  expect_length(grep("DEFDOSE", result$unsupported), 0L)
+  expect_length(grep("DEFDOSE", result$warnings), 0L)
+  expect_length(grep("# WARNING: doses land", result$ferx_text), 0L)
+  # Same emitted model otherwise, so the guard is the only difference.
+  expect_match(result$ferx_text, "states=[PERIPH, CENTRAL]", fixed = TRUE)
+})
+
+test_that("DEFDOSE on compartment 1 with no CMT column reports nothing", {
+  skip_if_not_installed("nonmem2rx")
+  # The other half of the same discrimination, on a model that was already in
+  # the corpus: no CMT item, DEFDOSE on compartment 1. NONMEM and ferx agree
+  # there, so a guard that fired on the missing column alone would report every
+  # oral PK model in the corpus.
+  result <- suppressWarnings(nm_to_ferx(nm_path("defobs_not_last.ctl"),
+                                        validate = FALSE))
+  expect_false(.nm_input_has_cmt(nm_path("defobs_not_last.ctl")))
+  expect_equal(.extract_nm_defobs(nm_path("defobs_not_last.ctl"))$defdose, 1L)
+  expect_length(grep("DEFDOSE", result$unsupported), 0L)
+})
