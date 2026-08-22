@@ -110,23 +110,49 @@ emit_ferx <- function(ir) {
           t$name, .fmt_num(t$init), .fmt_num(t$lower), .fmt_num(t$upper), fix_str)
 }
 
+# FIX on a variance parameter is a constraint, not a formatting detail: dropping
+# it turns a parameter the source pinned into one the engine estimates, and the
+# fit converges and reports a plausible number either way. Measured on
+# pk_1cmt_oral.mod against ferx 0.3.0, starting ETA_CL at 0.5 with a simulation
+# truth of 0.02: `omega ETA_CL ~ 0.5` lands on 0.0197 and `omega ETA_CL ~ 0.5
+# FIX` holds 0.5. Same model, same data, same start -- a factor of 25 decided by
+# one keyword, with no diagnostic on the losing side.
+#
+# `isTRUE()` rather than a bare `if`: `fixed` is absent from every hand-built IR
+# written before this field existed (test-emit.R, test-ir.R and the roxygen
+# examples all build omegas as `list(type=, names=, values=)`), and NULL in an
+# `if` is an error, not FALSE. It also absorbs NA, which no extractor should
+# produce but which validate_ferx_ir() is the place to reject rather than here.
+.fix_suffix <- function(x) if (isTRUE(x$fixed)) " FIX" else ""
+
 .emit_omega <- function(o) {
   if (identical(o$type, "block")) {
     names_str  <- paste(o$names, collapse = ", ")
     values_str <- paste(vapply(o$values, .fmt_num, ""), collapse = ", ")
-    sprintf("  block_omega (%s) = [%s]", names_str, values_str)
+    # ferx has no per-eta FIX inside a block -- `block_omega (...) = [...] FIX`
+    # flags every eta in it, and build_omega_fixed() REJECTS an eta marked FIX
+    # that also belongs to a non-FIX block ("fix the whole block instead").
+    # So this is one flag for the whole declaration by the target's design, not
+    # by simplification here; .extract_omegas() is where a partially fixed
+    # source block is detected and reported.
+    sprintf("  block_omega (%s) = [%s]%s", names_str, values_str, .fix_suffix(o))
   } else {
-    sprintf("  omega %s ~ %s", o$names, .fmt_num(o$values))
+    sprintf("  omega %s ~ %s%s", o$names, .fmt_num(o$values), .fix_suffix(o))
   }
 }
 
 .emit_kappa <- function(k) {
-  sprintf("  kappa %s ~ %s", k$name, .fmt_num(k$value))
+  sprintf("  kappa %s ~ %s%s", k$name, .fmt_num(k$value), .fix_suffix(k))
 }
 
 .emit_sigma <- function(s) {
   suffix <- if (identical(s$scale, "sd")) " (sd)" else ""
-  sprintf("  sigma %s ~ %s%s", s$name, .fmt_num(s$value), suffix)
+  # FIX goes BEFORE the scale annotation. ferx accepts either position --
+  # `sigma NAME ~ v [FIX] [(sd|variance|var)] [FIX]`, captured as groups 3 and 5
+  # of the same regex and OR-ed -- and this is the spelling already validated
+  # against the pinned engine, so it inherits that check rather than asking for
+  # a new one.
+  sprintf("  sigma %s ~ %s%s%s", s$name, .fmt_num(s$value), .fix_suffix(s), suffix)
 }
 
 # -- statement rendering ------------------------------------------------------

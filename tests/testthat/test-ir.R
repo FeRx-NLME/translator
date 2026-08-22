@@ -246,3 +246,34 @@ test_that("an error_model must be one form, and a selected chain must end in an 
     em(list(dv = "DV", type = "additive", params = "E1", cond = "F == 1"),
        list(dv = "DV", type = "additive", params = "E2"))))
 })
+
+test_that("a malformed fixed flag is rejected by the validator", {
+  # `fixed` decides estimated-vs-held. .fix_suffix() uses isTRUE(), which
+  # answers FALSE for NA and for a length-2 vector alike, so a malformed flag
+  # would emit a FREE parameter -- the exact defect the field was added to
+  # close. It has to fail at the boundary instead.
+  bad <- list(c(TRUE, FALSE), logical(0), NA, "TRUE", 1L)
+  for (b in bad) {
+    expect_error(
+      validate_ferx_ir(new_ferx_ir(
+        omegas = list(list(type = "diagonal", names = "ETA_CL",
+                           values = 0.07, fixed = b)))),
+      "fixed", class = "rlang_error")
+    expect_error(
+      validate_ferx_ir(new_ferx_ir(
+        sigmas = list(list(name = "EPS1", value = 0.2, scale = "sd",
+                           fixed = b)))),
+      "fixed", class = "rlang_error")
+  }
+})
+
+test_that("a well-formed or absent fixed flag validates", {
+  expect_no_error(validate_ferx_ir(new_ferx_ir(
+    thetas = list(list(name = "TVCL", init = 1, lower = 0, upper = 10, fixed = TRUE)),
+    omegas = list(list(type = "diagonal", names = "ETA_CL", values = 0.07, fixed = FALSE)),
+    kappas = list(list(name = "KAPPA_CL", value = 0.05, fixed = TRUE)),
+    sigmas = list(list(name = "EPS1", value = 0.2, scale = "sd", fixed = TRUE)))))
+  # Absent is legal: every IR built before the field existed omits it.
+  expect_no_error(validate_ferx_ir(new_ferx_ir(
+    omegas = list(list(type = "diagonal", names = "ETA_CL", values = 0.07)))))
+})

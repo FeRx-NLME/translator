@@ -3575,3 +3575,146 @@ test_that(".dv_is_scaled does not mistake a name containing 'scale' for scale<n>
               quote(y <- CENTRAL * scalef * (1 + eps1)))
   expect_false(.dv_is_scaled(lst))
 })
+
+# -- FIX on variance parameters (#31) -----------------------------------------
+#
+# Three extractors read the flag from THREE DIFFERENT channels, measured:
+#   omega / kappa  -> iniDf$fix
+#   sigma (nlmixr2) -> iniDf$fix on the err != NA rows
+#   sigma (NONMEM)  -> attr(ui$sigma, "lotriFix"), because iniDf carries no
+#                      sigma row at all for a nonmem2rx source
+# A fixture covering one of them leaves the other two unguarded, so each gets
+# its own test against its own channel.
+
+# Minimal iniDf. Only the columns the extractors read; building the real 12-column
+# frame would assert nothing extra and would drift with upstream.
+.mk_ini <- function(...) {
+  rows <- list(...)
+  do.call(rbind, lapply(rows, function(r) data.frame(
+    ntheta = r$ntheta %||% NA_integer_, neta1 = r$neta1 %||% NA_integer_,
+    neta2  = r$neta2  %||% NA_integer_, name = r$name, est = r$est,
+    fix = r$fix, err = r$err %||% NA_character_,
+    condition = r$condition %||% NA_character_,
+    stringsAsFactors = FALSE)))
+}
+
+test_that(".extract_omegas carries iniDf$fix onto diagonal entries", {
+  ini <- .mk_ini(
+    list(neta1 = 1, neta2 = 1, name = "eta.cl", est = 0.09, fix = TRUE,  condition = "id"),
+    list(neta1 = 2, neta2 = 2, name = "eta.v",  est = 0.04, fix = FALSE, condition = "id")
+  )
+  om <- .extract_omegas(ini)$omegas
+  expect_true(om[[1]]$fixed)
+  expect_false(om[[2]]$fixed)
+})
+
+test_that(".extract_omegas fixes a block only when every element is fixed", {
+  blk <- function(f1, f12, f2) .extract_omegas(.mk_ini(
+    list(neta1 = 1, neta2 = 1, name = "eta.cl",         est = 0.09, fix = f1,  condition = "id"),
+    list(neta1 = 2, neta2 = 1, name = "(eta.cl,eta.v)", est = 0.01, fix = f12, condition = "id"),
+    list(neta1 = 2, neta2 = 2, name = "eta.v",          est = 0.04, fix = f2,  condition = "id")
+  ))
+  all_fixed <- blk(TRUE, TRUE, TRUE)
+  expect_true(all_fixed$omegas[[1]]$fixed)
+  expect_length(all_fixed$warnings, 0L)
+
+  none_fixed <- blk(FALSE, FALSE, FALSE)
+  expect_false(none_fixed$omegas[[1]]$fixed)
+  expect_length(none_fixed$warnings, 0L)
+})
+
+test_that("a partially fixed block is emitted free and reported, not silently coerced", {
+  # NOT reachable from a control stream or a model function: NONMEM's FIX is a
+  # $OMEGA RECORD attribute and nlmixr2's fix() wraps the whole `a + b ~ ...`
+  # line, so both sources set the flag uniformly (measured). The iniDf is built
+  # by hand here for that reason -- inventing a source spelling for it would be
+  # a fixture that cannot fail.
+  mixed <- .extract_omegas(.mk_ini(
+    list(neta1 = 1, neta2 = 1, name = "eta.cl",         est = 0.09, fix = TRUE,  condition = "id"),
+    list(neta1 = 2, neta2 = 1, name = "(eta.cl,eta.v)", est = 0.01, fix = FALSE, condition = "id"),
+    list(neta1 = 2, neta2 = 2, name = "eta.v",          est = 0.04, fix = FALSE, condition = "id")
+  ))
+  # Emitted FREE: ferx fixes a block_omega all or nothing, so the flag cannot
+  # describe this block, and free is the direction the user can see in the fit.
+  expect_false(mixed$omegas[[1]]$fixed)
+  expect_match(mixed$warnings, "^ERROR \\| ")
+  expect_match(mixed$warnings, "mixes fixed", fixed = TRUE)
+  expect_match(mixed$warnings, "ETA_CL", fixed = TRUE)
+  expect_length(mixed$unsupported, 1L)
+  expect_match(mixed$unsupported, "all or nothing", fixed = TRUE)
+})
+
+test_that(".extract_kappas carries fix from iniDf, not from the omega attribute", {
+  # Measured on rxode2 5.1.2: an IOV model has the flag on its iniDf row while
+  # attr(ui$omega, "lotriFix") is NULL for that same model. Reading the
+  # attribute here would answer FALSE for every fixed kappa.
+  ka <- .extract_kappas(.mk_ini(
+    list(neta1 = 1, neta2 = 1, name = "iov.cl", est = 0.05, fix = TRUE,  condition = "occ"),
+    list(neta1 = 2, neta2 = 2, name = "iov.v",  est = 0.03, fix = FALSE, condition = "occ")
+  ))$kappas
+  expect_true(ka[[1]]$fixed)
+  expect_false(ka[[2]]$fixed)
+})
+
+test_that(".extract_sigmas reads fix from iniDf on the nlmixr2 branch", {
+  sg <- .extract_sigmas(.mk_ini(
+    list(ntheta = 1, name = "prop.sd", est = 0.2, fix = TRUE,  err = "prop", condition = "cp"),
+    list(ntheta = 2, name = "add.sd",  est = 0.5, fix = FALSE, err = "add",  condition = "cp")
+  ))$sigmas
+  expect_true(sg[[1]]$fixed)
+  expect_false(sg[[2]]$fixed)
+})
+
+test_that(".extract_sigmas reads lotriFix on the nonmem2rx branch", {
+  # iniDf is byte-identical for `$SIGMA 0.04` and `$SIGMA 0.04 FIX` -- it has no
+  # sigma row at all for a NONMEM source -- so the matrix attribute is the only
+  # channel. Empty ini, exactly as the nonmem2rx path presents it.
+  empty <- .mk_ini(list(neta1 = 1, neta2 = 1, name = "eta.cl", est = 0.09,
+                        fix = FALSE, condition = "id"))
+  m <- matrix(c(0.04, 0, 0, 0.01), 2, 2,
+              dimnames = list(c("eps1", "eps2"), c("eps1", "eps2")))
+  attr(m, "lotriFix") <- matrix(c(TRUE, FALSE, FALSE, FALSE), 2, 2,
+                                dimnames = dimnames(m))
+  sg <- .extract_sigmas(empty, m)$sigmas
+  expect_true(sg[[1]]$fixed)
+  expect_false(sg[[2]]$fixed)
+
+  # A missing or mis-shaped attribute must answer FALSE, not error. It is an
+  # upstream attribute this package does not control.
+  for (bad in list(NULL, "nonsense", matrix(TRUE, 1, 1))) {
+    m2 <- m
+    attr(m2, "lotriFix") <- bad
+    sg2 <- expect_no_error(.extract_sigmas(empty, m2)$sigmas)
+    expect_false(sg2[[1]]$fixed)
+  }
+})
+
+test_that(".ini_fixed answers FALSE for an iniDf with no fix column", {
+  # NULL[i] is NULL and isTRUE(NULL) is FALSE, so an absent column already
+  # yields the right answer -- but by accident, at whichever call site touches
+  # it first. This pins the decision.
+  no_fix <- data.frame(name = "eta.cl", est = 0.09, stringsAsFactors = FALSE)
+  expect_false(.ini_fixed(no_fix, 1L))
+})
+
+test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in silence", {
+  # Only the diagonal of ui$sigma is emitted, so the off-diagonals are lost.
+  # That drop predates #31 and is not fixed here; the silence is. Sigma was the
+  # only one of the three channels that said nothing -- omega emits its block in
+  # full and .extract_kappas() already warns when it drops an off-diagonal.
+  empty <- .mk_ini(list(neta1 = 1, neta2 = 1, name = "eta.cl", est = 0.09,
+                        fix = FALSE, condition = "id"))
+  m <- matrix(c(0.04, 0.001, 0.001, 0.01), 2, 2,
+              dimnames = list(c("eps1", "eps2"), c("eps1", "eps2")))
+  out <- .extract_sigmas(empty, m)
+  expect_match(out$warnings, "^ERROR \\| ")
+  expect_match(out$warnings, "0.001", fixed = TRUE)
+  expect_match(out$warnings, "block_sigma", fixed = TRUE)
+  expect_length(out$unsupported, 1L)
+
+  # A diagonal $SIGMA must stay quiet, or every ordinary model gains a warning.
+  diag_only <- .extract_sigmas(empty, matrix(c(0.04, 0, 0, 0.01), 2, 2,
+    dimnames = list(c("eps1", "eps2"), c("eps1", "eps2"))))
+  expect_length(diag_only$warnings, 0L)
+  expect_length(diag_only$unsupported, 0L)
+})

@@ -1,5 +1,57 @@
 # ferxtranslate 0.1.0.9000
 
+## Bug fixes
+
+* `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
+  (issue #31). A source that pinned a parameter -- an IIV held at a literature
+  value, a residual held at a known assay CV -- translated into one that
+  estimated it, with no warning, no `# WARNING:` comment and no
+  `result$unsupported` entry. The emitted file validated and fit, and reported a
+  plausible number with more free parameters than the source declared.
+
+  Measured on `pk_1cmt_oral.mod` against ferx 0.3.0, starting `ETA_CL` at 0.5
+  against a simulation truth of 0.02: `omega ETA_CL ~ 0.5` lands on 0.0197 and
+  `omega ETA_CL ~ 0.5 FIX` holds 0.5. Same model, same data, same start -- a
+  factor of 25 decided by one keyword.
+
+  `FIX` was already emitted for thetas, so this covers the four forms that were
+  not: `omega`, `block_omega`, `kappa` and `sigma`. ferx accepted every one of
+  them already; they were simply never wired up.
+
+  The flag arrives by three different channels, and the issue's own account of
+  one of them was wrong. Omegas and kappas read `iniDf$fix`. nlmixr2 sigmas read
+  `iniDf$fix` on the `err != NA` rows. NONMEM sigmas have no `iniDf` row at all
+  -- the frame is byte-identical for `$SIGMA 0.04` and `$SIGMA 0.04 FIX` -- and
+  the flag instead rides on `attr(ui$sigma, "lotriFix")`. That attribute is what
+  makes parsing the raw `$SIGMA` record out of the control stream unnecessary,
+  and with it NONMEM's `(v FIX)` / `DIAGONAL(n)` / `SAME` / multi-record
+  spellings never have to be re-implemented here.
+
+  Note that kappas must read `iniDf$fix` and NOT the omega attribute:
+  `attr(ui$omega, "lotriFix")` is NULL for a model that has IOV, so the
+  attribute channel answers FALSE for every fixed kappa.
+
+  A `block_omega` is fixed all or nothing, because ferx is: `build_omega_fixed`
+  rejects an eta marked `FIX` that belongs to a block that is not. Neither
+  source can produce a partially fixed block -- NONMEM's `FIX` is a `$OMEGA`
+  record attribute and nlmixr2's `fix()` wraps the whole `a + b ~ ...` line --
+  so that arm is guarded from a hand-built `iniDf` rather than from an invented
+  control-stream spelling. It emits the block free and raises an `ERROR`.
+
+* A `$SIGMA BLOCK`'s residual covariances are now reported instead of being
+  discarded in silence. Only the diagonal of `ui$sigma` is emitted, so
+  `$SIGMA BLOCK(2) 0.04 0.001 0.01` lost the `0.001` while `result$warnings` and
+  `result$unsupported` both stayed empty -- the fit then ran under an
+  independent residual structure and reported a plausible OFV for it.
+
+  The drop itself is not fixed here; emitting `block_sigma` is a separate change
+  and a real one, since ferx does not take those off-diagonals as covariances
+  ("off-diagonal entries are converted to fixed correlations") and that mapping
+  needs measuring. What changes is that the loss is now an `ERROR` with an
+  `unsupported` entry. Sigma was the outlier of the three random-effect
+  channels: omega emits its block in full, and `.extract_kappas()` already
+  warned when it dropped an off-diagonal.
+
 ## Breaking changes
 
 * `[scaling] obs_scale` is no longer emitted when the source's `$ERROR` reads a
