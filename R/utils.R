@@ -190,7 +190,7 @@
 #     already exists.
 #   - TRUE means only that $INPUT named an item `CMT`. If the CSV header spells
 #     that column something else, ferx still falls to compartment 1 and this
-#     answers TRUE, so the divergence goes unreported.
+#     answers TRUE, so the divergence goes unreported. Tracked as #36.
 #
 # Settling either needs the dataset. `.extract_nm_data_path()` could supply it
 # and a one-line header read would close the second case; until then the

@@ -194,9 +194,10 @@
   by CSV header name and never reads `$INPUT` at all, so two narrower routes to
   the same mismatch stay invisible from the control stream: a dose row whose
   `CMT` cell is `0` or `.` (issue #35), and a `CMT` item whose column the CSV
-  header spells something else. The remedy therefore states what the dataset
-  must contain -- a column its header names `CMT`, holding the compartment
-  number on every dose row -- rather than claiming to have checked it. For the
+  header spells something else (issue #36). The remedy therefore states what
+  the dataset must contain -- a column its header names `CMT`, holding the
+  compartment number on every dose row -- rather than claiming to have checked
+  it. For the
   same reason it does not say "ferx doses compartment 1 because there is no
   `CMT` column": under `CMT=DROP` the column is physically present and ferx
   reads it, so that phrasing would be false and its fix a no-op.

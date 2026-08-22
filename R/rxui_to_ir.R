@@ -777,7 +777,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     #   - A CMT item on $INPUT whose column the CSV HEADER does not name `CMT`.
     #     $INPUT names columns by position; ferx binds them by header name and
     #     never reads $INPUT. So `has_cmt_col` is TRUE, this stays quiet, and
-    #     ferx still falls to compartment 1.
+    #     ferx still falls to compartment 1. Tracked as #36.
     #
     # Both need the dataset, which this function does not read and often cannot
     # -- the .ctl's $DATA frequently names a file that is not there. So the
