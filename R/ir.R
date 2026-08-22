@@ -213,6 +213,18 @@ validate_ferx_ir <- function(ir) {
       ))
   }
 
+  # `structural$note` is an optional comment line, so it is validated only when
+  # present -- but validated by LENGTH as well as type. `nzchar()` in the
+  # emitter aborts on character(0) and on a length-2 vector with a base-R
+  # message naming neither field nor function, which is the same trap this
+  # validator records for `obs_cmt` above and exists to keep out.
+  if (!is.null(ir$structural$note) &&
+      (!is.character(ir$structural$note) || length(ir$structural$note) != 1L ||
+       is.na(ir$structural$note)))
+    cli::cli_abort(
+      "structural$note must be a single non-NA character string when present."
+    )
+
   # A readout and `obs_scale` must never appear together. ferx applies the scale
   # on TOP of the readout expression: measured on 0.3.0 the file validates clean
   # and every prediction moves by up to 11.37 units, with no diagnostic from the

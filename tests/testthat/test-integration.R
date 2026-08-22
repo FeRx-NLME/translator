@@ -1178,6 +1178,13 @@ test_that("a CMT-less dataset with DEFDOSE elsewhere reports where the dose land
                                         validate = FALSE))
 
   expect_length(grep("^ERROR.*DEFDOSE", result$warnings), 1L)
+  # The remedy states what the DATASET must contain, and says so in ferx's own
+  # terms: ferx binds columns by CSV header name and never reads $INPUT. It
+  # must NOT say "ferx doses compartment 1 because there is no CMT column" --
+  # for a `CMT=DROP` item the column is physically there and ferx reads it, so
+  # that phrasing is false and its fix is a no-op.
+  expect_match(result$warnings, "HEADER names CMT", all = FALSE)
+  expect_length(grep("Add a CMT column to the dataset", result$warnings), 0L)
   expect_length(grep("DEFDOSE", result$unsupported), 1L)
   # Names both compartments: the one NONMEM dosed and the one ferx will.
   expect_match(result$unsupported, "CENTRAL", all = FALSE)
@@ -1198,7 +1205,8 @@ test_that("a CMT-less dataset with DEFDOSE elsewhere reports where the dose land
   expect_length(hdr, 1L)
   expect_equal(ln[hdr + 1L],
                paste0("  # WARNING: doses land in 'PERIPH' here; NONMEM dosed ",
-                      "'CENTRAL' (compartment 2, $MODEL DEFDOSE, no CMT column)"))
+                      "'CENTRAL' (compartment 2, $MODEL DEFDOSE, no CMT item ",
+                      "on $INPUT)"))
   expect_equal(ln[hdr + 2L], "  ode(obs_cmt=CENTRAL, states=[PERIPH, CENTRAL])")
 
   # The states are NOT reordered to float DEFDOSE into position 1. That would

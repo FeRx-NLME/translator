@@ -34,9 +34,11 @@ falls back to inference.}
 
 \item{has_cmt_col}{\code{TRUE}, \code{FALSE} or \code{NA} -- whether \verb{$INPUT} declares a
 \code{CMT} data item NONMEM will read, as returned by \code{.nm_input_has_cmt()}.
-\code{FALSE} together with a \verb{$MODEL} DEFDOSE compartment other than 1 is the
-one combination where NM-TRAN and ferx route doses differently; \code{NA} means
-unknown and reports nothing.}
+\code{FALSE} together with a \verb{$MODEL} DEFDOSE compartment that is not the one
+emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
+route doses differently; \code{NA} means unknown and reports nothing. The
+comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
+two agree only while the state list could be put in \verb{$MODEL} COMP order.}
 }
 \value{
 A \code{ferx_ir} object.

@@ -177,9 +177,25 @@
 # dropped with `CMT=DROP` / `CMT=SKIP`. A dropped item is NOT read by NONMEM, so
 # it answers FALSE here -- for the dose-compartment question that is the right
 # answer, because NM-TRAN falls back to DEFDOSE exactly as if the column were
-# absent. It leaves one narrower divergence unreported: ferx binds columns by
-# CSV header name and knows nothing of $INPUT, so a DROPped CMT column is still
-# read by ferx even when DEFDOSE is compartment 1 and this stays quiet.
+# absent.
+#
+# What this canNOT answer is what the DATASET holds, and callers must not word a
+# diagnostic as though it could. $INPUT names columns by POSITION; ferx binds
+# them by CSV HEADER NAME and never reads $INPUT at all. So the two answers come
+# apart in both directions:
+#
+#   - FALSE via `CMT=DROP` means NONMEM ignores a column that is physically
+#     there, and ferx will happily read it. "ferx doses compartment 1" is false
+#     for that spelling, and "add a CMT column" sends the user to add one that
+#     already exists.
+#   - TRUE means only that $INPUT named an item `CMT`. If the CSV header spells
+#     that column something else, ferx still falls to compartment 1 and this
+#     answers TRUE, so the divergence goes unreported.
+#
+# Settling either needs the dataset. `.extract_nm_data_path()` could supply it
+# and a one-line header read would close the second case; until then the
+# caller's remedy says what the dataset must CONTAIN rather than claiming to
+# have looked.
 .nm_input_has_cmt <- function(ctl_file) {
   body <- .nm_block_lines(ctl_file, "INP")
   if (length(body) == 0L) return(NA)
@@ -187,6 +203,12 @@
   # record body rather than the `$INPUT` line.
   txt  <- sub("^\\s*[$]INP[A-Za-z]*", "", paste(body, collapse = " "),
               ignore.case = TRUE)
+  # Whitespace around a synonym pair's `=` is collapsed FIRST. Splitting on
+  # whitespace before parsing the `=` handed `CMT = DROP` back as three tokens,
+  # of which the bare `CMT` answered TRUE -- so the DROP rule below applied to
+  # `CMT=DROP` and not to `CMT = DROP`, and one spelling of one item silently
+  # changed the answer.
+  txt  <- gsub("[[:space:]]*=[[:space:]]*", "=", txt)
   toks <- trimws(strsplit(txt, "[,[:space:]]+")[[1]])
   toks <- toks[nzchar(toks)]
   if (length(toks) == 0L) return(NA)

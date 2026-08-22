@@ -19,9 +19,11 @@
 #'   list disables scaling translation.
 #' @param has_cmt_col `TRUE`, `FALSE` or `NA` -- whether `$INPUT` declares a
 #'   `CMT` data item NONMEM will read, as returned by `.nm_input_has_cmt()`.
-#'   `FALSE` together with a `$MODEL` DEFDOSE compartment other than 1 is the
-#'   one combination where NM-TRAN and ferx route doses differently; `NA` means
-#'   unknown and reports nothing.
+#'   `FALSE` together with a `$MODEL` DEFDOSE compartment that is not the one
+#'   emitted first in `states=[...]` is the combination where NM-TRAN and ferx
+#'   route doses differently; `NA` means unknown and reports nothing. The
+#'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
+#'   two agree only while the state list could be put in `$MODEL` COMP order.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -748,17 +750,40 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # simulation path -- so this is a ferx feature gap and goes on $unsupported,
     # per CLAUDE.md's rule for a construct we detect but cannot express.
     #
-    # Both halves are required. With a CMT column the data decides and DEFDOSE
-    # never applies; with DEFDOSE on compartment 1 the two rules agree.
+    # Both halves are required. With a CMT data item the data decides and
+    # DEFDOSE never applies; with DEFDOSE naming the compartment ferx already
+    # puts first, the two rules agree.
     #
-    # This is a COLUMN-level test and does not close the whole divergence. A
-    # dose ROW whose CMT cell is `0` or `.` hits the identical mismatch: NM-TRAN
-    # sends it to DEFDOSE, while ferx-core reads the cell as None (`.`/empty,
-    # datareader.rs) or as the CMT=0 convention (types.rs `cmt_idx`), and both
-    # land on compartment 1. Detecting that means reading the dataset row by
-    # row, which this function does not do and often cannot -- the .ctl's $DATA
-    # frequently names a file that is not there. Tracked as #35 rather than
-    # widened into here, so the guard is not read as complete.
+    # The second half is tested BY NAME and not as `defdose != 1`. Those are the
+    # same question only while `cmt_order` reconciled, because states=[...] is
+    # then $MODEL COMP order. When it did not -- the case the ERROR twenty lines
+    # above reports -- `defdose` stays a $MODEL ordinal while states stays in
+    # $DES order, and the ordinal test is wrong in both directions: it fired on
+    # `defdose = 2` naming the very compartment ferx puts first, and it stayed
+    # silent on `defdose = 1` naming one ferx puts second. The name is the
+    # property actually being claimed, and it also keeps the message honest --
+    # the ordinal version wrote "doses land in 'PERIPH' ... NONMEM dosed 'YYY'",
+    # two naming universes in one sentence, on an ordinal that same ERROR has
+    # just reported as unreliable.
+    #
+    # This is a $INPUT-level test and does not close the whole divergence. Two
+    # narrower routes reach the same mismatch and neither is visible from the
+    # control stream alone:
+    #
+    #   - A dose ROW whose CMT cell is `0` or `.`. NM-TRAN sends it to DEFDOSE,
+    #     while ferx-core reads the cell as None (`.`/empty, datareader.rs) or
+    #     as the CMT=0 convention (types.rs `cmt_idx`) and lands on compartment
+    #     1. Tracked as #35.
+    #   - A CMT item on $INPUT whose column the CSV HEADER does not name `CMT`.
+    #     $INPUT names columns by position; ferx binds them by header name and
+    #     never reads $INPUT. So `has_cmt_col` is TRUE, this stays quiet, and
+    #     ferx still falls to compartment 1.
+    #
+    # Both need the dataset, which this function does not read and often cannot
+    # -- the .ctl's $DATA frequently names a file that is not there. So the
+    # remedy below states what the dataset must contain (a header named CMT,
+    # carrying the compartment number on every dose row) rather than claiming
+    # to have checked it, and the guard is not read as complete.
     #
     # Deliberately NOT fixed by floating the DEFDOSE compartment into position 1
     # of states=[...]. That would fight #25, which pins the emitted order to
@@ -770,30 +795,43 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # a $MODEL attribute, and a $MODEL block means a general ADVAN. What ferx's
     # pk macro path does with a dose compartment is a separate question this has
     # not measured, and firing on it would be a guess.
+    #
+    # is.numeric and not is.integer. obs_hint is a documented argument of an
+    # exported function, `list(defdose = 2)` is the natural way to write one,
+    # and is.integer() is FALSE for it -- which skipped the whole guard and
+    # restored the silence it exists to break.
     dd <- if (is.null(obs_hint)) NA_integer_ else obs_hint$defdose
-    if (isFALSE(has_cmt_col) && is.integer(dd) && length(dd) == 1L &&
-        !is.na(dd) && dd != 1L && length(structural$states) > 0L) {
-      dd_name  <- obs_hint$comps[dd]
-      ferx_cmt <- structural$states[[1L]]
+    dd_ok <- isFALSE(has_cmt_col) && is.numeric(dd) && length(dd) == 1L &&
+             !is.na(dd) && length(structural$states) > 0L &&
+             dd >= 1L && dd <= length(obs_hint$comps)
+    dd_name  <- if (dd_ok) obs_hint$comps[[as.integer(dd)]] else NA_character_
+    ferx_cmt <- if (dd_ok) structural$states[[1L]]           else NA_character_
+    if (dd_ok && !.same_cmt_name(ferx_cmt, dd_name)) {
+      # "no CMT data item to read" and not "no CMT column": `CMT=DROP` answers
+      # FALSE here -- correctly, NM-TRAN falls back to DEFDOSE exactly as if the
+      # item were absent -- but the column is then physically IN the CSV, and
+      # ferx, which binds by header name, reads it. Saying "ferx doses
+      # compartment 1" and "add a CMT column" would be false twice over for that
+      # spelling, and would send the user to add a column already there.
       warn <- c(warn, paste0(
         "ERROR | $MODEL declares compartment ", dd, " ('", dd_name,
-        "') as DEFDOSE and $INPUT has no CMT data item, so NONMEM doses '",
-        dd_name, "'. ferx resolves a dose row with no CMT column to ",
-        "compartment 1 ('", ferx_cmt, "') and has no way to say otherwise -- ",
-        "there is no model-side dose-compartment binding on the fitting path. ",
-        "Add a CMT column to the dataset naming compartment ", dd,
-        " before fitting; the doses land in the wrong compartment silently ",
-        "otherwise."))
+        "') as DEFDOSE and $INPUT gives NONMEM no CMT data item to read, so ",
+        "NONMEM doses '", dd_name, "'. ferx has no model-side dose-compartment ",
+        "binding on the fitting path, and resolves any dose row it cannot read ",
+        "a CMT for to compartment 1 ('", ferx_cmt, "'). Before fitting, make ",
+        "sure the dataset carries a column its HEADER names CMT (ferx binds by ",
+        "header name and never reads $INPUT) holding ", dd, " on every dose ",
+        "row; otherwise the doses land in the wrong compartment silently."))
       unsp <- c(unsp, paste0(
         "no model-side dose compartment (ferx-core#1009) -- $MODEL doses ",
-        "compartment ", dd, " ('", dd_name, "') by DEFDOSE with no CMT column, ",
-        "and ferx doses compartment 1 ('", ferx_cmt, "')"))
+        "compartment ", dd, " ('", dd_name, "') by DEFDOSE with no CMT data ",
+        "item on $INPUT, and ferx doses compartment 1 ('", ferx_cmt, "')"))
       # And at the line, not only in the header block: [structural_model] is
       # where a dose-compartment binding would appear, and the .ferx file is
       # what gets run and diffed months later while result$warnings is not.
       structural$note <- paste0(
         "WARNING: doses land in '", ferx_cmt, "' here; NONMEM dosed '", dd_name,
-        "' (compartment ", dd, ", $MODEL DEFDOSE, no CMT column)")
+        "' (compartment ", dd, ", $MODEL DEFDOSE, no CMT item on $INPUT)")
     }
     structural$obs_cmt <- obs_cmt
   }

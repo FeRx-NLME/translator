@@ -26,8 +26,10 @@ $PK
   TVV1 = THETA(2)
   CL = TVCL*EXP(ETA(1))
   V1 = TVV1
-  Q  = THETA(3)
-  V2 = THETA(4)
+  TVQ  = THETA(3)
+  Q    = TVQ
+  TVV2 = THETA(4)
+  V2   = TVV2
   S2 = V1
 
 $DES
@@ -37,10 +39,10 @@ $DES
 $ERROR
   Y = F*(1 + EPS(1))
 
-$THETA (0, 5)    ; CL
-$THETA (0, 20)   ; V1
-$THETA (0, 8)    ; Q
-$THETA (0, 60)   ; V2
+$THETA (0, 5)    ; TVCL
+$THETA (0, 20)   ; TVV1
+$THETA (0, 8)    ; TVQ
+$THETA (0, 60)   ; TVV2
 $OMEGA 0.09      ; ETA_CL
 $SIGMA 0.04
 

@@ -1617,6 +1617,16 @@ test_that(".nm_input_has_cmt reads the $INPUT data items", {
   expect_true(.nm_input_has_cmt(mk("$INPUT", "ID TIME AMT DV MDV CMT")))
   # A CMT that appears only in a comment is not a data item.
   expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV ; no CMT here")))
+  # Whitespace around a synonym pair's `=` must not change the answer. Splitting
+  # on whitespace before parsing the `=` handed `CMT = DROP` back as three
+  # tokens, of which the bare `CMT` answered TRUE -- so the DROP rule held for
+  # `CMT=DROP` and not for `CMT = DROP`, and NEWS.md documents a rule the code
+  # applied to only one spelling.
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT = DROP")))
+  expect_false(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT =DROP")))
+  expect_true(.nm_input_has_cmt(mk("$INPUT ID TIME AMT DV MDV CMT = COMPT")))
+  # Lower case throughout, which NM-TRAN accepts.
+  expect_true(.nm_input_has_cmt(mk("$input id time amt dv mdv cmt")))
   # `$INP` is the shortest unambiguous abbreviation ($IN collides with $INFN).
   expect_true(.nm_input_has_cmt(mk("$INP ID TIME AMT DV MDV CMT")))
   # Unknown, not FALSE: with no $INPUT there is no evidence either way, and
@@ -1664,6 +1674,122 @@ test_that("the DEFDOSE/CMT divergence needs BOTH halves to fire", {
   quiet(suppressWarnings(rxui_to_ir(
     ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
     obs_hint = NULL, has_cmt_col = FALSE)))
+
+  # A double `defdose` must fire exactly as an integer one does. rxui_to_ir()
+  # is exported and obs_hint is a documented argument, so `list(defdose = 2)`
+  # -- 2, not 2L, which is how anyone writes it -- is a caller spelling, and
+  # is.integer() is FALSE for it. That skipped the entire guard and restored
+  # the silence it exists to break, which no assertion above could see.
+  dbl <- .extract_nm_defobs(p)
+  dbl$defdose <- 2
+  fires_dbl <- suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = dbl, has_cmt_col = FALSE))
+  expect_true(any(grepl("DEFDOSE", fires_dbl$unsupported)))
+})
+
+test_that("the DEFDOSE test is by compartment NAME, not by $MODEL ordinal", {
+  skip_if_not_installed("nonmem2rx")
+  # `defdose != 1` and "DEFDOSE is not the compartment ferx puts first" are the
+  # same question only while .nm_cmt_order() reconciled, because states=[...] is
+  # then $MODEL COMP order. When it did not -- the case the #25 ERROR twenty
+  # lines above reports -- `defdose` stays a $MODEL ordinal while states stays
+  # in $DES order, and the two come apart in BOTH directions. None of this is
+  # reachable through nm_to_ferx() on a bundled model, so it is driven through
+  # obs_hint, which is a documented argument of an exported function.
+  p  <- nm_path("defdose_no_cmt.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  fires <- function(comps, dd) {
+    h <- .extract_nm_defobs(p); h$comps <- comps; h$defdose <- dd
+    ir <- suppressWarnings(rxui_to_ir(
+      ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+      obs_hint = h, has_cmt_col = FALSE))
+    any(grepl("DEFDOSE", ir$unsupported))
+  }
+
+  # Ordinal 2, and the name it picks IS the compartment ferx puts first. No
+  # divergence -- and `defdose != 1L` called it one, on a message that would
+  # have named PERIPH as both the wrong compartment and the right one.
+  expect_false(fires(c("YYY", "PERIPH"), 2L))
+
+  # Ordinal 1, and the name it picks is NOT the compartment ferx puts first.
+  # A real divergence that `defdose != 1L` stayed silent on -- the direction
+  # that matters, because silence here is the SILENT-WRONG the guard exists to
+  # break.
+  expect_true(fires(c("CENTRAL", "YYY"), 1L))
+
+  # Reconciled and DEFDOSE on compartment 1: both readings agree, still quiet.
+  expect_false(fires(c("CENTRAL", "PERIPH"), 1L))
+
+  # When it does fire on unreconciled names, both names in the message must be
+  # sourced honestly: the $MODEL name for what NONMEM dosed, the emitted state
+  # name for where the dose lands. They are two naming universes precisely
+  # because reconciliation failed, and collapsing them would hide that.
+  h <- .extract_nm_defobs(p); h$comps <- c("XXX", "YYY"); h$defdose <- 2L
+  ir <- suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = h, has_cmt_col = FALSE))
+  expect_match(ir$structural$note, "doses land in 'PERIPH'", fixed = TRUE)
+  expect_match(ir$structural$note, "NONMEM dosed 'YYY'",     fixed = TRUE)
+})
+
+test_that("emit_ferx renders structural$note above the line it explains", {
+  # Tier 1 on the emitter itself. The integration test covers this only through
+  # nonmem2rx and a .ctl, so it skips entirely where that package is absent --
+  # and it cannot reach the pk_macro branch or the empty-note branch at all.
+  mk <- function(structural) new_ferx_ir(
+    source_format = "nonmem",
+    thetas = list(list(name = "TVCL", init = 1, lower = 0.001, upper = 10)),
+    structural = structural,
+    odes = list(list(kind = "ddt", state = "A", rhs = "-A"),
+                list(kind = "ddt", state = "C", rhs = "A")))
+  ode <- function(note) {
+    st <- list(type = "ode", obs_cmt = "C", states = c("A", "C"))
+    if (!missing(note)) st$note <- note
+    strsplit(emit_ferx(mk(st)), "\n")[[1]]
+  }
+
+  ln  <- ode("WARNING: doses land in 'A' here")
+  hdr <- which(ln == "[structural_model]")
+  expect_length(hdr, 1L)
+  expect_equal(ln[hdr + 1L], "  # WARNING: doses land in 'A' here")
+  expect_equal(ln[hdr + 2L], "  ode(obs_cmt=C, states=[A, C])")
+
+  # No note, and an empty one, both leave the block exactly as it was.
+  for (ln2 in list(ode(), ode("")))
+    expect_equal(ln2[which(ln2 == "[structural_model]") + 1L],
+                 "  ode(obs_cmt=C, states=[A, C])")
+
+  # The emitter is type-agnostic about where a note goes, so a pk_macro note
+  # lands above its `pk` line. Nothing produces one today; this is what makes
+  # the first producer's output predictable rather than discovered.
+  pk <- strsplit(emit_ferx(new_ferx_ir(
+    source_format = "nonmem",
+    thetas = list(list(name = "TVCL", init = 1, lower = 0.001, upper = 10)),
+    structural = list(type = "pk_macro", pk_call = "one_cpt_iv",
+                      pk_args = list(cl = "CL", v = "V"),
+                      note = "WARNING: check the dose compartment"))), "\n")[[1]]
+  h2 <- which(pk == "[structural_model]")
+  expect_equal(pk[h2 + 1L], "  # WARNING: check the dose compartment")
+  expect_equal(pk[h2 + 2L], "  pk one_cpt_iv(cl=CL, v=V)")
+})
+
+test_that("a malformed structural$note is rejected, not passed to nzchar()", {
+  # nzchar() aborts on character(0) with "missing value where TRUE/FALSE
+  # needed" and on a length-2 vector with "'length = 2' in coercion to
+  # 'logical(1)'" -- base-R errors naming neither the field nor the function.
+  # R/ir.R records exactly this trap for obs_cmt and says it must not be
+  # reintroduced; new_ferx_ir() is exported and `structural` is a user-supplied
+  # list, so the note field reopened it.
+  mk <- function(note) new_ferx_ir(
+    source_format = "nonmem",
+    thetas = list(list(name = "TVCL", init = 1, lower = 0.001, upper = 10)),
+    structural = list(type = "ode", obs_cmt = "C", states = c("A", "C"),
+                      note = note),
+    odes = list(list(kind = "ddt", state = "A", rhs = "-A"),
+                list(kind = "ddt", state = "C", rhs = "A")))
+  for (bad in list(c("x", "y"), character(0), NA_character_, 1L))
+    expect_error(emit_ferx(mk(bad)), "structural\\$note")
 })
 
 test_that("the observation expression outranks DEFOBS when they disagree", {

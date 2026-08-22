@@ -250,7 +250,16 @@ emit_ferx <- function(ir) {
   # is what fixes ferx's compartment numbering, so it is where a reader asks
   # which compartment a dose reaches -- and the header warning block is thirty
   # lines away and does not travel with the eye.
-  if (!is.null(s$note) && nzchar(s$note))
+  #
+  # length checked, not just type. nzchar() on a length-2 note aborts with
+  # "'length = 2' in coercion to 'logical(1)'" and on character(0) with
+  # "missing value where TRUE/FALSE needed" -- base-R errors naming neither the
+  # field nor the function, which is the trap validate_ferx_ir() records for
+  # obs_cmt and says must not be reintroduced. validate_ferx_ir() rejects a
+  # malformed note now; this stays scalar-safe so the emitter cannot be the one
+  # that aborts if it is ever called on an unvalidated ir.
+  if (is.character(s$note) && length(s$note) == 1L && !is.na(s$note) &&
+      nzchar(s$note))
     body <- paste0("  # ", s$note, "\n", body)
   paste0("[structural_model]\n", body)
 }

@@ -174,12 +174,32 @@
   grows a model-side binding, this stops being a report and becomes an
   emission.
 
-  It fires only when `$INPUT` declares no `CMT` data item **and** `DEFDOSE` is
-  not compartment 1. Either half alone is silence, and each half has its own
+  It fires only when `$INPUT` declares no `CMT` data item NONMEM will read
+  **and** `DEFDOSE` names a compartment other than the one emitted first in
+  `states=[...]`. Either half alone is silence, and each half has its own
   negative control: `defdose_cmt_present.ctl` is the same model with the column
   added back, and `defobs_not_last.ctl` already had no column with `DEFDOSE` on
-  compartment 1. A `CMT=DROP` item counts as absent, because NM-TRAN falls back
-  to `DEFDOSE` exactly as if the column were not there.
+  the compartment ferx puts first. A `CMT=DROP` or `CMT=SKIP` item counts as
+  absent, because NM-TRAN falls back to `DEFDOSE` exactly as if the column were
+  not there.
+
+  The second half is compared by compartment NAME and not by `$MODEL` ordinal.
+  Those are the same question only while `.nm_cmt_order()` could put the state
+  list in `$MODEL` COMP order; when it could not, the ordinal and the emitted
+  position disagree in both directions, so the ordinal test both reported
+  divergences that did not exist and stayed silent on ones that did.
+
+  What the report canNOT do is inspect the dataset, and it does not word itself
+  as though it could. `$INPUT` names columns by position while ferx binds them
+  by CSV header name and never reads `$INPUT` at all, so two narrower routes to
+  the same mismatch stay invisible from the control stream: a dose row whose
+  `CMT` cell is `0` or `.` (issue #35), and a `CMT` item whose column the CSV
+  header spells something else. The remedy therefore states what the dataset
+  must contain -- a column its header names `CMT`, holding the compartment
+  number on every dose row -- rather than claiming to have checked it. For the
+  same reason it does not say "ferx doses compartment 1 because there is no
+  `CMT` column": under `CMT=DROP` the column is physically present and ferx
+  reads it, so that phrasing would be false and its fix a no-op.
 
   Deliberately not fixed by floating the `DEFDOSE` compartment into position 1
   of `states=[...]`. That would fight issue #25, which pins the emitted order to
