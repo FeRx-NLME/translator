@@ -48,3 +48,35 @@ tmp_ctl_dir <- function() {
     condition = r$condition %||% NA_character_,
     stringsAsFactors = FALSE)))
 }
+
+# One-compartment IV bolus control stream whose $ERROR is whatever the test
+# supplies. `solved = TRUE` is ADVAN1; otherwise the same model as an ODE.
+.readout_ctl <- function(err, solved = FALSE, pk_extra = character(),
+                         theta_extra = character(),
+                         omega_extra = character(),
+                         y_line = "  Y = IPRED*(1+EPS(1))") {
+  ctl <- file.path(tmp_ctl_dir(), "m.ctl")
+  writeLines(c(
+    "$PROBLEM readout arithmetic",
+    "$INPUT ID TIME DV AMT EVID MDV CMT",
+    "$DATA d.csv IGNORE=@",
+    if (solved) "$SUBROUTINES ADVAN1 TRANS2" else c("$SUBROUTINES ADVAN6 TOL=6",
+                                                    "$MODEL COMP=(CENT)"),
+    "$PK",
+    "  CL = THETA(1)*EXP(ETA(1))",
+    "  V  = THETA(2)",
+    pk_extra,
+    if (!solved) c("$DES", "  DADT(1) = -CL/V*A(1)"),
+    "$ERROR", err,
+    y_line,
+    "$THETA", "  (0,3)", "  (0,30)", theta_extra,
+    "$OMEGA 0.09", omega_extra, "$SIGMA 0.01", "$EST METHOD=1 INTER"), ctl)
+  ctl
+}
+
+.scaling_lines <- function(txt) {
+  ln <- strsplit(txt, "\n")[[1]]
+  i  <- match("[scaling]", ln)
+  if (is.na(i)) return(character())
+  ln[i:(i + match(TRUE, !nzchar(ln[-seq_len(i)]), nomatch = length(ln)) - 1L)][-1L]
+}

@@ -2,6 +2,38 @@
 
 ## Bug fixes
 
+* Arithmetic in `$ERROR` between the model output and `Y` is no longer dropped
+  (issue #48). `IPRED = A(1)/V`, `IPRED = F/MW*1e6` and the like were consumed
+  without being read, so the emitted file predicted the raw compartment amount
+  (ODE) or the unconverted model output (solved system) while the source
+  predicted something else. The file validated and fit, to the wrong quantity,
+  and nothing in its text said so.
+
+  * **ODE.** The expression is emitted as `[scaling] y = CENT/V`. `S<n>` written
+    into the readout is replaced by what `$PK` set it to, because ferx applies
+    `obs_scale` on top of `y` and a separate division would count twice.
+  * **Solved system.** A constant multiple of the model output is emitted as
+    `[scaling] obs_scale`, as the divisor that undoes it (`F/MW*1e6` becomes
+    `obs_scale = MW * 1e-06`).
+  * **Not expressible.** An offset, a power, a transform or a factor that
+    depends on time has no `[scaling]` form. It is now an `ERROR` with a
+    `result$unsupported` entry and a `# WARNING:` comment, rather than silence.
+  * **Unchanged.** `IPRED = F`, and `A(1)/S1`, which NONMEM's own `S<n>` already
+    handled, translate exactly as before. So does a dispatching `$ERROR`, which
+    has its own per-endpoint readout.
+
+  The false INFO "reads the compartment amount rather than F" is also gone for a
+  readout that divides by a parameter. The readout carries the parameter's
+  definition rather than its name, so a parameter read only by `Y` can still be
+  dropped as scaffolding without leaving `y` pointing at a missing symbol.
+
+  Measured against ferx on a closed-form dataset (1-compartment IV bolus, `CL`
+  3, `V` 30): before, the ODE translation predicted the amount, 30 times the
+  concentration, and the solved translation predicted the concentration where the
+  source predicted 2000 times it. After, both agree with the closed form to 1e-4.
+  A source with a bare multiplier (`Y = A(2)*SCALEF*...`) now predicts the
+  product it always predicted in NONMEM.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

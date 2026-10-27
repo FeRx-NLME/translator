@@ -946,6 +946,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                  list(per_cmt = expr_out$readout$entries)
                else list(y = expr_out$readout$y)
     structural$obs_cmt <- NULL
+  } else if (!is.null(expr_out$readout_scale)) {
+    if (!is.null(scaling$obs_scale))
+      warn <- c(warn, paste0(
+        "INFO  | [scaling] obs_scale = ", scaling$obs_scale, " is replaced by ",
+        "the $ERROR block's own rescaling, `", expr_out$readout_scale, "`."))
+    scaling <- list(obs_scale = expr_out$readout_scale)
   }
 
   lincmt_found <- identical(structural$type, "lincmt")
@@ -3274,20 +3280,7 @@ bound_name <- function(entries, raw) {
   readout_conds   <- integer()
   if (length(error_model) == 0 && !length(error_suggestion) &&
       length(conditionals) > 0 && length(sigma_names) > 0) {
-    # The same rule pass 3 uses to find `Y`, deliberately duplicated rather than
-    # approximated: if the two disagreed, 6b would build a readout around one
-    # statement while pass 3 classified another.
-    y_idx <- NA_integer_
-    for (i in seq_along(all_assigns)) {
-      a <- all_assigns[[i]]
-      if (a$lhs == a$rhs) next
-      if (grepl("^SCALE\\d*$", a$lhs) || grepl(.NM2RX_TEMP_NORM_RE, a$lhs)) next
-      if (!(a$lhs %in% aux_vars)) next
-      if (!length(intersect(toupper(.collect_symbols(a$rhs_expr_norm)), sigma_names)))
-        next
-      y_idx <- i
-      break
-    }
+    y_idx <- .error_y_idx(all_assigns, aux_vars, sigma_names)
     if (!is.na(y_idx)) {
       ch <- .readout_chain(y_idx, all_assigns, conditionals, defs, aux_vars,
                            sigma_names)
@@ -3334,6 +3327,53 @@ bound_name <- function(entries, raw) {
         warnings        <- c(warnings, out$warnings)
         readout_assigns <- c(ch$assigns, y_idx)
         readout_conds   <- ch$conds
+      }
+    }
+  }
+
+  # Pass 2e: arithmetic between the model output and `Y` (issue #48).
+  #
+  # Pass 3 skips every auxiliary assignment, so `IPRED = A(1)/V` or
+  # `IPRED = F/MW*1000000` was consumed without ever being read: the emitted file
+  # predicted the raw model output and the source predicted something else, with
+  # no diagnostic. This pass reads the chain once, keeps the expression, and
+  # either expresses it in [scaling] or says that it cannot.
+  #
+  # Only when pass 2d did not already build a readout; a dispatching $ERROR block
+  # has its own, per-endpoint, version of the same thing.
+  readout_scale <- NULL
+  if (is.null(readout) && length(sigma_names) > 0 &&
+      (identical(structural$type, "lincmt") ||
+       (identical(structural$type, "ode") && length(state_names_emitted) > 0))) {
+    y_idx <- .error_y_idx(all_assigns, aux_vars, sigma_names)
+    if (!is.na(y_idx)) {
+      ch <- .readout_chain(y_idx, all_assigns, conditionals, defs, aux_vars,
+                           sigma_names)
+      has_if <- !is.null(ch$chain) &&
+        any(vapply(ch$chain, function(x) identical(x$kind, "if"), logical(1)))
+      if (is.null(ch$why) && !has_if) {
+        ra <- .readout_arithmetic(all_assigns, y_idx, ch$chain, sigma_names,
+                                  structural$type, state_names_emitted)
+        if (!is.null(ra$why)) {
+          warnings <- c(warnings, paste0(
+            "ERROR | the $ERROR block turns the model output into `", ra$src,
+            "` before it reaches Y, but ", ra$why, ". No [scaling] is emitted, so ",
+            "the translated model predicts the model output unchanged, which is ",
+            "not what the source predicts."))
+          unsupported <- c(unsupported, paste0(
+            "$ERROR readout arithmetic not expressible: ", ra$src))
+        } else if (identical(ra$kind, "y")) {
+          readout <- list(kind = "expr", y = ra$expr)
+          warnings <- c(warnings, paste0(
+            "INFO  | the $ERROR block computes the prediction as `", ra$expr,
+            "`; emitted as [scaling] y so the model predicts it rather than the ",
+            "compartment amount."))
+        } else if (identical(ra$kind, "obs_scale")) {
+          readout_scale <- ra$expr
+          warnings <- c(warnings, paste0(
+            "INFO  | the $ERROR block rescales the model output by `",
+            ra$factor, "`; emitted as [scaling] obs_scale = ", ra$expr, "."))
+        }
       }
     }
   }
@@ -3451,6 +3491,7 @@ bound_name <- function(entries, raw) {
     error_model  = error_model,
     error_suggestion = error_suggestion,
     readout      = readout,
+    readout_scale = readout_scale,
     structural   = structural,
     warnings     = warnings,
     unsupported  = unsupported
@@ -4281,6 +4322,173 @@ bound_name <- function(entries, raw) {
                         function(d) d$idx, 0L),
        conds   = vapply(Filter(function(d) identical(d$kind, "cond"), keep),
                         function(d) d$idx, 0L))
+}
+
+# Which assignment is `Y`: the first auxiliary assignment that references a
+# sigma. Pass 2d, pass 2e and pass 3 must agree on it, because each builds
+# something around one statement and the others classify it.
+.error_y_idx <- function(all_assigns, aux_vars, sigma_names) {
+  for (i in seq_along(all_assigns)) {
+    a <- all_assigns[[i]]
+    if (a$lhs == a$rhs) next
+    if (grepl("^SCALE\\d*$", a$lhs) || grepl(.NM2RX_TEMP_NORM_RE, a$lhs)) next
+    if (!(a$lhs %in% aux_vars)) next
+    if (!length(intersect(toupper(.collect_symbols(a$rhs_expr_norm)), sigma_names)))
+      next
+    return(i)
+  }
+  NA_integer_
+}
+
+# One level of substitution. Unlike `.inline_defs()` it does not recurse into the
+# replacement, which is what makes it right for a SEQUENCE of statements: a name
+# redefined later must not reach back into an expression that read the earlier
+# binding.
+.subst_once <- function(e, env) {
+  if (is.symbol(e)) {
+    nm <- as.character(e)
+    return(if (nm %in% names(env)) env[[nm]] else e)
+  }
+  if (!is.call(e)) return(e)
+  as.call(c(list(e[[1]]), lapply(as.list(e[-1]), .subst_once, env = env)))
+}
+
+# `.fold_consts()` plus the one thing it leaves: `exp(0)`, which is what
+# `IPRED*exp(EPS1)` becomes once the epsilon is zeroed.
+.fold_pred <- function(e) {
+  calls <- function(x) {
+    if (!is.call(x)) return(x)
+    x <- as.call(c(list(x[[1]]), lapply(as.list(x[-1]), calls)))
+    if (is.symbol(x[[1]]) && as.character(x[[1]]) %in% c("exp", "log", "sqrt", "abs") &&
+        length(x) == 2L && is.numeric(x[[2]]) && length(x[[2]]) == 1L) {
+      v <- tryCatch(eval(x, baseenv()), error = function(err) NULL)
+      if (is.numeric(v) && length(v) == 1L && is.finite(v)) return(v)
+    }
+    x
+  }
+  .fold_consts(calls(e))
+}
+
+# Divisor equivalent to multiplying by `e`: `MW * 1e-06` for `1/MW * 1e+06`.
+# Falls back to `1/(e)`, which is always correct and merely less readable.
+.invert_factor <- function(e) {
+  inv <- function(x) {
+    if (is.numeric(x) && length(x) == 1L && !is.na(x) && x != 0) return(1 / x)
+    if (is.call(x) && length(x) >= 2L) {
+      op <- as.character(x[[1]])[1L]
+      if (identical(op, "(")) return(inv(x[[2]]))
+      if (length(x) == 3L && identical(op, "/"))
+        return(.fold_consts(call("*", inv(x[[2]]), x[[3]])))
+      if (length(x) == 3L && identical(op, "*"))
+        return(.fold_consts(call("*", inv(x[[2]]), inv(x[[3]]))))
+    }
+    call("/", 1, x)
+  }
+  .fold_consts(inv(e))
+}
+
+# Probe values for the numeric-identity tests below: positive, away from 0 and 1,
+# and different per variable, so two distinct expressions do not agree by
+# accident. Same scheme as `.classify_error_assignment()`.
+.probe_sets <- function(vars)
+  lapply(list(c(1.7, 0.37), c(2.3, 0.53), c(0.61, 0.29)), function(ab)
+    stats::setNames(as.list(seq(ab[1], by = ab[2], length.out = length(vars))), vars))
+
+.eval_probe <- function(e, env)
+  tryCatch({
+    v <- eval(e, envir = env, enclos = baseenv())
+    if (is.numeric(v) && length(v) == 1L && is.finite(v)) v else NA_real_
+  }, error = function(err) NA_real_)
+
+# What the $ERROR block does to the model output before `Y`, and how [scaling]
+# can say it (issue #48).
+#
+# `Y` with every epsilon zeroed is the source's prediction. NONMEM's own `S<n>`
+# division is accounted for elsewhere (`scaling_hint`, and for a solved system
+# the pk macro, which already returns A/v), so `S<n>` is set to 1 to ask whether
+# anything ELSE is left. If not, the answer is NULL and nothing changes. If so:
+#
+#   ODE      `y = <expression in the states>`, with `S<n>` replaced by what $PK
+#            set it to -- ferx applies obs_scale on top of `y`, so the division
+#            must be inside it, not beside it;
+#   solved   `obs_scale = <divisor>`, provided the prediction is a constant
+#            multiple of the model output. Anything else (an offset, a power) has
+#            no [scaling] form and is reported with `why`.
+#
+# `S<n>` on a solved system is deliberately left alone: that is a separate
+# question (#44), and it was not being applied before either.
+#
+# Returns NULL, `list(kind="y", expr=)`, `list(kind="obs_scale", expr=, factor=)`
+# or `list(why=, src=)`.
+.readout_arithmetic <- function(all_assigns, y_idx, chain, sigma_names, type,
+                                states) {
+  env <- list()
+  # `S<n>` stays a symbol: it is the one name whose value is NONMEM's to apply,
+  # so it is set to 1 below to isolate what the source did on top of it.
+  for (st in chain)
+    if (!grepl("^SCALE\\d*$", toupper(st$lhs)))
+      env[[st$lhs]] <- .subst_once(st$rhs, env)
+  full <- .subst_once(all_assigns[[y_idx]]$rhs_expr_norm, env)
+  for (sg in intersect(toupper(.collect_symbols(full)), sigma_names))
+    full <- .substitute_sym(full, sg, 0)
+  pred <- .fold_pred(full)
+
+  is_scale <- function(x) grepl("^SCALE\\d*$", x)
+  scale_syms <- unique(Filter(is_scale, toupper(.collect_symbols(pred))))
+  with_scale <- function(e, vals) {
+    for (sy in scale_syms) e <- .substitute_sym(e, sy, vals[[sy]])
+    .fold_pred(e)
+  }
+  pred0 <- with_scale(pred, stats::setNames(as.list(rep(1, length(scale_syms))),
+                                            scale_syms))
+
+  if (identical(type, "ode")) {
+    st_up <- toupper(states)
+    if (is.symbol(pred0) && toupper(as.character(pred0)) %in% st_up) return(NULL)
+    vars <- unique(c(all.vars(pred0), st_up))
+    same <- function(sn) all(vapply(.probe_sets(vars), function(pr) {
+      a <- .eval_probe(pred0, pr); b <- pr[[sn]]
+      !is.na(a) && isTRUE(all.equal(a, b, tolerance = 1e-9))
+    }, logical(1)))
+    if (any(vapply(st_up, same, logical(1)))) return(NULL)
+
+    # `S<n>` back to what $PK set it to; the division lives inside `y`.
+    sc <- Filter(function(a) is_scale(a$lhs), all_assigns)
+    sc <- sc[order(vapply(sc, function(a) a$pos, 0L))]
+    senv <- list()
+    for (a in sc) senv[[a$lhs]] <- .subst_once(a$rhs_expr_norm, senv)
+    undefined <- setdiff(scale_syms, names(senv))
+    if (length(undefined) > 0L)
+      return(list(src = .expr_text(pred), why = paste0(
+        "it divides by ", paste(undefined, collapse = ", "), ", which $PK never sets")))
+    shown <- with_scale(pred, senv)
+    return(list(kind = "y", expr = .expr_text(shown)))
+  }
+
+  rl <- unique(Filter(function(x) grepl("^RXLINCMT\\d*$", x),
+                      toupper(.collect_symbols(pred0))))
+  if (length(rl) != 1L) return(NULL)
+  shown_src <- .expr_text(.substitute_sym(pred0, rl, quote(F)))
+  free <- setdiff(all.vars(pred0), rl)
+  at <- function(pr, v) .eval_probe(pred0, c(pr, stats::setNames(list(v), rl)))
+  res <- lapply(.probe_sets(free), function(pr)
+    c(at(pr, 0), at(pr, 1), at(pr, 2.7)))
+  ok <- vapply(res, function(r)
+    !anyNA(r) && abs(r[1]) < 1e-12 * (1 + abs(r[2])) && r[2] > 0 &&
+      isTRUE(all.equal(r[3], 2.7 * r[2], tolerance = 1e-9)), logical(1))
+  if (!all(ok))
+    return(list(src = shown_src, why = paste0(
+      "that is not a constant multiple of the model output (an offset, a power ",
+      "or a non-positive factor), and [scaling] obs_scale can only divide by a ",
+      "positive constant")))
+  if (all(vapply(res, function(r) isTRUE(all.equal(r[2], 1, tolerance = 1e-9)),
+                 logical(1)))) return(NULL)
+  g <- .fold_pred(.substitute_sym(pred0, rl, 1))
+  if (any(toupper(all.vars(g)) %in% c("TIME", "T")))
+    return(list(src = shown_src, why = paste0(
+      "the factor depends on time, and obs_scale is evaluated once per subject")))
+  list(kind = "obs_scale", expr = .expr_text(.invert_factor(g)),
+       factor = .expr_text(g))
 }
 
 .parse_error_rhs <- function(rhs, name_map) {

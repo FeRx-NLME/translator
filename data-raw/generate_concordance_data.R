@@ -206,6 +206,31 @@ simulate_dataset(
 # then write ID,TIME,DV,EVID,AMT,CMT,MDV with DV="." on dose rows. See
 # tests/nonmem-anchor/README.md.
 
+# ---- $ERROR arithmetic between the prediction and Y (issue #48) --------------
+# Simulated in closed form, NOT from the translation: the defect made the
+# translated model predict the compartment amount, so data simulated from it
+# would be amounts and the fit would agree with the broken file.
+#
+# Truth: 1-cpt IV bolus, dose 100, CL = 3 * exp(eta), var(eta) = 0.09, V = 30,
+# proportional error SD 0.1. DV is the CONCENTRATION. Column order matches the
+# fixtures' $INPUT (ID TIME DV AMT EVID MDV CMT).
+local({
+  set.seed(48L)
+  obs_t <- c(0.5, 1, 2, 4, 8, 12, 24)
+  rows  <- lapply(seq_len(20L), function(id) {
+    cl <- 3 * exp(rnorm(1L, 0, 0.3))
+    cp <- 100 / 30 * exp(-cl / 30 * obs_t) * (1 + rnorm(length(obs_t), 0, 0.1))
+    rbind(
+      data.frame(ID = id, TIME = 0, DV = ".", AMT = "100", EVID = 1L, MDV = 1L,
+                 CMT = 1L),
+      data.frame(ID = id, TIME = obs_t, DV = sprintf("%.6f", cp), AMT = ".",
+                 EVID = 0L, MDV = 0L, CMT = 1L))
+  })
+  out <- "inst/testdata/readout_arith_concordance.csv"
+  write.csv(do.call(rbind, rows), out, row.names = FALSE, quote = FALSE)
+  message("Written ", out)
+})
+
 # ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
 # Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column
 # (Form C readout plus a covariate-selected error model); `pkpd_cmt.mod`

@@ -1039,7 +1039,12 @@ test_that("only a scale<n> symbol counts as the source having scaled the DV", {
   body <- grep("^#", strsplit(result$ferx_text, "\n")[[1]],
                value = TRUE, invert = TRUE)
   expect_false(any(grepl("obs_scale", body, fixed = TRUE)))
-  expect_length(grep("reads the compartment amount", result$warnings), 1L)
+  # The source predicts the amount TIMES SCALEF, and the multiplier is the
+  # source's own arithmetic, not an S<n>. It used to be consumed unread (the
+  # "reads the compartment amount" INFO then said the prediction was the amount,
+  # which it was not); it is now carried, with the constant inlined.
+  expect_equal(.scaling_lines(result$ferx_text), "  y = CENTRAL * 2")
+  expect_length(grep("reads the compartment amount", result$warnings), 0L)
 })
 
 test_that("a $MODEL that cannot be reconciled by name reports the numbering as a gap", {
@@ -1297,4 +1302,141 @@ test_that("FIX on an IOV kappa survives the pipeline, and a free kappa stays fre
   # Reading attr(ui$omega, "lotriFix") instead of iniDf$fix would make BOTH
   # kappas free -- that attribute is NULL on any model carrying IOV.
   expect_match(result$ferx_text, "iov_column = occ", fixed = TRUE)
+})
+
+# -- $ERROR arithmetic between the prediction and Y (issue #48) ---------------
+# Pass 3 skips every auxiliary assignment, so `IPRED = A(1)/V` and
+# `IPRED = F/MW*1e6` used to be consumed without being read: the file predicted
+# the raw amount, or the unconverted model output, and said nothing.
+
+test_that("an ODE readout that divides the amount is emitted as [scaling] y", {
+  skip_if_not_installed("nonmem2rx")
+  for (m in c("readout_ode_vol.ctl", "readout_ode_vol_s1.ctl")) {
+    result <- suppressWarnings(nm_to_ferx(nm_path(m), validate = FALSE))
+    expect_equal(.scaling_lines(result$ferx_text), "  y = CENT/V", label = m)
+    # `y` replaces the observed-compartment guess, and obs_scale on top of it
+    # would divide by V twice.
+    expect_no_match(result$ferx_text, "obs_cmt", fixed = TRUE, label = m)
+    expect_no_match(result$ferx_text, "obs_scale", fixed = TRUE, label = m)
+    expect_length(grep("reads the compartment amount", result$warnings), 0L)
+    expect_length(result$unsupported, 0L)
+  }
+})
+
+test_that("S1 applied by the source keeps its obs_scale, and a bare amount keeps none", {
+  skip_if_not_installed("nonmem2rx")
+  # The control for the test above: `IPRED = A(1)/S1` is NONMEM's own scaling,
+  # which [scaling] obs_scale already expressed. Treating it as readout
+  # arithmetic would replace a correct block with an equivalent one at best.
+  result <- suppressWarnings(nm_to_ferx(nm_path("readout_ode_s1_on_f.ctl"),
+                                        validate = FALSE))
+  expect_equal(.scaling_lines(result$ferx_text), "  obs_scale = V")
+  expect_no_match(result$ferx_text, "  y = ", fixed = TRUE)
+
+  # `IPRED = A(1)` with S1 declared predicts the amount in NONMEM too.
+  amt <- suppressWarnings(nm_to_ferx(.readout_ctl("  IPRED = A(1)",
+                                                  pk_extra = "  S1 = V"),
+                                     validate = FALSE))
+  expect_length(.scaling_lines(amt$ferx_text), 0L)
+  expect_length(grep("reads the compartment amount", amt$warnings), 1L)
+})
+
+test_that("S1 written into the ODE readout is replaced by what $PK set it to", {
+  skip_if_not_installed("nonmem2rx")
+  # `A(1)/S1*1000`: the division by S1 is the source's own, and the 1000 is what
+  # is left. ferx has no S1, and obs_scale would stack on `y`, so the value $PK
+  # gave S1 has to be inside the expression.
+  result <- suppressWarnings(nm_to_ferx(
+    .readout_ctl("  IPRED = A(1)/S1*1000", pk_extra = "  S1 = V"),
+    validate = FALSE))
+  expect_equal(.scaling_lines(result$ferx_text), "  y = CENT/V * 1000")
+  expect_no_match(result$ferx_text, "\\bS1\\b")
+  expect_no_match(result$ferx_text, "obs_scale", fixed = TRUE)
+})
+
+test_that("a theta in the readout division reaches [scaling] y", {
+  skip_if_not_installed("nonmem2rx")
+  # Not an individual parameter, so it is not in the ODE: nothing but the
+  # readout references it. It must survive the unused-scaffolding drop.
+  result <- suppressWarnings(nm_to_ferx(
+    .readout_ctl("  IPRED = A(1)/THETA(3)", theta_extra = "  (0,2)"),
+    validate = FALSE))
+  expect_match(.scaling_lines(result$ferx_text), "^  y = CENT/\\w+$")
+  nm <- sub("^  y = CENT/", "", .scaling_lines(result$ferx_text))
+  expect_match(result$ferx_text, paste0("  theta ", nm, "("), fixed = TRUE)
+})
+
+test_that("a readout over a scaffolding-only parameter names no dropped symbol", {
+  skip_if_not_installed("nonmem2rx")
+  # VOL carries an eta and is referenced by the Y statement alone, so the
+  # scaffolding rule drops it from [individual_parameters]. The readout must
+  # therefore carry VOL's definition rather than the name, or `y` would read a
+  # symbol ferx resolves as a covariate.
+  result <- suppressWarnings(nm_to_ferx(
+    .readout_ctl(character(), pk_extra = "  VOL = THETA(3)*EXP(ETA(2))",
+                 theta_extra = "  (0,2)", omega_extra = "$OMEGA 0.04",
+                 y_line = "  Y = A(1)/VOL*(1+EPS(1))"),
+    validate = FALSE))
+  expect_equal(.scaling_lines(result$ferx_text),
+               "  y = CENT/(THETA3 * exp(ETA2))")
+  expect_no_match(result$ferx_text, "\\bVOL\\b")
+})
+
+test_that("a unit conversion on the solved output is emitted as obs_scale", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("readout_solved_unit.ctl"),
+                                        validate = FALSE))
+  # IPRED = F/MW*1e6: multiplying by 1e6/MW is dividing by MW*1e-6.
+  expect_equal(.scaling_lines(result$ferx_text), "  obs_scale = MW * 1e-06")
+  expect_length(result$unsupported, 0L)
+
+  # Through an intermediate name, and a different constant: the factor is read
+  # from the whole chain, not from the last statement's text.
+  chain <- suppressWarnings(nm_to_ferx(
+    .readout_ctl(c("  CONC = F*1000", "  IPRED = CONC/V"), solved = TRUE),
+    validate = FALSE))
+  expect_equal(.scaling_lines(chain$ferx_text), "  obs_scale = 0.001 * V")
+
+  # A name reassigned: `C` means two different things in the three statements,
+  # and only reading them in order gives 1000/V.
+  rebind <- suppressWarnings(nm_to_ferx(
+    .readout_ctl(c("  C = F*1000", "  C = C/V", "  IPRED = C"), solved = TRUE),
+    validate = FALSE))
+  expect_equal(.scaling_lines(rebind$ferx_text), "  obs_scale = 0.001 * V")
+
+  # A bare F is the model output unchanged.
+  bare <- suppressWarnings(nm_to_ferx(nm_path("readout_solved_f.ctl"),
+                                      validate = FALSE))
+  expect_length(.scaling_lines(bare$ferx_text), 0L)
+  expect_length(grep("rescales the model output", bare$warnings), 0L)
+})
+
+test_that("a solved readout that [scaling] cannot express is reported, not dropped", {
+  skip_if_not_installed("nonmem2rx")
+  cases <- list(
+    offset = c("  IPRED = F + 5", "F \\+ 5", "not a constant multiple"),
+    log    = c("  IPRED = LOG(F + 1)", "log\\(F \\+ 1\\)", "not a constant multiple"),
+    time   = c("  IPRED = F*TIME", "F \\* t", "depends on time"))
+  for (nm in names(cases)) {
+    cs <- cases[[nm]]
+    result <- suppressWarnings(nm_to_ferx(.readout_ctl(cs[1], solved = TRUE),
+                                          validate = FALSE))
+    err <- grep("^ERROR .*turns the model output into", result$warnings,
+                value = TRUE)
+    expect_length(err, 1L)
+    expect_match(err, cs[2], label = nm)
+    expect_match(err, cs[3], label = nm)
+    # The internal nonmem2rx name must not reach the user.
+    expect_no_match(err, "RXLINCMT", label = nm)
+    expect_length(grep("readout arithmetic not expressible", result$unsupported), 1L)
+    expect_length(.scaling_lines(result$ferx_text), 0L)
+  }
+  off <- suppressWarnings(nm_to_ferx(nm_path("readout_solved_offset.ctl"),
+                                     validate = FALSE))
+  expect_length(off$unsupported, 1L)
+  expect_match(off$ferx_text,
+               "# WARNING: $ERROR readout arithmetic not expressible: F + 5",
+               fixed = TRUE)
+  expect_match(off$ferx_text, "# WARNING: the $ERROR block turns the model output",
+               fixed = TRUE)
 })

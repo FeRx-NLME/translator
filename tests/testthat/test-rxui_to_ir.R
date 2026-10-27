@@ -3069,6 +3069,40 @@ test_that("constant folding removes exactly the identities substitution creates"
   expect_equal(f("2 * x + 3 * x"), "2 * x + 3 * x")
 })
 
+test_that("a readout factor is inverted into the divisor obs_scale needs", {
+  inv <- function(s) deparse1(.invert_factor(str2lang(s)))
+  # The case that matters: IPRED = F/MW*1e6 multiplies the output by 1e6/MW, and
+  # obs_scale DIVIDES, so the emitted divisor is MW*1e-6.
+  expect_equal(inv("1/MW * 1e6"), "MW * 1e-06")
+  expect_equal(inv("1000"), "0.001")
+  expect_equal(inv("1/V"), "V")
+  expect_equal(inv("1000/MW"), "0.001 * MW")
+  # No clever form available: 1/(...) is always right.
+  expect_equal(inv("a + b"), "1/(a + b)")
+  # The wrong-direction control: returning the factor itself would pass the
+  # constant case above only for a factor of 1.
+  expect_false(identical(inv("1000"), "1000"))
+})
+
+test_that("folding reduces exp(0) so a zeroed epsilon leaves the prediction", {
+  f <- function(s) deparse1(.fold_pred(str2lang(s)))
+  expect_equal(f("X * exp(0)"), "X")
+  expect_equal(f("X/V * (1 + 0)"), "X/V")
+  # Only a numeric argument is folded; a symbol is left alone.
+  expect_equal(f("exp(Z)"), "exp(Z)")
+  expect_equal(f("log(1)"), "0")
+})
+
+test_that("sequential substitution does not capture a later rebinding", {
+  # `a = x; b = a; a = 2` : b must read the FIRST a. Recursive inlining over the
+  # final bindings would give b = 2.
+  env <- list()
+  env[["A"]] <- .subst_once(quote(X), env)
+  env[["B"]] <- .subst_once(quote(A), env)
+  env[["A"]] <- .subst_once(quote(2), env)
+  expect_equal(deparse1(env[["B"]]), "X")
+})
+
 test_that("inlining resolves a chain and reports a cycle instead of truncating it", {
   defs <- list(IPRED = quote(CTOT), CTOT = quote(CENT/VC))
   expect_equal(deparse1(.inline_defs(quote(IPRED * (1 + EPS1)), defs)),

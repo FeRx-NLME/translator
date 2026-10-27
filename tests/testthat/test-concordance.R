@@ -751,3 +751,70 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+# ===========================================================================
+# $ERROR arithmetic between the prediction and Y (issue #48)
+# ===========================================================================
+# The source predicts a CONCENTRATION through arithmetic in $ERROR that
+# translation used to consume without reading, so the emitted file predicted the
+# compartment AMOUNT (ODE) or the unconverted model output (solved) -- a valid
+# file that fits, to the wrong quantity. Nothing in the text of the .ferx file
+# tells that apart from a correct one; only a prediction does.
+#
+# Truth is closed form and eta-free (PRED, evaluated at the theta initials with
+# maxiter = 0): 1-cpt IV bolus, dose 100, CL = 3, V = 30.
+
+test_that("an $ERROR readout that divides the amount reaches the prediction", {
+  data <- .conc_data("readout_arith_concordance.csv")
+  expect_true(nzchar(data))
+  d     <- utils::read.csv(data)
+  obs_t <- d$TIME[d$EVID == 0L]
+  conc  <- 100 / 30 * exp(-3 / 30 * obs_t)
+
+  pred_of_model <- function(model) {
+    txt <- .eval_only(suppressWarnings(nm_to_ferx(
+      system.file(file.path("testmodels/nonmem", model),
+                  package = "ferxtranslate")))$ferx_text)
+    list(txt = txt, pred = .pred_of(txt, data)$pred)
+  }
+
+  for (m in c("readout_ode_vol.ctl", "readout_ode_vol_s1.ctl")) {
+    r <- pred_of_model(m)
+    expect_match(r$txt, "y = CENT/V", fixed = TRUE, label = m)
+    expect_equal(r$pred, conc, tolerance = 1e-4, label = m)
+    # The control: without the readout the model predicts the amount, V times
+    # too large. Asserted so the line above cannot hold for a model that was
+    # always predicting concentrations.
+    no_y <- sub("ode(states=[CENT])", "ode(obs_cmt=CENT, states=[CENT])",
+                sub("\\[scaling\\]\n  y = CENT/V\n", "", r$txt), fixed = TRUE)
+    amt <- .pred_of(no_y, data)$pred
+    expect_equal(amt / r$pred, rep(30, length(conc)), tolerance = 1e-4, label = m)
+  }
+
+  # S1 applied to F by the source: the existing obs_scale was already right and
+  # must not be doubled by the new path.
+  r <- pred_of_model("readout_ode_s1_on_f.ctl")
+  expect_match(r$txt, "obs_scale = V", fixed = TRUE)
+  expect_no_match(r$txt, "  y = ", fixed = TRUE)
+  expect_equal(r$pred, conc, tolerance = 1e-4)
+})
+
+test_that("an $ERROR unit conversion on the solved output reaches the prediction", {
+  data <- .conc_data("readout_arith_concordance.csv")
+  d     <- utils::read.csv(data)
+  obs_t <- d$TIME[d$EVID == 0L]
+  conc  <- 100 / 30 * exp(-3 / 30 * obs_t)
+
+  txt <- .eval_only(suppressWarnings(nm_to_ferx(
+    system.file("testmodels/nonmem/readout_solved_unit.ctl",
+                package = "ferxtranslate")))$ferx_text)
+  expect_match(txt, "obs_scale = MW * 1e-06", fixed = TRUE)
+  # IPRED = F/MW*1e6 with MW = 500: the source predicts 2000 x the concentration.
+  expect_equal(.pred_of(txt, data)$pred, conc * 1e6 / 500, tolerance = 1e-4)
+  # The control. A bare `IPRED = F` is the unconverted output.
+  none <- .eval_only(suppressWarnings(nm_to_ferx(
+    system.file("testmodels/nonmem/readout_solved_f.ctl",
+                package = "ferxtranslate")))$ferx_text)
+  expect_no_match(none, "[scaling]", fixed = TRUE)
+  expect_equal(.pred_of(none, data)$pred, conc, tolerance = 1e-4)
+})
