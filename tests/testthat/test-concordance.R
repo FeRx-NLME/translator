@@ -348,6 +348,37 @@ test_that("issue #25: the dose reaches the right compartment when $MODEL and d/d
               label = paste0("theta ", nm, " moved off its start"))
 })
 
+test_that("issue #51: a renamed intermediate keeps its SEX override in the fit", {
+  # rxm_alias_override.ctl names its intermediate CLSEX, which nonmem2rx renames
+  # to `rxm.CLSEX`. The default `CLSEX = 1` used to replace the conditional
+  # override, leaving the SEXFAC theta unreferenced, so the fit could not move it.
+  #
+  # The dataset is simulated in closed form, not from the translation (see
+  # data-raw/generate_concordance_data.R): a dataset simulated from the broken
+  # model would carry no SEX effect either and the fit would agree with it.
+  # The $THETA initials (3, 30, 1.5) are away from the truth (5, 50, 0.5), so
+  # "moved" is not satisfied by a frozen optimiser.
+  ferx_file <- .translate_to_tmp("rxm_alias_override.ctl")
+  data_file <- .conc_data("rxm_alias_concordance.csv")
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_false(grepl("RXM_", txt, fixed = TRUE))
+
+  fit <- ferx_fit(ferx_file, data_file,
+                  method     = "focei",
+                  covariance = FALSE,
+                  verbose    = FALSE)
+
+  ref <- c(TVCL = 5.0, TVV = 50.0, SEXFAC = 0.5)
+  .report_deviations(fit$theta, ref, "issue #51 renamed intermediate")
+  expect_lt(abs(fit$theta[["TVCL"]]   / ref[["TVCL"]]   - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta[["TVV"]]    / ref[["TVV"]]    - 1), 0.15, label = "V")
+  expect_lt(abs(fit$theta[["SEXFAC"]] / ref[["SEXFAC"]] - 1), 0.25, label = "SEX factor")
+  start <- c(TVCL = 3, TVV = 30, SEXFAC = 1.5)
+  for (nm in names(start))
+    expect_gt(abs(fit$theta[[nm]] / start[[nm]] - 1), 0.20,
+              label = paste0("theta ", nm, " moved off its start"))
+})
+
 # ===========================================================================
 # ENGINE VALIDATION SWEEP (Tier 4)
 # Validates every bundled model's emitted .ferx with the engine and fails on

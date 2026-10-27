@@ -11,6 +11,7 @@
 #   2cpt_iv.ctl             : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
 #   pk_1cmt_oral_ampsim.ctl : KA=0.0825, CL=2.676, V=1.588 (amp.sim NONMEM reference)
 #   cmt_order_gap.ctl       : TVCL=3.0, TVV=50.0, TVKA=1.2 (theta initials)
+#   rxm_alias_*.ctl        : TVCL=5.0, V=50.0, SEXFAC=0.5 (NOT the initials)
 
 library(ferxtranslate)
 library(ferx)
@@ -205,6 +206,31 @@ simulate_dataset(
 #
 # then write ID,TIME,DV,EVID,AMT,CMT,MDV with DV="." on dose rows. See
 # tests/nonmem-anchor/README.md.
+
+# ---- an intermediate nonmem2rx renames (issue #51) ---------------------------
+# Simulated in closed form, NOT from the translation, for the same reason as
+# above: the defect dropped the SEX override, so a dataset simulated from the
+# broken translation would carry no SEX effect and the fit would agree with it.
+#
+# Truth: 1-cpt IV bolus, CL = 5 * (0.5 if SEX == 1 else 1) * exp(eta),
+# var(eta) = 0.09, V = 50, proportional error SD 0.1, 20 subjects per sex.
+local({
+  set.seed(51L)
+  obs_t <- c(0.5, 1, 2, 4, 8, 12, 24)
+  rows  <- lapply(seq_len(40L), function(id) {
+    sex <- as.integer(id > 20L)
+    cl  <- 5 * ifelse(sex == 1L, 0.5, 1) * exp(rnorm(1L, 0, 0.3))
+    cp  <- 100 / 50 * exp(-cl / 50 * obs_t) * (1 + rnorm(length(obs_t), 0, 0.1))
+    rbind(
+      data.frame(ID = id, TIME = 0, DV = ".", EVID = 1L, AMT = "100", CMT = 1L,
+                 MDV = 1L, SEX = sex),
+      data.frame(ID = id, TIME = obs_t, DV = sprintf("%.6f", cp), EVID = 0L,
+                 AMT = ".", CMT = 1L, MDV = 0L, SEX = sex))
+  })
+  out <- "inst/testdata/rxm_alias_concordance.csv"
+  write.csv(do.call(rbind, rows), out, row.names = FALSE, quote = FALSE)
+  message("Written ", out)
+})
 
 # ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
 # Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column

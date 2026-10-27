@@ -2,6 +2,33 @@
 
 ## Bug fixes
 
+* A `$PK` intermediate that nonmem2rx renames no longer loses its definition
+  (issue #51). On a solved-system (`ADVAN1`-`ADVAN12` / `linCmt`) model, nonmem2rx
+  renames every variable whose name starts with A, B, C, K, Q or V to
+  `rxm.<name>` (`CLSEX`, `BOV`, `KSEX`), and the translator then treated each one as a
+  single textual alias. Three ordinary spellings came out wrong:
+
+  * a default followed by a conditional override (`X = 1` / `IF (SEX.EQ.1) X =
+    THETA(3)`) emitted the default in place of the override, so the covariate
+    effect was silently gone;
+  * an intermediate updated in place (`X = X*THETA(3)**SEX`) left an unresolved
+    `RXM_X`, which ferx read as a missing covariate;
+  * an alias to a compound expression (`X = 1 + THETA(3)*(WT-70)`) was inlined
+    without parentheses, changing the arithmetic.
+
+  The rename is now undone before anything reads the model, so these take the
+  same path as an intermediate nonmem2rx never touched; each translation is
+  identical to its control up to the name. The ODE route was never affected.
+  Where the stripped name is already taken (a theta or eta of that name, or
+  another variable) the rename is left in place, and the remaining alias
+  handling is restricted to what it can do correctly: a name bound once,
+  unconditionally, parenthesised and resolved through chains. Anything else is
+  an `ERROR` with a `result$unsupported` entry instead of a guess.
+
+  Measured against ferx on a closed-form dataset with a sex effect of 0.5 on
+  clearance (start 1.5): before, the factor was pinned at its start and `TVCL`
+  came out 23% low; after, it is 0.57 and `TVCL` is 5.08 against a truth of 5.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

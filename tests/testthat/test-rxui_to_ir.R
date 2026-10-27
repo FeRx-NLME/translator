@@ -3770,3 +3770,50 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
   expect_length(diag_only$warnings, 0L)
   expect_length(diag_only$unsupported, 0L)
 })
+
+# -- nonmem2rx's `rxm.` rename of $PK intermediates (#51) ---------------------
+
+test_that(".undo_lincmt_rename restores the name, case-insensitively", {
+  lst <- list(quote(rxm.CLSEX <- 1),
+              quote(if (sex == 1) rxm.clsex <- t.sexfac),
+              quote(cl <- tvcl * rxm.CLSEX))
+  out <- .undo_lincmt_rename(lst)
+  syms <- unlist(lapply(out, .all_symbols))
+  expect_false(any(grepl("^rxm\\.", syms)))
+  expect_equal(deparse(out[[1]]), "CLSEX <- 1")
+  expect_equal(deparse(out[[2]]), "if (sex == 1) clsex <- t.sexfac")
+  expect_equal(deparse(out[[3]]), "cl <- tvcl * CLSEX")
+})
+
+test_that(".undo_lincmt_rename leaves a name alone when stripping would merge variables", {
+  # A model symbol, or a theta/eta name, already owns the stripped spelling.
+  lst <- list(quote(rxm.kappa_cl <- e.KAPPA_CL), quote(cl <- tvcl * rxm.kappa_cl),
+              quote(rxm.ca <- 1), quote(ca <- 2))
+  out <- .undo_lincmt_rename(lst, reserved = c("t.TVCL", "e.KAPPA_CL"))
+  expect_identical(out, lst)
+})
+
+test_that("a name that cannot be restored still inlines a single alias, parenthesised and chained", {
+  ini <- rbind(theta_row("tvcl", 0.134, 0.001, 10), eta_row("eta.cl", 0.07, 1L),
+               sigma_row("err.prop", 0.01))
+  # `ca` and `cb` exist as separate variables, so neither can be restored.
+  lst <- list(quote(rxm.ca <- tvcl * 2), quote(ca <- 7),
+              quote(rxm.cb <- rxm.ca + 1), quote(cb <- 9),
+              quote(cl <- rxm.cb * exp(eta.cl)),
+              quote(linCmt() ~ prop(err.prop)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  rhs <- vapply(ir$indiv_params, function(p) p$rhs, "")
+  expect_equal(rhs[[3]], "((TVCL * 2) + 1) * exp(ETA_CL)")
+  expect_false(any(grepl("RXM_", rhs)))
+})
+
+test_that("a name that cannot be restored and has several bindings is an ERROR, not a guess", {
+  ini <- rbind(theta_row("tvcl", 0.134, 0.001, 10), eta_row("eta.cl", 0.07, 1L),
+               sigma_row("err.prop", 0.01))
+  lst <- list(quote(rxm.cc <- 1), quote(rxm.cc <- rxm.cc * 2), quote(cc <- 5),
+              quote(cl <- rxm.cc * exp(eta.cl)),
+              quote(linCmt() ~ prop(err.prop)))
+  ir <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst)))
+  expect_true(any(grepl("^ERROR \\| RXM_CC", ir$warnings)))
+  expect_true(any(grepl("RXM_CC", ir$unsupported)))
+})

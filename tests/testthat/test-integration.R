@@ -252,7 +252,7 @@ test_that("every bundled model translates, without a shadowing theta", {
     }
     clash <- intersect(
       toupper(vapply(ir$thetas, function(t) t$name, "")),
-      toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
+      toupper(.ip_names(ir$indiv_params))
     )
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
@@ -1297,4 +1297,63 @@ test_that("FIX on an IOV kappa survives the pipeline, and a free kappa stays fre
   # Reading attr(ui$omega, "lotriFix") instead of iniDf$fix would make BOTH
   # kappas free -- that attribute is NULL on any model carrying IOV.
   expect_match(result$ferx_text, "iov_column = occ", fixed = TRUE)
+})
+
+# -- an intermediate nonmem2rx renames (#51) ----------------------------------
+# On a solved-system model nonmem2rx renames every $PK variable starting with
+# A, B, C, K, Q or V to `rxm.<name>`. Each fixture below names its intermediate
+# CLSEX for that reason; the control swaps it for FSEX, which is not renamed, so
+# the two translations must be identical up to the name.
+
+.rxm_fixture <- c("rxm_alias_override", "rxm_alias_ifelse",
+                  "rxm_alias_update",   "rxm_alias_linear")
+
+.rxm_translate <- function(base, from = "CLSEX", to = from) {
+  txt <- gsub(from, to, readLines(nm_path(paste0(base, ".ctl"))), fixed = TRUE)
+  f   <- file.path(tempdir(), paste0(base, "_", to, ".ctl"))
+  writeLines(txt, f)
+  suppressMessages(suppressWarnings(nm_to_ferx(f, strict = FALSE)))
+}
+
+.indiv_block <- function(res) {
+  lines <- strsplit(res$ferx_text, "\n", fixed = TRUE)[[1]]
+  start <- grep("^\\[individual_parameters\\]", lines)
+  end   <- grep("^\\[", lines)
+  end   <- min(end[end > start], length(lines) + 1L)
+  lines[(start + 1L):(end - 1L)]
+}
+
+test_that("#51: a renamed intermediate translates exactly like an unrenamed one", {
+  skip_if_not_installed("nonmem2rx")
+  for (base in .rxm_fixture) {
+    res <- .rxm_translate(base)
+    ctl <- .rxm_translate(base, from = "CLSEX", to = "FSEX")
+    expect_false(grepl("RXM_", res$ferx_text, fixed = TRUE), label = base)
+    expect_length(res$unsupported, 0L)
+    expect_false(any(grepl("^ERROR", res$warnings)), label = base)
+    expect_equal(gsub("FSEX", "CLSEX", .indiv_block(ctl)), .indiv_block(res),
+                 label = base)
+  }
+})
+
+test_that("#51: the override and the update both survive in the emitted block", {
+  skip_if_not_installed("nonmem2rx")
+  # Pinned individually because the loop above compares against a control that
+  # shares the pipeline: if both went wrong the same way it would still pass.
+  over <- .indiv_block(.rxm_translate("rxm_alias_override"))
+  expect_true("CLSEX = 1" %in% trimws(over))
+  expect_true(any(grepl("if (SEX == 1) { CLSEX = SEXFAC }", over, fixed = TRUE)))
+  expect_true(any(grepl("CL = TVCL * CLSEX * exp(ETA1)", over, fixed = TRUE)))
+
+  upd <- .indiv_block(.rxm_translate("rxm_alias_update"))
+  expect_true(any(grepl("CLSEX = CLSEX * SEXFAC^SEX", upd, fixed = TRUE)))
+
+  ife <- .indiv_block(.rxm_translate("rxm_alias_ifelse"))
+  expect_true(any(grepl("else { CLSEX = 1 }", ife, fixed = TRUE)))
+})
+
+test_that("#51: a non-atomic intermediate keeps its parentheses", {
+  skip_if_not_installed("nonmem2rx")
+  lin <- .indiv_block(.rxm_translate("rxm_alias_linear"))
+  expect_true(any(grepl("CLSEX = 1 + SEXFAC * (SEX - 0.5)", lin, fixed = TRUE)))
 })

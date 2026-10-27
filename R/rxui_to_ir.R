@@ -46,7 +46,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                        scaling_hint = list(), obs_hint = NULL,
                        has_cmt_col = NA) {
   ini  <- ui$iniDf
-  lst  <- ui$lstExpr
+  lst  <- .undo_lincmt_rename(ui$lstExpr, ini$name)
   warn <- character()
   unsp <- character()
 
@@ -1938,6 +1938,49 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   list(value = hits[[1]], n_bindings = length(hits))
 }
 
+# On a solved-system (linCmt) model nonmem2rx renames every $PK variable whose
+# name starts with A, B, C, K, Q or V to `rxm.<name>` (`CLSEX` -> `rxm.CLSEX`,
+# `BOV` -> `rxm.BOV`), so that rxode2 cannot mistake it for a linCmt parameter.
+# That is rxode2's problem, not ferx's, and it turns an ordinary intermediate
+# into something the alias machinery (pass 2c) was never meant to see: an
+# intermediate with several bindings, or one that is read after being updated,
+# does not survive being treated as a single textual alias.
+#
+# Undo it before anything reads `lst`. NONMEM names are case-insensitive, so
+# `rxm.CLSEX` and `rxm.clsex` are one variable and both map onto the same
+# target. A name is left alone when its stripped form is already a symbol in
+# the model, or is a theta/eta/sigma name (the rename would merge two
+# variables; the `rxm.kappa_cl <- e.KAPPA_CL` copy of an eta is the case that
+# matters, and pass 2c's own handling covers it).
+.undo_lincmt_rename <- function(lst, reserved = character()) {
+  syms <- unique(unlist(lapply(lst, .all_symbols)))
+  rx   <- syms[grepl("^rxm\\.", syms)]
+  if (length(rx) == 0L) return(lst)
+  others <- tolower(c(setdiff(syms, rx), sub("^[te]\\.", "", reserved)))
+  target <- sub("^rxm\\.", "", rx)
+  ok     <- nzchar(target) & !(tolower(target) %in% others)
+  if (!any(ok)) return(lst)
+  map <- stats::setNames(target[ok], rx[ok])
+  sub_sym <- function(e) {
+    if (is.symbol(e)) {
+      nm <- as.character(e)
+      return(if (nm %in% names(map)) as.name(map[[nm]]) else e)
+    }
+    if (!is.call(e)) return(e)
+    as.call(c(list(e[[1]]), lapply(as.list(e)[-1], sub_sym)))
+  }
+  out <- lapply(lst, sub_sym)
+  attributes(out) <- attributes(lst)
+  out
+}
+
+# Every symbol in an expression, call heads excluded.
+.all_symbols <- function(expr) {
+  if (is.symbol(expr)) return(as.character(expr))
+  if (!is.call(expr))  return(character())
+  unlist(lapply(as.list(expr)[-1], .all_symbols))
+}
+
 # Every statement, including those nested inside `if`/`else` blocks and `{`.
 # nonmem2rx renders `IF (FORM.EQ.2) F1 = THETA(4)` as an `if` whose body rebinds
 # the alias, and a top-level-only walk cannot see it.
@@ -3342,10 +3385,40 @@ bound_name <- function(entries, raw) {
   # nonmem2rx emits RXM_X = Y lines as internal IOV/eta copies. Collect them
   # all before Pass 3 (ordering in ui$lstExpr is not guaranteed) so that any
   # downstream indiv_param rhs that references RXM_X gets KAPPA_Y directly.
+  #
+  # `.undo_lincmt_rename()` turns almost every `rxm.X` back into `X` before this
+  # point, so what reaches here is a name whose stripped form collided with
+  # another symbol. The textual substitution below is only sound for a name
+  # bound exactly once, unconditionally: with a later override the default
+  # replaced it (silently wrong), and an update-in-place left an unresolved
+  # `RXM_X`. Anything else is reported rather than guessed at.
+  rxm_lhs <- unique(Filter(function(x) grepl("^RXM_", x),
+                           vapply(all_assigns, function(a) a$lhs, "")))
+  cond_lhs <- .norm(unlist(lapply(conditionals, .cond_defines)))
   rxm_map <- character()
-  for (a in all_assigns) {
-    if (grepl("^RXM_", a$lhs))
-      rxm_map[[a$lhs]] <- a$rhs  # a$rhs is already normalised (e.g. "KAPPA_CL")
+  for (nm in rxm_lhs) {
+    hits <- Filter(function(a) a$lhs == nm, all_assigns)
+    if (length(hits) == 1L && !(nm %in% cond_lhs)) {
+      rhs <- hits[[1]]$rhs  # already normalised (e.g. "KAPPA_CL")
+      rxm_map[[nm]] <- if (grepl("^[A-Za-z0-9_.]+$", rhs)) rhs else paste0("(", rhs, ")")
+    } else {
+      warnings <- c(warnings, paste0(
+        "ERROR | ", nm, " is a nonmem2rx-renamed intermediate that is assigned ",
+        "more than once or conditionally and could not be restored to its ",
+        "source name, so it cannot be substituted safely. Rename the variable ",
+        "in the source model."))
+      unsupported <- c(unsupported, paste0(
+        "intermediate renamed by nonmem2rx with several definitions: ", nm))
+    }
+  }
+  # Aliases that point at other aliases: resolve to a fixed point.
+  for (iter in seq_along(rxm_map)) {
+    changed <- FALSE
+    for (nm in names(rxm_map)) for (other in names(rxm_map)) {
+      new <- gsub(paste0("\\b", other, "\\b"), rxm_map[[other]], rxm_map[[nm]], perl = TRUE)
+      if (!identical(new, rxm_map[[nm]])) { rxm_map[[nm]] <- new; changed <- TRUE }
+    }
+    if (!changed) break
   }
 
   # Pass 3: classify each assignment into indiv_params or error_model.
