@@ -197,8 +197,15 @@
 # caller's remedy says what the dataset must CONTAIN rather than claiming to
 # have looked.
 .nm_input_has_cmt <- function(ctl_file) {
+  toks <- .nm_input_tokens(ctl_file)
+  if (length(toks) == 0L) return(NA)
+  any(vapply(toks, .nm_item_is_cmt, TRUE))
+}
+
+# The $INPUT record as one token per data item, `=` pairs kept whole.
+.nm_input_tokens <- function(ctl_file) {
   body <- .nm_block_lines(ctl_file, "INP")
-  if (length(body) == 0L) return(NA)
+  if (length(body) == 0L) return(character())
   # Items may continue onto following lines, which is why this reads the whole
   # record body rather than the `$INPUT` line.
   txt  <- sub("^\\s*[$]INP[A-Za-z]*", "", paste(body, collapse = " "),
@@ -210,9 +217,27 @@
   # changed the answer.
   txt  <- gsub("[[:space:]]*=[[:space:]]*", "=", txt)
   toks <- trimws(strsplit(txt, "[,[:space:]]+")[[1]])
-  toks <- toks[nzchar(toks)]
-  if (length(toks) == 0L) return(NA)
-  any(vapply(toks, .nm_item_is_cmt, TRUE))
+  toks[nzchar(toks)]
+}
+
+# Every name by which abbreviated code can read a $INPUT data item: both halves
+# of a synonym pair, and nothing from an item dropped with DROP or SKIP (NONMEM
+# does not read it, so a symbol of that name is not a data item). Spelled as
+# written; callers compare case-insensitively, as NONMEM does.
+#
+# This is what tells a covariate from a theta referenced by its $THETA label.
+# nonmem2rx leaves both as the same free symbol beside a `t.<label>` theta --
+# `WT` in `(WT/70)**THETA(3)` with `; WT` on THETA(3), and `KTP` in
+# ode_theta_ref.ctl -- and only $INPUT says which one names a data column.
+.nm_input_items <- function(ctl_file) {
+  items <- character()
+  for (tok in .nm_input_tokens(ctl_file)) {
+    parts <- trimws(strsplit(tok, "=")[[1]])
+    parts <- parts[nzchar(parts)]
+    if (any(toupper(parts) %in% c("DROP", "SKIP"))) next
+    items <- c(items, parts)
+  }
+  unique(items)
 }
 
 .nm_item_is_cmt <- function(tok) {

@@ -24,6 +24,11 @@
 #'   route doses differently; `NA` means unknown and reports nothing. The
 #'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
 #'   two agree only while the state list could be put in `$MODEL` COMP order.
+#' @param input_items Character vector of the names by which the source's
+#'   `$INPUT` record lets abbreviated code read a data item, as returned by
+#'   `.nm_input_items()`. A symbol spelling one is a covariate even where it
+#'   also spells a `$THETA` label, and a theta of that name is renamed so it
+#'   cannot shadow the covariate. The default empty vector reads no `$INPUT`.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -44,7 +49,7 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA) {
+                       has_cmt_col = NA, input_items = character()) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -246,7 +251,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   state_out <- .sanitise_state_names(
     lst,
     taken = c(random_names,
-              .covariate_names(lst, name_map),
+              .covariate_names(lst, name_map, input_items),
               assigned_lhs,
               # ferx-core reserves these inside [odes] (RESERVED_ODE_NAMES); a
               # state named TIME would be shadowed by the integrator's own.
@@ -321,7 +326,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # exist in the previous parse -- and the surviving theta then shadows it. With
   # duplicate $THETA labels only one of the pair is renamed, which is exactly
   # how that happens. Re-parse and re-check until nothing new appears.
-  reserved_base <- c(random_names, .covariate_names(lst, name_map))
+  cov_names     <- .covariate_names(lst, name_map, input_items)
+  reserved_base <- c(random_names, cov_names)
   # The thetas referenced from [odes], recomputed every round: indices for the
   # carrier loop, source names for everything that reports on them.
   ode_theta_i <- integer()
@@ -407,7 +413,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # (The current theta names need not be listed -- .deshadow_theta_names()
       # already folds them into `taken`.)
       reserved    = c(reserved_base,
-                      .ode_states(expr_out$odes))
+                      .ode_states(expr_out$odes)),
+      covariates  = cov_names
     )
     if (!any(!is.na(desh$map))) break
     for (i in seq_along(theta_out$thetas)) {
@@ -444,6 +451,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
         "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
         "an identically named individual parameter)"))
+    if (any(rename_why[[i]] == "covariate")) warn <- c(warn, paste0(
+      "INFO  | theta '", theta_orig[i], "' shares a name with the covariate '",
+      theta_orig[i], "' -- renamed to '", final, "' (in ferx a theta silently ",
+      "shadows an identically named covariate, so every reference to the data ",
+      "column would read the theta)"))
     if (any(rename_why[[i]] == "builtin")) warn <- c(warn, paste0(
       "WARN  | theta '", theta_orig[i], "' collides with a ferx solver builtin (",
       paste(.RESERVED_ODE_NAMES, collapse = ", "), ") -- renamed to '", final,
@@ -995,6 +1007,19 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       "fit with those parameters' individual definitions ignored."))
     unsp <- c(unsp, paste0("theta/individual-parameter name collision: ",
                            paste(final_clash, collapse = ", ")))
+  }
+  # The same invariant for covariates (#52), where the shadowed name is a data
+  # column and the model fits as though the covariate were absent.
+  cov_clash <- intersect(
+    toupper(vapply(theta_out$thetas, function(t) t$name, "")), toupper(cov_names))
+  if (length(cov_clash) > 0) {
+    warn <- c(warn, paste0(
+      "ERROR | could not give theta(s) ", paste(cov_clash, collapse = ", "),
+      " a name distinct from a covariate. In ferx a theta shadows an ",
+      "identically named covariate silently, so this model would fit as though ",
+      "those data columns were absent."))
+    unsp <- c(unsp, paste0("theta/covariate name collision: ",
+                           paste(cov_clash, collapse = ", ")))
   }
 
   .assert_state_param_disjoint(expr_out$odes, expr_out$indiv_params)
@@ -1549,7 +1574,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # ferx reads every such name as a covariate (a data column), and resolves theta
 # before covariate -- so a theta renamed onto one shadows it exactly as it would
 # an individual parameter.
-.covariate_names <- function(lst, name_map) {
+#
+# `input_items` are the source's $INPUT data items (`.nm_input_items()`). A
+# symbol spelling one is a covariate even when it also spells a theta's label:
+# nonmem2rx references the theta as `t.WT`, so a bare `WT` beside it is the data
+# column, and treating it as known let `; WT` on a $THETA replace the covariate
+# everywhere it was read (#52).
+.covariate_names <- function(lst, name_map, input_items = character()) {
   assigned <- character()
   used     <- character()
   for (expr in lst) {
@@ -1565,8 +1596,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # name_map keys are the RAW iniDf names (`t.CL`, `e.ETA1`) and .norm() does not
   # strip those prefixes, so a reference to `t.CL` normalises to `T_CL` and would
   # be reported as a covariate unless the keys are treated as known too.
+  # The map VALUES are known too, but only where $INPUT does not claim them: a
+  # free `KTP` that equals a theta's label is that theta (ode_theta_ref.ctl),
+  # while a free `WT` that $INPUT names is the data column.
+  values <- toupper(unlist(name_map, use.names = FALSE))
   known <- unique(c(assigned,
-                    toupper(unlist(name_map, use.names = FALSE)),
+                    setdiff(values, .norm(input_items)),
                     .norm(names(name_map))))
   setdiff(unique(.norm(used)), known)
 }
@@ -2210,7 +2245,8 @@ bound_name <- function(entries, raw) {
 # to both the emitted name and `name_map`; renaming in one without the other
 # leaves references pointing at a name nothing declares.
 .deshadow_theta_names <- function(theta_names, indiv_names,
-                                  reserved = character()) {
+                                  reserved = character(),
+                                  covariates = character()) {
   n   <- length(theta_names)
   map <- rep(NA_character_, n)
   if (n == 0L) return(list(map = map, reasons = list(), warnings = character()))
@@ -2224,7 +2260,13 @@ bound_name <- function(entries, raw) {
   # reason it is for a shadowing theta: this function owns theta naming, and
   # `theta TVTIME` + `KA = TVTIME * ...` is the same model under another label.
   builtin  <- toupper(theta_names) %in% .RESERVED_ODE_NAMES
-  todo     <- which(shadowed | duped | builtin)
+  # The fourth, and the only one that loses a DATA column rather than a
+  # parameter: ferx resolves theta before covariate, so `theta WT` beside a `WT`
+  # column turns `(WT/70)^WT` into the theta to the power of itself. A $THETA
+  # label naming the covariate it scales (`; WT`) is an ordinary habit. The
+  # covariate's name is fixed by the data, so the theta is the side that moves.
+  covered  <- toupper(theta_names) %in% toupper(covariates)
+  todo     <- which(shadowed | duped | builtin | covered)
   if (length(todo) == 0L)
     return(list(map = map, reasons = vector("list", n), warnings = character()))
 
@@ -2241,6 +2283,7 @@ bound_name <- function(entries, raw) {
     if (duped[i])    reasons[[i]] <- c(reasons[[i]], "duplicate")
     if (shadowed[i]) reasons[[i]] <- c(reasons[[i]], "shadow")
     if (builtin[i])  reasons[[i]] <- c(reasons[[i]], "builtin")
+    if (covered[i])  reasons[[i]] <- c(reasons[[i]], "covariate")
   }
   list(map = map, reasons = reasons, warnings = character())
 }

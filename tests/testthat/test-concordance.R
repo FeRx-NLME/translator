@@ -348,6 +348,43 @@ test_that("issue #25: the dose reaches the right compartment when $MODEL and d/d
               label = paste0("theta ", nm, " moved off its start"))
 })
 
+test_that("issue #52: a theta labelled after its covariate leaves the covariate in the model", {
+  # theta_label_covariate.ctl labels the WT exponent `; WT`. The theta used to be
+  # emitted as `theta WT`, and ferx resolves theta before covariate, so
+  # `CL = TVCL * (WT/70)^WT` raised the THETA to its own power and the data
+  # column was never read. The file validated clean and $unsupported was empty.
+  #
+  # The dataset is simulated in closed form, not from the translation (see
+  # data-raw/generate_concordance_data.R): a dataset simulated from the shadowed
+  # model would carry no WT effect either, and the fit would agree with it.
+  #
+  # Measured before the fix: exponent 0.0005, TVCL 3.19, V 40.8, OFV -430.1.
+  # After: exponent 0.69, TVCL 4.91, TVV 50.2, OFV -949.7. The $THETA initials
+  # (3, 30, 0.3) are away from the truth, so the "moved" assertions below are not
+  # satisfied by a frozen optimiser.
+  ferx_file <- .translate_to_tmp("theta_label_covariate.ctl")
+  data_file <- .conc_data("theta_label_covariate_concordance.csv")
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_match(txt, "CL = TVCL * (WT/70)^TVWT * exp(ETA1)", fixed = TRUE)
+
+  fit <- ferx_fit(ferx_file, data_file,
+                  method     = "focei",
+                  covariance = FALSE,
+                  verbose    = FALSE)
+
+  ref <- c(TVCL = 5.0, TVV = 50.0, TVWT = 0.75)
+  .report_deviations(fit$theta, ref, "issue #52 theta labelled after its covariate")
+  expect_lt(abs(fit$theta[["TVCL"]] / ref[["TVCL"]] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta[["TVV"]]  / ref[["TVV"]]  - 1), 0.15, label = "V")
+  # Wider, as for the omega guards: a covariate exponent from 40 subjects is the
+  # least well identified parameter here, and the guard is against ~0.
+  expect_lt(abs(fit$theta[["TVWT"]] / ref[["TVWT"]] - 1), 0.35, label = "WT exponent")
+  start <- c(TVCL = 3, TVV = 30, TVWT = 0.3)
+  for (nm in names(start))
+    expect_gt(abs(fit$theta[[nm]] / start[[nm]] - 1), 0.20,
+              label = paste0("theta ", nm, " moved off its start"))
+})
+
 # ===========================================================================
 # ENGINE VALIDATION SWEEP (Tier 4)
 # Validates every bundled model's emitted .ferx with the engine and fails on

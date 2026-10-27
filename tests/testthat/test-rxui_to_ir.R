@@ -801,7 +801,8 @@ test_that("an unresolvable name collision is reported, never emitted silently", 
   # hand-built IR and asserted nothing about the package at all.)
   skip_if_not_installed("nonmem2rx")
   local_mocked_bindings(
-    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character(),
+                                     covariates = character())
       list(map = rep(NA_character_, length(theta_names)), warnings = character())
   )
   ir <- suppressWarnings(rxui_to_ir(nonmem2rx::nonmem2rx(nm_path("pk_1cmt_oral.mod")),
@@ -810,6 +811,29 @@ test_that("an unresolvable name collision is reported, never emitted silently", 
   expect_match(ir$warnings, "^ERROR \\| could not give theta", all = FALSE)
   # ...and it must reach the artefact, not only the result object.
   expect_match(emit_ferx(ir), "# WARNING: could not give theta")
+})
+
+test_that("an unresolved theta/covariate collision is reported, never emitted silently", {
+  # The covariate half of the invariant above (#52), driven the same way.
+  skip_if_not_installed("nonmem2rx")
+  p  <- nm_path("theta_label_covariate.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  # The control first, because the mock below lasts the rest of the test:
+  # unmocked, nothing collides, so the check is not firing on everything.
+  ok <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    input_items = .nm_input_items(p)))
+  expect_false(any(grepl("collision", ok$unsupported)))
+
+  local_mocked_bindings(
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character(),
+                                     covariates = character())
+      list(map = rep(NA_character_, length(theta_names)),
+           reasons = vector("list", length(theta_names)), warnings = character())
+  )
+  ir <- suppressWarnings(rxui_to_ir(ui, source_format = "nonmem",
+                                    input_items = .nm_input_items(p)))
+  expect_match(ir$unsupported, "theta/covariate name collision: WT", all = FALSE)
+  expect_match(ir$warnings, "distinct from a covariate", all = FALSE)
 })
 
 test_that("covariate detection does not report iniDf names as covariates", {
@@ -937,6 +961,51 @@ test_that("a rename avoids a covariate name, not just a parameter name", {
   expect_false("TVCL" %in% toupper(nms))
 })
 
+test_that("a theta sharing a covariate's name is renamed off it (#52)", {
+  out <- .deshadow_theta_names(c("CL", "WT"), "CL", covariates = "WT")
+  expect_equal(out$map, c("TVCL", "TVWT"))
+  expect_equal(out$reasons[[2]], "covariate")
+  # Case-insensitive, as ferx's resolution is.
+  expect_equal(.deshadow_theta_names("wt", "CL", covariates = "WT")$map, "TVwt")
+  # The control: nothing to rename without the covariate.
+  expect_true(is.na(.deshadow_theta_names("WT", "CL")$map))
+})
+
+test_that("$INPUT decides whether a free symbol beside its theta is a covariate (#52)", {
+  # `WT` and `t.WT` side by side is what nonmem2rx gives for BOTH a covariate
+  # whose exponent is labelled `; WT` and a theta referenced by its label (`KTP`
+  # in ode_theta_ref.ctl). The name map cannot tell them apart; $INPUT can.
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.WT", 0.3),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * (WT/70)^t.WT * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  nm  <- .norm_map_from_ini(ini)
+  expect_false("WT" %in% .covariate_names(lst, nm))
+  expect_true("WT" %in% .covariate_names(lst, nm, input_items = c("ID", "WT")))
+  # Not a data item, so still the label-referenced theta.
+  expect_false("WT" %in% .covariate_names(lst, nm, input_items = c("ID", "TIME")))
+  # Compared case-insensitively, as NONMEM does.
+  expect_true("WT" %in% .covariate_names(lst, nm, input_items = c("id", "wt")))
+})
+
+test_that("a theta labelled after its covariate leaves the covariate in the model (#52)", {
+  # End to end, because the part that can break is rxui_to_ir() passing
+  # input_items through to both the covariate set and the de-shadowing.
+  ini <- rbind(theta_row("t.CL", 1), theta_row("t.WT", 0.3),
+               eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.CL * (WT/70)^t.WT * exp(eta1)),
+              ddt("central", quote(-cl * central)))
+  ir  <- suppressWarnings(rxui_to_ir(mock_ui(ini, lst),
+                                     input_items = c("ID", "TIME", "DV", "WT")))
+  expect_equal(vapply(ir$thetas, function(t) t$name, ""), c("TVCL", "TVWT"))
+  rhs <- setNames(vapply(ir$indiv_params, function(p) p$rhs, ""),
+                  vapply(ir$indiv_params, function(p) p$lhs, ""))
+  # The bare WT is the data column; before the fix both WTs were the theta.
+  expect_equal(rhs[["CL"]], "TVCL * (WT/70)^TVWT * exp(ETA1)")
+  expect_match(ir$warnings, "^INFO .*theta 'WT' shares a name with the covariate",
+               all = FALSE)
+})
+
 test_that("an aux var is inlined with the name it was normalised under", {
   # Kills the pass-2 mutation. A dotted local uppercases to `C.2` while aux_vars
   # holds `C_2`, so comparing raw symbols missed it: the var was not marked
@@ -1015,7 +1084,8 @@ test_that("the invariant covers individual parameters the linCmt passthrough add
   # passthrough comment says it exists to prevent.
   skip_if_not_installed("nonmem2rx")
   local_mocked_bindings(
-    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character(),
+                                     covariates = character())
       list(map = rep(NA_character_, length(theta_names)),
            reasons = vector("list", length(theta_names)), warnings = character())
   )
@@ -1633,6 +1703,27 @@ test_that(".nm_input_has_cmt reads the $INPUT data items", {
   # reporting a divergence on no evidence is worse than staying quiet.
   expect_true(is.na(.nm_input_has_cmt(mk("$DATA x.csv"))))
   expect_true(is.na(.nm_input_has_cmt(mk("$INPUT"))))
+})
+
+test_that(".nm_input_items lists every name a data item can be read by", {
+  n  <- 0L
+  mk <- function(...) {
+    n <<- n + 1L
+    f <- file.path(tmp_ctl_dir(), paste0("items", n, ".ctl"))
+    writeLines(c("$PROBLEM x", ..., "$PK"), f); f
+  }
+  expect_equal(.nm_input_items(mk("$INPUT ID TIME DV WT")),
+               c("ID", "TIME", "DV", "WT"))
+  # Both halves of a synonym pair, in either order, at any spacing.
+  expect_equal(.nm_input_items(mk("$INPUT ID WT=BW")), c("ID", "WT", "BW"))
+  expect_equal(.nm_input_items(mk("$INPUT ID BW = WT")), c("ID", "BW", "WT"))
+  # NONMEM does not read a dropped item, so its name is not a data item.
+  expect_equal(.nm_input_items(mk("$INPUT ID WT=DROP AGE=SKIP DV")), c("ID", "DV"))
+  expect_equal(.nm_input_items(mk("$INPUT ID WT = DROP DV")), c("ID", "DV"))
+  # Commas, continuation lines, abbreviation, case as written, comments.
+  expect_equal(.nm_input_items(mk("$INP ID,TIME", "  wt ; WT")),
+               c("ID", "TIME", "wt"))
+  expect_equal(.nm_input_items(mk("$DATA x.csv")), character())
 })
 
 test_that("the DEFDOSE/CMT divergence needs BOTH halves to fire", {

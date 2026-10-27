@@ -11,6 +11,7 @@
 #   2cpt_iv.ctl             : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
 #   pk_1cmt_oral_ampsim.ctl : KA=0.0825, CL=2.676, V=1.588 (amp.sim NONMEM reference)
 #   cmt_order_gap.ctl       : TVCL=3.0, TVV=50.0, TVKA=1.2 (theta initials)
+#   theta_label_covariate.ctl: TVCL=5.0, V=50.0, TVWT=0.75 (NOT the initials)
 
 library(ferxtranslate)
 library(ferx)
@@ -205,6 +206,33 @@ simulate_dataset(
 #
 # then write ID,TIME,DV,EVID,AMT,CMT,MDV with DV="." on dose rows. See
 # tests/nonmem-anchor/README.md.
+
+# ---- a theta labelled after its covariate (issue #52) -----------------------
+# Simulated in closed form, NOT from the translation, for the reason given above:
+# theta_label_covariate.ctl labels the WT exponent `; WT`, and the defect named
+# that theta WT, which shadowed the covariate. A dataset simulated from that
+# translation would carry no WT effect either and the fit would agree with it.
+#
+# Truth: 1-cpt IV bolus, CL = 5 * (WT/70)^0.75 * exp(eta), var(eta) = 0.09,
+# V = 50, proportional error SD 0.1. WT spans 45-115 kg so the exponent is
+# identifiable from 40 subjects.
+local({
+  set.seed(52L)
+  obs_t <- c(0.5, 1, 2, 4, 8, 12, 24)
+  rows  <- lapply(seq_len(40L), function(id) {
+    wt <- round(runif(1L, 45, 115))
+    cl <- 5 * (wt / 70)^0.75 * exp(rnorm(1L, 0, 0.3))
+    cp <- 100 / 50 * exp(-cl / 50 * obs_t) * (1 + rnorm(length(obs_t), 0, 0.1))
+    rbind(
+      data.frame(ID = id, TIME = 0, DV = ".", EVID = 1L, AMT = "100", CMT = 1L,
+                 MDV = 1L, WT = wt),
+      data.frame(ID = id, TIME = obs_t, DV = sprintf("%.6f", cp), EVID = 0L,
+                 AMT = ".", CMT = 1L, MDV = 0L, WT = wt))
+  })
+  out <- "inst/testdata/theta_label_covariate_concordance.csv"
+  write.csv(do.call(rbind, rows), out, row.names = FALSE, quote = FALSE)
+  message("Written ", out)
+})
 
 # ---- two-endpoint dispatch (issue #6 defect 5) ------------------------------
 # Both models observe two endpoints. `qss_tmdd.mod` switches on a FLAG column

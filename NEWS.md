@@ -2,6 +2,29 @@
 
 ## Bug fixes
 
+* A `$THETA` labelled with the name of a covariate no longer removes that
+  covariate from the model (issue #52). Labelling a covariate exponent after
+  the covariate it scales (`(WT/70)**THETA(3)` with `; WT` on THETA(3)) is an
+  ordinary habit. The theta was emitted as `theta WT`, and ferx resolves a name
+  as a theta before a covariate, so `CL = TVCL * (WT/70)^WT` read the theta at
+  both sites and never read the data column. The file validated clean, with
+  nothing in `result$unsupported`.
+
+  Such a theta is now renamed (`WT` -> `TVWT`) with an `INFO`, by
+  `.deshadow_theta_names()`, which already owned theta naming. What made this
+  hard to see is that nonmem2rx gives the same shape for a covariate and for a
+  theta referenced by its label (`ode_theta_ref.ctl`): a free symbol beside a
+  `t.<label>` theta. The control stream's `$INPUT` record is what tells them
+  apart, so `nm_to_ferx()` now reads it, and `rxui_to_ir()` takes it as
+  `input_items`. A `$INPUT` item dropped with `DROP` or `SKIP` does not count,
+  and both halves of a synonym pair do. A theta/covariate collision that
+  survives the rename is reported as an `ERROR` and in `result$unsupported`,
+  as the theta/individual-parameter one already was.
+
+  Measured on the bundled `theta_label_covariate.ctl`, against data simulated
+  in closed form with a true exponent of 0.75: the exponent came out at 0.0005
+  (OFV -430.1) before the fix, and at 0.69 (OFV -949.7) after it.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

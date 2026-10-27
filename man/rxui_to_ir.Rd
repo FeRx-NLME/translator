@@ -10,7 +10,8 @@ rxui_to_ir(
   source_file = NA_character_,
   scaling_hint = list(),
   obs_hint = NULL,
-  has_cmt_col = NA
+  has_cmt_col = NA,
+  input_items = character()
 )
 }
 \arguments{
@@ -39,6 +40,12 @@ emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
 route doses differently; \code{NA} means unknown and reports nothing. The
 comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
 two agree only while the state list could be put in \verb{$MODEL} COMP order.}
+
+\item{input_items}{Character vector of the names by which the source's
+\verb{$INPUT} record lets abbreviated code read a data item, as returned by
+\code{.nm_input_items()}. A symbol spelling one is a covariate even where it
+also spells a \verb{$THETA} label, and a theta of that name is renamed so it
+cannot shadow the covariate. The default empty vector reads no \verb{$INPUT}.}
 }
 \value{
 A \code{ferx_ir} object.

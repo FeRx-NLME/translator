@@ -89,9 +89,12 @@ to_ferx <- function(source,
   # $MODEL's DEFDOSE compartment and ferx doses compartment 1, and nothing in
   # the emitted file can say which was meant -- see .nm_input_has_cmt().
   has_cmt_col  <- if (read_ctl) .nm_input_has_cmt(source) else NA
+  # The $INPUT data items, which tell a covariate from a theta referenced by its
+  # $THETA label -- nonmem2rx leaves both as the same free symbol (#52).
+  input_items  <- if (read_ctl) .nm_input_items(source) else character()
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
-                   has_cmt_col = has_cmt_col)
+                   has_cmt_col = has_cmt_col, input_items = input_items)
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

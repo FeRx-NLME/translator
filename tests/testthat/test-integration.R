@@ -33,6 +33,27 @@ test_that("2-cpt oral with covariates: snapshot + no unsupported", {
   expect_match(result$ferx_text, "two_cpt_oral", fixed = TRUE)
 })
 
+test_that("a theta labelled after its covariate leaves the covariate in the model (#52)", {
+  skip_if_not_installed("nonmem2rx")
+  # Through nm_to_ferx(), because the part only it covers is reading $INPUT from
+  # the control stream and handing it on. The corpus sweep calls rxui_to_ir()
+  # with the items itself, so it passes whether or not nm_to_ferx() does.
+  result <- suppressWarnings(nm_to_ferx(nm_path("theta_label_covariate.ctl")))
+  expect_match(result$ferx_text, "theta TVWT(", fixed = TRUE)
+  expect_match(result$ferx_text, "CL = TVCL * (WT/70)^TVWT * exp(ETA1)", fixed = TRUE)
+  expect_match(result$warnings, "shares a name with the covariate 'WT'", all = FALSE)
+  expect_length(result$unsupported, 0L)
+
+  # The control: the same stream with a label that names no data item.
+  ctl <- file.path(tmp_ctl_dir(), "theta_label_covariate.ctl")
+  src <- readLines(nm_path("theta_label_covariate.ctl"))
+  expect_true(any(grepl("; WT$", src)))
+  writeLines(sub("; WT$", "; WT_CL", src), ctl)
+  ctrl <- suppressWarnings(nm_to_ferx(ctl))
+  expect_match(ctrl$ferx_text, "CL = TVCL * (WT/70)^WT_CL * exp(ETA1)", fixed = TRUE)
+  expect_false(any(grepl("covariate 'WT'", ctrl$warnings)))
+})
+
 test_that("2-cpt IV: infers two_cpt_iv", {
   skip_if_not_installed("nonmem2rx")
   result <- suppressWarnings(nm_to_ferx(nm_path("2cpt_iv.ctl")))
@@ -206,8 +227,8 @@ test_that("PKPD with a CMT dispatch: per-CMT readout + per-CMT error model", {
 # -- corpus-wide sweep (engine-free, runs on every PR) ------------------------
 
 # Translates every bundled model once and asserts three things: that nothing
-# crashes, that no theta shadows an individual parameter, and that every emitted
-# name is a legal ferx identifier.
+# crashes, that no theta shadows an individual parameter or a covariate, and that
+# every emitted name is a legal ferx identifier.
 #
 # The first two the engine cannot check for us. A theta sharing a name with an
 # individual parameter shadows it in every ferx block where thetas are in scope,
@@ -244,7 +265,8 @@ test_that("every bundled model translates, without a shadowing theta", {
     ir <- tryCatch(suppressWarnings(
                      rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem",
                                 scaling_hint = .extract_nm_scaling(m),
-                                obs_hint     = .extract_nm_defobs(m))),
+                                obs_hint     = .extract_nm_defobs(m),
+                                input_items  = .nm_input_items(m))),
                    error = function(e) conditionMessage(e))
     if (is.character(ir)) {
       crashed <- c(crashed, paste0(basename(m), " -- ", ir))
@@ -256,6 +278,20 @@ test_that("every bundled model translates, without a shadowing theta", {
     )
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))
+    # A theta shadows a covariate the same way (#52). Judged from the SOURCE, not
+    # from the IR's covariate set, which is what the defect corrupted: a $INPUT
+    # item that the abbreviated code reads by name is a data column, and no theta
+    # may carry its name. Not referenced, it cannot be shadowed.
+    code <- unlist(lapply(c("PK", "PRED", "ERROR", "DES"),
+                          function(r) .nm_block_lines(m, r)))
+    used <- toupper(unlist(regmatches(code, gregexpr("[A-Za-z_][A-Za-z0-9_]*", code))))
+    cov_clash <- intersect(
+      toupper(vapply(ir$thetas, function(t) t$name, "")),
+      intersect(toupper(.nm_input_items(m)), used))
+    if (length(cov_clash) > 0)
+      offenders <- c(offenders, paste0(basename(m), ": ",
+                                       paste(cov_clash, collapse = ", "),
+                                       " (covariate)"))
 
     # Tokenise the EMITTED TEXT, not the IR's declaration fields. An illegal
     # name is accepted where it is declared -- `ode(states=[c.RTOT])` parses --
