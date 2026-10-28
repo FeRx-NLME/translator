@@ -21,6 +21,11 @@
 #' @param strict If validation reports any error-severity diagnostic, abort.
 #'   Default `TRUE`. Pass `FALSE` to downgrade to a warning and return the
 #'   result anyway. Ignored when `validate = FALSE`.
+#'   A NONMEM stream that nonmem2rx cannot parse for a known reason (`ADVAN9`,
+#'   `ADVAN15`, `ADVAN10`, a solved system reading a non-depot/central amount) is
+#'   also governed by `strict`: it aborts with class `ferxtranslate_unparseable`,
+#'   or with `FALSE` returns a result carrying the gap in `$unsupported` and no
+#'   model text; `output` is not written in that case.
 #'
 #' @return A `ferx_translate_result` invisibly, with fields `$ferx_text`,
 #'   `$warnings`, `$unsupported`, and `$validation` (`NULL` when
@@ -64,19 +69,38 @@ to_ferx <- function(source,
     ))
 
   src_label <- if (is.character(source)) source else "<model function>"
+  gap <- NULL
+  # Names rxode2 rejects (`DF`, say) are renamed in a copy of the stream; every
+  # other reader below still gets the original.
+  renames  <- if (format == "nonmem" && is.character(source)) .nm_reserved_renames(source)
+              else character()
+  parse_src <- if (length(renames) > 0L) .nm_renamed_copy(source, renames) else source
   rxui <- tryCatch(
     switch(format,
-      nonmem  = nonmem2rx::nonmem2rx(source),
+      nonmem  = nonmem2rx::nonmem2rx(parse_src),
       nlmixr2 = rxode2::rxode2(source),
       monolix = monolix2rx::monolix2rx(source)
     ),
-    error = function(e)
+    error = function(e) {
+      known <- if (format == "nonmem") .classify_nm_parse_error(conditionMessage(e))
+      # A recognised upstream limitation becomes a gap in the result; anything
+      # else keeps raising so a new upstream break is not absorbed.
+      if (!is.null(known)) {
+        gap <<- .nm_gap_result(
+          known, conditionMessage(e),
+          src_file = if (is.character(source)) source else NA_character_,
+          advan = if (is.character(source)) .nm_advan_label(source)
+                  else NA_character_)
+        return(NULL)
+      }
       cli::cli_abort(
         c(paste0("Failed to parse ", src_label, " as ", format, "."),
           "i" = paste0("Original error: ", conditionMessage(e))),
         call = NULL
       )
+    }
   )
+  if (!is.null(gap)) return(.report_parse_gap(gap, strict))
 
   src_file     <- if (is.character(source)) source else NA_character_
   read_ctl     <- format == "nonmem" && is.character(source) && file.exists(source)
@@ -92,6 +116,13 @@ to_ferx <- function(source,
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
                    has_cmt_col = has_cmt_col)
+  if (length(renames) > 0L) {
+    note <- paste0("INFO  | ", names(renames), " was renamed to ", renames,
+                   ": rxode2, which nonmem2rx translates through, rejects ",
+                   "that name. The model is otherwise unchanged.")
+    .emit_warnings(note)
+    ir$warnings <- c(note, ir$warnings)
+  }
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

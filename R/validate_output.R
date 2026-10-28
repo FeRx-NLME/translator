@@ -185,3 +185,18 @@
 
 # Collapse a multi-line engine message so one diagnostic stays one warning.
 .one_line <- function(x) gsub("\\s+", " ", trimws(as.character(x)))
+
+# A recognised parse gap: abort under `strict` (the default, as for an invalid
+# emitted file) with the result on the condition, otherwise warn and return it.
+# Never writes a file.
+.report_parse_gap <- function(result, strict = TRUE) {
+  msg <- c("The model could not be translated.",
+           stats::setNames(.cli_escape(result$warnings), "x"))
+  if (isTRUE(strict))
+    cli::cli_abort(c(msg, i = paste0("Pass {.code strict = FALSE} to get the ",
+                                     "gap back as a result instead.")),
+                   class = "ferxtranslate_unparseable", result = result,
+                   call = NULL)
+  cli::cli_warn(msg)
+  invisible(result)
+}

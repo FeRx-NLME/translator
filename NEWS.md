@@ -2,6 +2,27 @@
 
 ## Bug fixes
 
+* A NONMEM variable whose lower-cased name rxode2 rejects no longer stops the
+  translation (issue #47). nonmem2rx lower-cases variables, so `DF = CL/V` in a
+  `$DES` or `$PK` reached rxode2 as `df <- cl/v` and failed with an rxode2 syntax
+  error, although the name is immaterial to the model. Each name a code record
+  assigns is now probed against rxode2 itself (a parse, not a compile, so it costs
+  milliseconds; nothing is hard-coded), and a rejected name is renamed in a copy
+  of the stream (`DF` to `DF_VAR`) with an `INFO`. Comments, `$INPUT` and other
+  non-code records are left byte for byte, and `T`/`TIME` are never renamed.
+
+* NONMEM streams that nonmem2rx cannot parse are now reported as a gap, not as a
+  raw upstream error (issue #47). `ADVAN9` / `ADVAN15` (`$AES`), `ADVAN10`
+  (Michaelis-Menten) and a solved `ADVAN` whose `$ERROR` reads a compartment other
+  than depot or central used to surface as `Failed to parse ... as nonmem` with an
+  rxode2-vocabulary message, no `$unsupported` entry and no hint that the limit
+  is upstream. Two of the three are expressible in ferx as `[odes]`; the message
+  now says which. With `strict = FALSE` the call returns a result whose
+  `$unsupported` names the feature and whose `$warnings` carries an `ERROR`; with
+  the default `strict = TRUE` it aborts with class `ferxtranslate_unparseable` and
+  the result on the condition. No file is written. A message that matches
+  nothing known still raises, so a new upstream break is not absorbed.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that
