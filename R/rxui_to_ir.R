@@ -1371,6 +1371,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     kappas        = kappa_out$kappas,
     sigmas        = .order_sigmas_for_error(sigma_out$sigmas,
                                             expr_out$error_model),
+    sigma_blocks  = sigma_out$sigma_blocks,
     indiv_params  = expr_out$indiv_params,
     structural    = structural,
     odes          = expr_out$odes,
@@ -2605,7 +2606,8 @@ bound_name <- function(entries, raw) {
     # today by accident of R rather than by contract -- and stops working the
     # moment a caller uses length(), vapply() or startsWith() on it, all of
     # which the surrounding code already does to other warning vectors.
-    return(list(sigmas = sigmas, raw_names = as.character(rows$name),
+    return(list(sigmas = sigmas, sigma_blocks = list(),
+                raw_names = as.character(rows$name),
                 warnings = character(), unsupported = character()))
   }
   # nonmem2rx: sigma lives in the ui$sigma matrix (variance scale); convert to SD.
@@ -2652,52 +2654,67 @@ bound_name <- function(entries, raw) {
     } else {
       vapply(seq_along(nms), function(i) isTRUE(lfix[i, i]), TRUE)
     }
-    # Only the DIAGONAL of ui$sigma is read below, so a `$SIGMA BLOCK` loses its
-    # residual covariances. That drop is older than this change and is not fixed
-    # here -- emitting `block_sigma` is a different job, because ferx does not
-    # take the off-diagonals as covariances at all ("off-diagonal entries are
-    # converted to fixed correlations", model_parser.rs) and that mapping needs
-    # measuring rather than assuming. What IS fixed here is the silence: the
-    # translation reported character(0) warnings and character(0) unsupported
-    # while discarding them, which is the one outcome CLAUDE.md rules out.
-    #
-    # Sigma was the outlier of the three random-effect channels. Omega emits its
-    # block in full; .extract_kappas() warns when it drops an off-diagonal; only
-    # this branch said nothing.
+    # A `$SIGMA BLOCK` is a group of residual errors with non-zero covariance.
+    # ferx holds it as `block_sigma (A, B) = [lower triangle]` on the VARIANCE
+    # scale, the same scale NONMEM writes, so the matrix is carried through
+    # unconverted; the per-sigma entries below keep the diagonal SD that
+    # [error_model] ordering and name resolution work from. A block is detected
+    # by its non-zero off-diagonals, so a `BLOCK(2)` whose initial covariance is
+    # exactly zero is indistinguishable from two diagonal records here, and is
+    # emitted as two independent sigmas.
     off_diag <- ui_sigma
     diag(off_diag) <- 0
+    sig_warn <- character()
+    sig_unsp <- character()
+    blocks   <- list()
+    member   <- rep(NA_integer_, length(nms))
+    bidx     <- rep(NA_integer_, length(nms))
     if (any(abs(off_diag) > 0, na.rm = TRUE)) {
-      pairs <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
-      shown <- paste(vapply(seq_len(nrow(pairs)), function(k) paste0(
-        .norm(nms[pairs[k, 1]]), "/", .norm(nms[pairs[k, 2]]), " = ",
-        .fmt_num(ui_sigma[pairs[k, 1], pairs[k, 2]])), ""), collapse = ", ")
-      sig_warn <- paste0(
-        "ERROR | $SIGMA BLOCK declares residual covariances (", shown,
-        ") and only the diagonal is emitted, so the residual errors become ",
-        "independent. ferx can hold them with `block_sigma`, which this ",
-        "translator does not emit yet; the fit will run and report a ",
-        "plausible OFV computed under the wrong residual structure.")
-    } else {
-      sig_warn <- character()
+      pairs  <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
+      groups <- unname(.detect_blocks(data.frame(neta1 = pairs[, 1],
+                                                 neta2 = pairs[, 2])))
+      for (k in seq_along(groups)) {
+        g   <- groups[[k]]
+        fx  <- sig_fixed[g]
+        mixed <- any(fx) && !all(fx)
+        if (mixed) {
+          sig_warn <- c(sig_warn, paste0(
+            "ERROR | $SIGMA BLOCK (", paste(.norm(nms[g]), collapse = ", "),
+            ") is only partly FIX. ferx fixes a whole `block_sigma` or none of ",
+            "it, so the block is emitted unfixed and the parameters the source ",
+            "held are estimated."))
+          sig_unsp <- c(sig_unsp, paste0(
+            "partially fixed $SIGMA BLOCK (", paste(.norm(nms[g]), collapse = ", "),
+            ") -- ferx has no per-element FIX inside block_sigma"))
+        }
+        cov <- ui_sigma[g, g, drop = FALSE]
+        dimnames(cov) <- NULL
+        blocks[[k]] <- list(id = k, cov = cov, fixed = all(fx))
+        member[g]   <- k
+        bidx[g]     <- seq_along(g)
+        if (mixed) sig_fixed[g] <- FALSE
+      }
     }
-    sigmas <- lapply(seq_along(nms), function(i)
+    sigmas <- lapply(seq_along(nms), function(i) {
       # .norm(), matching the nlmixr2 branch above. This was the last emitted-name
       # channel that only uppercased: the name comes from rownames(ui$sigma),
       # which is upstream-controlled, and it flows into both [parameters] and
       # [error_model].
-      list(name  = .norm(nms[i]),
-           value = sqrt(ui_sigma[i, i]),
-           scale = "sd",
-           fixed = sig_fixed[[i]])
-    )
-    sig_unsp <- if (length(sig_warn) > 0) paste0(
-      "residual covariances on $SIGMA BLOCK -- block_sigma is not emitted, so ",
-      "the residuals are treated as independent") else character()
-    return(list(sigmas = sigmas, raw_names = nms, warnings = sig_warn,
-                unsupported = sig_unsp))
+      s <- list(name  = .norm(nms[i]),
+                value = sqrt(ui_sigma[i, i]),
+                scale = "sd",
+                fixed = sig_fixed[[i]])
+      if (!is.na(member[i])) {
+        s$block     <- member[i]
+        s$block_idx <- bidx[i]
+      }
+      s
+    })
+    return(list(sigmas = sigmas, sigma_blocks = blocks, raw_names = nms,
+                warnings = sig_warn, unsupported = sig_unsp))
   }
-  list(sigmas = list(), raw_names = character(), warnings = character(),
-       unsupported = character())
+  list(sigmas = list(), sigma_blocks = list(), raw_names = character(),
+       warnings = character(), unsupported = character())
 }
 
 # -- expression classifiers ---------------------------------------------------

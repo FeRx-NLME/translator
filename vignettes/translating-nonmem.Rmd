@@ -188,12 +188,11 @@ tbl <- data.frame(
     "R1 / D1 infusion rate/duration",
     "ALAG2 / ALAG3",
     "F2 / F3",
-    "SIGMA BLOCK (correlated residuals)",
     "IOV with correlated kappas",
     "Categorical / count / TTE",
     "ADVAN5 (general linear, >3 cpts)"
   ),
-  Status = rep("ERROR -- manual edit required", 10L),
+  Status = rep("ERROR -- manual edit required", 9L),
   stringsAsFactors = FALSE
 )
 knitr::kable(tbl)

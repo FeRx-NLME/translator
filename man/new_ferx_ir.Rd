@@ -22,7 +22,8 @@ new_ferx_ir(
   fit_options = list(),
   warnings = character(),
   unsupported = character(),
-  state_renames = character()
+  state_renames = character(),
+  sigma_blocks = list()
 )
 }
 \arguments{
@@ -49,7 +50,9 @@ scalar).}
 
 \item{sigmas}{List of sigma entries. Each element is a list with \code{name}
 (character), \code{value} (numeric), \code{scale} (\code{"sd"} or \code{"var"}), and
-optionally \code{fixed} (logical scalar).}
+optionally \code{fixed} (logical scalar), and optionally \code{block} and
+\code{block_idx}, which make the entry a member of the \code{sigma_blocks} element
+with that \code{id} and give its row in that element's matrix.}
 
 \item{indiv_params}{Ordered list of statements. Each element is a list with
 a \code{kind}: \code{"assign"} (\code{lhs}, \code{rhs}, both character) or \code{"if"} (\code{cond},
@@ -121,6 +124,12 @@ name -> emitted name. Provenance, not a diagnostic: the emitted \code{.ferx} is
 the artefact that gets shared, and a reader holding only that file cannot
 otherwise map a sanitised state back to the source compartment it came
 from. Rendered as \verb{# renamed:} comments by \code{\link[=emit_ferx]{emit_ferx()}}.}
+
+\item{sigma_blocks}{List of residual-error blocks, each a list with \code{id}
+(integer), \code{cov} (the covariance matrix on the variance scale, members in
+\code{block_idx} order) and \code{fixed} (logical scalar). Emitted as one
+\code{block_sigma} at the position of the first member; the members' own
+\code{sigmas} entries are not emitted separately.}
 }
 \value{
 A \code{ferx_ir} list.

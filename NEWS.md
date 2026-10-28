@@ -2,6 +2,20 @@
 
 ## Bug fixes
 
+* A `$SIGMA BLOCK` with residual covariances is now emitted as a ferx
+  `block_sigma` instead of being flattened to its diagonal (issue #39). The
+  covariances used to be dropped with an `ERROR` and a `result$unsupported`
+  entry; the model then fit under an independent residual structure. The
+  matrix goes out on the variance scale, which is how NONMEM writes it and how
+  ferx reads `block_sigma`, and its lower triangle is permuted along with the
+  names if the sigmas are reordered to match the `[error_model]` roles. `FIX`
+  applies to the whole block, as it does in ferx; a partly fixed block cannot be
+  expressed, so it is emitted free with an `ERROR`. The IR gains a
+  `sigma_blocks` field, and a `sigmas` entry may carry `block` and `block_idx`.
+  A `BLOCK(2)` whose initial covariance is exactly zero is not distinguishable
+  from two diagonal records after nonmem2rx and is still emitted as two
+  independent sigmas.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that
