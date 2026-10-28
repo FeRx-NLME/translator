@@ -2,6 +2,11 @@
 
 ## Bug fixes
 
+* `validate_ferx_ir()` now rejects a theta with a missing or non-numeric `init`,
+  `lower` or `upper` (issue #41), naming the field and the parameter. Before, it
+  passed the IR and `emit_ferx()` then aborted with `argument is of length zero`,
+  which names neither. Infinite bounds remain valid and are emitted as `1e15`.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

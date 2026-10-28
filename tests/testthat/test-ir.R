@@ -277,3 +277,26 @@ test_that("a well-formed or absent fixed flag validates", {
   expect_no_error(validate_ferx_ir(new_ferx_ir(
     omegas = list(list(type = "diagonal", names = "ETA_CL", values = 0.07)))))
 })
+
+test_that("a theta without init, lower or upper is rejected by name, not by a base-R error", {
+  th <- function(...) new_ferx_ir(thetas = list(c(list(name = "TVCL"), list(...))))
+  full <- list(init = 1, lower = 0, upper = 10)
+  expect_no_error(validate_ferx_ir(do.call(th, full)))
+  expect_match(emit_ferx(do.call(th, full)), "theta TVCL(1.0, 0.0, 10.0)", fixed = TRUE)
+
+  for (fld in names(full)) {
+    ir <- do.call(th, full[setdiff(names(full), fld)])
+    expect_error(validate_ferx_ir(ir), fld, fixed = TRUE)
+    expect_error(validate_ferx_ir(ir), "TVCL", fixed = TRUE)
+    # the emitter is the same boundary: it must not get past the validator
+    expect_error(emit_ferx(ir), fld, fixed = TRUE)
+  }
+  expect_error(validate_ferx_ir(th(init = 1)), "lower", fixed = TRUE)
+  expect_error(validate_ferx_ir(do.call(th, modifyList(full, list(lower = NA_real_)))),
+               "lower", fixed = TRUE)
+  expect_error(validate_ferx_ir(do.call(th, modifyList(full, list(upper = c(1, 2))))),
+               "upper", fixed = TRUE)
+  # infinite bounds are legal and emit as 1e15
+  expect_match(emit_ferx(do.call(th, modifyList(full, list(lower = -Inf, upper = Inf)))),
+               "theta TVCL(1.0, -1e15, 1e15)", fixed = TRUE)
+})

@@ -194,6 +194,19 @@ validate_ferx_ir <- function(ir) {
           "{grp}: {.field fixed} must be a single non-NA logical when present."
         )
 
+  # A theta is emitted as `theta NAME(init, lower, upper)`, and .fmt_num() reads
+  # all three. A missing bound is NULL there and `if (!is.finite(NULL))` is a
+  # zero-length condition, which aborts with "argument is of length zero" -- a
+  # base-R message naming neither the field nor the parameter. +/-Inf is legal
+  # (it is emitted as 1e15); NA and NaN are not.
+  for (t in ir$thetas)
+    for (fld in c("init", "lower", "upper"))
+      if (!is.numeric(t[[fld]]) || length(t[[fld]]) != 1L || is.na(t[[fld]]))
+        cli::cli_abort(c(
+          "thetas: {.field {fld}} of {.val {t$name}} must be a single non-NA number.",
+          i = "A theta is emitted as {.code theta NAME(init, lower, upper)}."
+        ))
+
   if (length(ir$odes) > 0 && !identical(ir$structural$type, "ode"))
     cli::cli_abort(
       "odes is non-empty but structural$type is not {.val ode}."
