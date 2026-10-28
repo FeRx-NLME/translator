@@ -751,3 +751,27 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+# ---------------------------------------------------------------------------
+# M3 censored-data likelihood (issue #49)
+#   Truth: CL = 2, V = 20, KA = 1, proportional SD = 0.2, omega variance = 0.09.
+#   26.5% of the observations are below the limit and carry DV = LLOQ, CENS = 1.
+#   Fitted as measurements (the likelihood dropped), the same data give CL -42%
+#   and an omega on its lower bound; under bloq_method = m3 CL lands within 3%
+#   and omega stays off the bound. Both thresholds below fail without the fix.
+# ---------------------------------------------------------------------------
+
+test_that("M3 censored data: the translated file recovers CL and keeps omega off its bound", {
+  ferx_file <- .translate_to_tmp("m3_censored.ctl")
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_match(txt, "bloq_method = m3", fixed = TRUE)
+  writeLines(sub("covariance = true", "covariance = false", txt, fixed = TRUE), ferx_file)
+  fit <- ferx_fit(ferx_file, .conc_data("m3_censored_concordance.csv"),
+                  method = "focei", covariance = FALSE, verbose = FALSE)
+
+  ref <- c(TVCL = 2, TVV = 20, TVKA = 1)
+  .report_deviations(fit$theta, ref, "M3 censored thetas")
+  expect_lt(abs(fit$theta[["TVCL"]] / ref[["TVCL"]] - 1), 0.15, label = "TVCL relative error")
+  expect_lt(abs(fit$theta[["TVV"]]  / ref[["TVV"]]  - 1), 0.15, label = "TVV relative error")
+  expect_gt(unlist(fit$omega)[[1]], 0.02, label = "omega variance (bound is ~0)")
+})

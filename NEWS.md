@@ -2,6 +2,28 @@
 
 ## Bug fixes
 
+* An M3 censored-data likelihood in `$ERROR` is no longer dropped (issue #49).
+  A conditional that sets `F_FLAG = 1` and `Y = PHI(...)` on below-limit
+  records translated to an ordinary error model, and the censored records were
+  then fitted as measurements: the file validated, fit and converged, with every
+  parameter biased and the IIV variance on its lower bound. ferx scores them
+  itself under `bloq_method = m3` with a `CENS` data column, so the conditional
+  is now recognised (`Y = PHI(...)` for a lower limit, `1 - PHI(...)` for an
+  upper one; `IF`-then and `IF`/`ELSE` spellings), `bloq_method = m3` is
+  emitted, and a `WARN` names the column the source tested and says the data
+  must carry the flag as `CENS` with the limit in `DV`. The `LLOQ` constant and
+  the `F_FLAG = 0` default are dropped with it.
+
+  Measured on a synthetic 1-compartment oral set (40 subjects, 26.5% below the
+  limit, truth CL 2, V 20, KA 1, omega 0.09): without the option CL is 1.15 and
+  omega 0; with it CL is 1.95 and omega 0.054.
+
+  A conditional that assigns `F_FLAG` but is not that shape (for instance the
+  single-line `IF (BLQ.EQ.1) F_FLAG = 1`) is now an `ERROR` with a
+  `result$unsupported` entry instead of a silent drop. The "is dropped" `INFO`
+  on state-dependent conditionals no longer asserts the statement "has no
+  effect".
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

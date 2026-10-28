@@ -46,9 +46,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                        scaling_hint = list(), obs_hint = NULL,
                        has_cmt_col = NA) {
   ini  <- ui$iniDf
-  lst  <- ui$lstExpr
   warn <- character()
   unsp <- character()
+
+  m3_out <- .extract_m3(ui$lstExpr, enabled = identical(source_format, "nonmem"))
+  lst    <- m3_out$lst
+  warn   <- c(warn, m3_out$warnings)
+  unsp   <- c(unsp, m3_out$unsupported)
 
   theta_out <- .extract_thetas(ini)
   warn      <- c(warn, theta_out$warnings)
@@ -1217,6 +1221,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   fit_opts <- list(method = "focei", maxiter = 500L, covariance = TRUE)
   if (length(kappa_out$kappas) > 0)
     fit_opts$iov_column <- kappa_out$iov_column
+  if (isTRUE(m3_out$found))
+    fit_opts$bloq_method <- "m3"
 
   # Rename individual parameters ferx would silently read as dose attributes.
   #
@@ -1321,6 +1327,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   # Phase 6 is what turns these into endpoint selection; until then they are
   # dropped rather than emitted dead, and the drop is announced so the
   # information is not lost silently.
+  expr_out$error_refs <- unique(c(expr_out$error_refs, m3_out$refs))
   if (length(expr_out$error_refs) > 0 && length(expr_out$indiv_params) > 0) {
     sym_of <- function(x) {
       e <- tryCatch(str2lang(x), error = function(e) NULL)
@@ -1383,6 +1390,131 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     unsupported   = unsp,
     state_renames = state_map
   )
+}
+
+# -- M3 censored-data likelihood -----------------------------------------------
+
+# NONMEM writes the M3 likelihood for observations below (or above) the assay
+# limit as a conditional in $ERROR:
+#
+#   IF (BLQ.EQ.1) THEN
+#     F_FLAG = 1
+#     Y = PHI((LLOQ - IPRED)/W)          ; or 1 - PHI((IPRED - ULOQ)/W)
+#   ENDIF
+#
+# ferx has no expression for it. It scores censored records itself when
+# `bloq_method = m3` is set and the data carry a CENS column (1 = below the
+# limit, -1 = above it, the limit in DV), so the conditional is recognised here,
+# replaced by the observed-record arm (if the source wrote an ELSE), and turned
+# into that option. Anything that assigns F_FLAG but does not have this shape is
+# reported rather than guessed at.
+.m3_arm <- function(b) {
+  if (is.null(b)) return(list())
+  if (is.call(b) && identical(as.character(b[[1]])[1L], "{")) as.list(b)[-1L]
+  else list(b)
+}
+
+.m3_target <- function(st) {
+  if (.is_assignment(st) && is.symbol(st[[2]])) tolower(as.character(st[[2]]))
+  else NA_character_
+}
+
+.m3_phi_tail <- function(rhs) {
+  is_phi <- function(e) is.call(e) && identical(as.character(e[[1]])[1L], "phi") &&
+    length(e) == 2L
+  if (is_phi(rhs)) return(list(tail = "lower", arg = rhs[[2]]))
+  if (is.call(rhs) && identical(as.character(rhs[[1]])[1L], "-") &&
+      length(rhs) == 3L && identical(rhs[[2]], 1) && is_phi(rhs[[3]]))
+    return(list(tail = "upper", arg = rhs[[3]][[2]]))
+  NULL
+}
+
+# The censored arm assigns exactly F_FLAG (to a non-zero number) and Y (to a
+# PHI call). NULL for any other arm.
+.m3_censored_arm <- function(stmts) {
+  tg <- vapply(stmts, .m3_target, "")
+  if (length(stmts) != 2L || !setequal(tg, c("f_flag", "y"))) return(NULL)
+  flag <- stmts[[which(tg == "f_flag")]][[3]]
+  if (!is.numeric(flag) || flag == 0) return(NULL)
+  .m3_phi_tail(stmts[[which(tg == "y")]][[3]])
+}
+
+.m3_cond_column <- function(cond) {
+  cmp <- c("==", "!=", ">", ">=", "<", "<=")
+  if (!is.call(cond) || !(as.character(cond[[1]])[1L] %in% cmp) ||
+      length(cond) != 3L) return(NA_character_)
+  sym <- Filter(is.symbol, list(cond[[2]], cond[[3]]))
+  num <- Filter(is.numeric, list(cond[[2]], cond[[3]]))
+  if (length(sym) == 1L && length(num) == 1L) as.character(sym[[1]]) else NA_character_
+}
+
+.m3_assigns_flag <- function(e) {
+  if (!(is.call(e) && identical(as.character(e[[1]])[1L], "if"))) return(FALSE)
+  for (b in list(e[[3]], if (length(e) >= 4L) e[[4]]))
+    for (st in .m3_arm(b))
+      if (identical(.m3_target(st), "f_flag") || .m3_assigns_flag(st)) return(TRUE)
+  FALSE
+}
+
+.extract_m3 <- function(lst, enabled = TRUE) {
+  res <- list(lst = lst, found = FALSE, refs = character(),
+              warnings = character(), unsupported = character())
+  if (!enabled) return(res)
+  out <- list()
+  for (e in lst) {
+    if (!(is.call(e) && identical(as.character(e[[1]])[1L], "if"))) {
+      out <- c(out, list(e)); next
+    }
+    arms <- list(then = .m3_arm(e[[3]]),
+                 else_ = if (length(e) >= 4L) .m3_arm(e[[4]]) else list())
+    hit  <- lapply(arms, .m3_censored_arm)
+    if (sum(!vapply(hit, is.null, NA)) != 1L) {
+      if (.m3_assigns_flag(e)) {
+        res$warnings <- c(res$warnings,
+          paste0("ERROR | a conditional assigns F_FLAG (",
+                 paste(deparse(e, width.cutoff = 500L), collapse = " "),
+                 ") but is not the M3 censored-data shape this translator ",
+                 "recognises (F_FLAG = <non-zero> and Y = PHI(...) as the only ",
+                 "two statements of one branch). Censored records are NOT ",
+                 "modelled: they would be fitted as ordinary measurements."))
+        res$unsupported <- c(res$unsupported,
+          "F_FLAG conditional (censored-data likelihood not recognised as M3)")
+      }
+      out <- c(out, list(e)); next
+    }
+    which_arm <- if (!is.null(hit$then)) "then" else "else_"
+    obs_arm   <- setdiff(c("then", "else_"), which_arm)
+    obs <- Filter(function(st) !identical(.m3_target(st), "f_flag"), arms[[obs_arm]])
+    out <- c(out, obs)
+
+    ph  <- hit[[which_arm]]
+    res$refs <- unique(c(res$refs, toupper(.collect_symbols(ph$arg))))
+    if (!res$found) {
+      col  <- .m3_cond_column(e[[2]])
+      side <- if (identical(ph$tail, "lower")) "below" else "above"
+      res$warnings <- c(res$warnings, paste0(
+        "WARN  | M3 censored-data likelihood recognised (F_FLAG = 1, Y = ",
+        if (identical(ph$tail, "upper")) "1 - ", "PHI(",
+        paste(deparse(ph$arg, width.cutoff = 500L), collapse = " "), ")) and ",
+        "emitted as `bloq_method = m3` in [fit_options]. ferx scores censored ",
+        "records itself and reads them from a data column named CENS (",
+        if (identical(ph$tail, "lower")) "1" else "-1", " = ", side,
+        " the limit, with the limit in DV on that record); ",
+        if (is.na(col)) "the source's censoring condition could not be read, so "
+        else paste0("the source tested `", col, "`, so "),
+        "the dataset must carry the flag as CENS. Without it the censored ",
+        "records are fitted as ordinary measurements. The censored probability ",
+        "uses the emitted [error_model], so it matches the source only if the ",
+        "source's W is that model's standard deviation."))
+    }
+    res$found <- TRUE
+  }
+  # `F_FLAG = 0` ahead of the conditional is the flag's default and means nothing
+  # once the conditional is gone; left in it would become an individual parameter.
+  if (res$found)
+    out <- Filter(function(e) !identical(.m3_target(e), "f_flag"), out)
+  res$lst <- out
+  res
 }
 
 # -- name normalisation -------------------------------------------------------
@@ -3425,7 +3557,7 @@ bound_name <- function(entries, raw) {
         "INFO  | a conditional assigning ",
         paste(.cond_defines(cst), collapse = ", "),
         " depends on a compartment amount but nothing in the emitted [odes] ",
-        "block reads it, so it has no effect and is dropped."))
+        "block reads it, so it is not emitted."))
       next
     }
     st <- .render_cond(cst)

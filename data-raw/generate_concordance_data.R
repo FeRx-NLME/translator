@@ -247,3 +247,32 @@ simulate_dataset(
                   obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 48),
                   cmt_a = 1L, cmt_b = 2L),
   seed = 607L, out_path = "inst/testdata/pkpd_cmt_dispatch.csv")
+
+# -- M3 censored data ---------------------------------------------------------
+#
+# 1-cpt oral, 40 subjects x 12 samples to 72 h, one dose of 100. Truth CL = 2,
+# V = 20, KA = 1, proportional SD = 0.2, omega variance = 0.09, simulated
+# directly (no engine) so the truth is independent of the fixture's initials.
+# A sample below the limit 0.3 is recorded as DV = 0.3 with CENS = 1; about a
+# third of the observations are censored. A dataset with few or no censored
+# records could not tell a translated M3 likelihood from a dropped one.
+set.seed(4949L)
+m3_times <- c(0.25, 0.5, 1, 2, 4, 6, 8, 12, 24, 48, 60, 72)
+m3_rows <- lapply(seq_len(40L), function(id) {
+  cl <- 2 * exp(rnorm(1L, 0, sqrt(0.09))); v <- 20; ka <- 1; ke <- cl / v
+  ipred <- 100 * ka / (v * (ka - ke)) * (exp(-ke * m3_times) - exp(-ka * m3_times))
+  dv <- ipred * (1 + rnorm(length(m3_times), 0, 0.2))
+  cens <- as.integer(dv < 0.3)
+  dv[cens == 1L] <- 0.3
+  rbind(
+    data.frame(ID = id, TIME = 0, DV = ".", AMT = 100, EVID = 1L, MDV = 1L,
+               CMT = 1L, CENS = 0L),
+    data.frame(ID = id, TIME = m3_times, DV = signif(dv, 6), AMT = ".",
+               EVID = 0L, MDV = 0L, CMT = 1L, CENS = cens))
+})
+m3_data <- do.call(rbind, m3_rows)
+message(sprintf("M3 dataset: %d observations, %.1f%% censored",
+                sum(m3_data$EVID == 0L),
+                100 * mean(m3_data$CENS[m3_data$EVID == 0L])))
+write.csv(m3_data, "inst/testdata/m3_censored_concordance.csv",
+          row.names = FALSE, quote = FALSE)
