@@ -44,7 +44,12 @@ covariate reads an unknown name as one.}
 
 \item{strict}{If validation reports any error-severity diagnostic, abort.
 Default \code{TRUE}. Pass \code{FALSE} to downgrade to a warning and return the
-result anyway. Ignored when \code{validate = FALSE}.}
+result anyway. Ignored when \code{validate = FALSE}.
+A NONMEM stream that nonmem2rx cannot parse for a known reason (\code{ADVAN9},
+\code{ADVAN15}, \code{ADVAN10}, a solved system reading a non-depot/central amount) is
+also governed by \code{strict}: it aborts with class \code{ferxtranslate_unparseable},
+or with \code{FALSE} returns a result carrying the gap in \verb{$unsupported} and no
+model text; \code{output} is not written in that case.}
 
 \item{ctl_file}{Path to a NONMEM control stream file.}
 

@@ -21,6 +21,11 @@
 #' @param strict If validation reports any error-severity diagnostic, abort.
 #'   Default `TRUE`. Pass `FALSE` to downgrade to a warning and return the
 #'   result anyway. Ignored when `validate = FALSE`.
+#'   A NONMEM stream that nonmem2rx cannot parse for a known reason (`ADVAN9`,
+#'   `ADVAN15`, `ADVAN10`, a solved system reading a non-depot/central amount) is
+#'   also governed by `strict`: it aborts with class `ferxtranslate_unparseable`,
+#'   or with `FALSE` returns a result carrying the gap in `$unsupported` and no
+#'   model text; `output` is not written in that case.
 #'
 #' @return A `ferx_translate_result` invisibly, with fields `$ferx_text`,
 #'   `$warnings`, `$unsupported`, and `$validation` (`NULL` when
@@ -64,19 +69,33 @@ to_ferx <- function(source,
     ))
 
   src_label <- if (is.character(source)) source else "<model function>"
+  gap <- NULL
   rxui <- tryCatch(
     switch(format,
       nonmem  = nonmem2rx::nonmem2rx(source),
       nlmixr2 = rxode2::rxode2(source),
       monolix = monolix2rx::monolix2rx(source)
     ),
-    error = function(e)
+    error = function(e) {
+      known <- if (format == "nonmem") .classify_nm_parse_error(conditionMessage(e))
+      # A recognised upstream limitation becomes a gap in the result; anything
+      # else keeps raising so a new upstream break is not absorbed.
+      if (!is.null(known)) {
+        gap <<- .nm_gap_result(
+          known, conditionMessage(e),
+          src_file = if (is.character(source)) source else NA_character_,
+          advan = if (is.character(source)) .nm_advan_label(source)
+                  else NA_character_)
+        return(NULL)
+      }
       cli::cli_abort(
         c(paste0("Failed to parse ", src_label, " as ", format, "."),
           "i" = paste0("Original error: ", conditionMessage(e))),
         call = NULL
       )
+    }
   )
+  if (!is.null(gap)) return(.report_parse_gap(gap, strict))
 
   src_file     <- if (is.character(source)) source else NA_character_
   read_ctl     <- format == "nonmem" && is.character(source) && file.exists(source)
