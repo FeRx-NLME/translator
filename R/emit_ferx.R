@@ -95,8 +95,8 @@ emit_ferx <- function(ir) {
   groups <- list(
     vapply(ir$thetas,  .emit_theta,  ""),
     unlist(lapply(ir$omegas, .emit_omega)),
-    vapply(ir$kappas,  .emit_kappa,  ""),
-    vapply(ir$sigmas,  .emit_sigma,  "")
+    .emit_grouped(ir, "kappa"),
+    .emit_grouped(ir, "sigma")
   )
   groups <- Filter(function(g) length(g) > 0, groups)
   body   <- paste(unlist(lapply(groups, function(g) c(g, ""))), collapse = "\n")
@@ -143,6 +143,42 @@ emit_ferx <- function(ir) {
 
 .emit_kappa <- function(k) {
   sprintf("  kappa %s ~ %s%s", k$name, .fmt_num(k$value), .fix_suffix(k))
+}
+
+# Kappas and sigmas share one shape: plain entries each get their own line, and
+# the members of a block are emitted together as one `block_<kind>` at the
+# position of the first member.
+.emit_grouped <- function(ir, kind) {
+  entries <- ir[[paste0(kind, "s")]]
+  plain   <- if (kind == "kappa") .emit_kappa else .emit_sigma
+  lines <- character()
+  done  <- integer()
+  for (s in entries) {
+    if (is.null(s$block)) {
+      lines <- c(lines, plain(s))
+    } else if (!s$block %in% done) {
+      done  <- c(done, s$block)
+      lines <- c(lines, .emit_block_decl(ir, kind, s$block))
+    }
+  }
+  as.character(lines)
+}
+
+# ferx reads the block on the variance scale, like NONMEM, so the matrix goes
+# out as held. Members are listed in ir order -- sigma declaration order is
+# positional against [error_model] -- and the lower triangle is permuted to
+# match, because it is positional too.
+.emit_block_decl <- function(ir, kind, id) {
+  blk     <- Filter(function(b) identical(b$id, id),
+                    ir[[paste0(kind, "_blocks")]])[[1L]]
+  members <- Filter(function(s) identical(s$block, id), ir[[paste0(kind, "s")]])
+  idx     <- vapply(members, function(s) as.integer(s$block_idx), 1L)
+  cov     <- blk$cov[idx, idx, drop = FALSE]
+  tri     <- unlist(lapply(seq_len(nrow(cov)), function(i) cov[i, seq_len(i)]))
+  sprintf("  block_%s (%s) = [%s]%s", kind,
+          paste(vapply(members, function(s) s$name, ""), collapse = ", "),
+          paste(vapply(tri, .fmt_num, ""), collapse = ", "),
+          .fix_suffix(blk))
 }
 
 .emit_sigma <- function(s) {

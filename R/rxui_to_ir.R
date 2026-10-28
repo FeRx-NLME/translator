@@ -58,6 +58,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   unsp      <- c(unsp, omega_out$unsupported)
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
+  unsp      <- c(unsp, kappa_out$unsupported)
 
   sigma_out <- .extract_sigmas(ini, tryCatch(ui$sigma, error = function(e) NULL))
   warn      <- c(warn, sigma_out$warnings)
@@ -1369,8 +1370,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     thetas        = theta_out$thetas,
     omegas        = omega_out$omegas,
     kappas        = kappa_out$kappas,
+    kappa_blocks  = kappa_out$kappa_blocks,
     sigmas        = .order_sigmas_for_error(sigma_out$sigmas,
                                             expr_out$error_model),
+    sigma_blocks  = sigma_out$sigma_blocks,
     indiv_params  = expr_out$indiv_params,
     structural    = structural,
     odes          = expr_out$odes,
@@ -2537,13 +2540,13 @@ bound_name <- function(entries, raw) {
 .extract_kappas <- function(ini) {
   iov  <- ini[!is.na(ini$neta1) & ini$condition != "id", , drop = FALSE]
   warn <- character()
-  if (nrow(iov) == 0) return(list(kappas = list(), iov_column = NULL, warnings = warn))
+  unsp <- character()
+  none <- list(kappas = list(), kappa_blocks = list(), iov_column = NULL,
+               warnings = warn, unsupported = unsp)
+  if (nrow(iov) == 0) return(none)
 
   diag <- iov[iov$neta1 == iov$neta2, , drop = FALSE]
   off  <- iov[iov$neta1 != iov$neta2, , drop = FALSE]
-
-  if (nrow(off) > 0)
-    warn <- c(warn, "WARN  | IOV block omega detected -- only diagonal kappas emitted")
 
   iov_col <- unique(iov$condition)
   if (length(iov_col) > 1)
@@ -2560,7 +2563,53 @@ bound_name <- function(entries, raw) {
     list(name = .norm(.strip_prefix(diag$name[i])), raw = diag$name[i],
          value = diag$est[i], fixed = .ini_fixed(diag, i))
   )
-  list(kappas = kappas, iov_column = iov_col, warnings = warn)
+
+  # Correlated IOV: kappas joined by a non-zero off-diagonal are held as a
+  # `block_kappa`, on the variance scale like the omega block. The per-kappa
+  # entries keep their own diagonal value and point at the block, so name
+  # uniquification and declared-name checks see every kappa as before.
+  blocks <- list()
+  if (nrow(off) > 0) {
+    groups <- unname(.detect_blocks(off))
+    for (k in seq_along(groups)) {
+      bg <- groups[[k]]
+      lt <- iov[iov$neta1 %in% bg & iov$neta2 %in% bg, , drop = FALSE]
+      lt <- lt[order(lt$neta1, lt$neta2), ]
+      member <- vapply(bg, function(e)
+        which(diag$neta1 == e)[1], 1L)
+      nms <- vapply(member, function(m) kappas[[m]]$name, "")
+      # One flag for the whole declaration: ferx fixes a block_kappa all or
+      # nothing, as it does a block_omega. A mixed block cannot be written, so
+      # it is emitted free and loudly; see .extract_omegas() for why this arm is
+      # only reachable from a hand-built iniDf.
+      fx <- vapply(seq_len(nrow(lt)), function(i) .ini_fixed(lt, i), TRUE)
+      mixed <- any(fx) && !all(fx)
+      if (mixed) {
+        warn <- c(warn, paste0(
+          "ERROR | IOV block (", paste(nms, collapse = ", "), ") mixes fixed ",
+          "and estimated elements. ferx flags a block_kappa all or nothing, so ",
+          "the block is emitted WITHOUT FIX and the elements the source held ",
+          "will be estimated."))
+        unsp <- c(unsp, paste0(
+          "partially fixed IOV block (", paste(nms, collapse = ", "),
+          ") -- ferx fixes a block_kappa all or nothing"))
+      }
+      n   <- length(bg)
+      cov <- matrix(0, n, n)
+      for (i in seq_len(nrow(lt))) {
+        r <- match(lt$neta1[i], bg); cc <- match(lt$neta2[i], bg)
+        cov[r, cc] <- cov[cc, r] <- lt$est[i]
+      }
+      blocks[[k]] <- list(id = k, cov = cov, fixed = !mixed && all(fx))
+      for (j in seq_len(n)) {
+        kappas[[member[j]]]$block     <- k
+        kappas[[member[j]]]$block_idx <- j
+        if (mixed) kappas[[member[j]]]$fixed <- FALSE
+      }
+    }
+  }
+  list(kappas = kappas, kappa_blocks = blocks, iov_column = iov_col,
+       warnings = warn, unsupported = unsp)
 }
 
 # Detect etas that look like inter-occasion variability (IOV) but landed in the
@@ -2605,7 +2654,8 @@ bound_name <- function(entries, raw) {
     # today by accident of R rather than by contract -- and stops working the
     # moment a caller uses length(), vapply() or startsWith() on it, all of
     # which the surrounding code already does to other warning vectors.
-    return(list(sigmas = sigmas, raw_names = as.character(rows$name),
+    return(list(sigmas = sigmas, sigma_blocks = list(),
+                raw_names = as.character(rows$name),
                 warnings = character(), unsupported = character()))
   }
   # nonmem2rx: sigma lives in the ui$sigma matrix (variance scale); convert to SD.
@@ -2652,52 +2702,67 @@ bound_name <- function(entries, raw) {
     } else {
       vapply(seq_along(nms), function(i) isTRUE(lfix[i, i]), TRUE)
     }
-    # Only the DIAGONAL of ui$sigma is read below, so a `$SIGMA BLOCK` loses its
-    # residual covariances. That drop is older than this change and is not fixed
-    # here -- emitting `block_sigma` is a different job, because ferx does not
-    # take the off-diagonals as covariances at all ("off-diagonal entries are
-    # converted to fixed correlations", model_parser.rs) and that mapping needs
-    # measuring rather than assuming. What IS fixed here is the silence: the
-    # translation reported character(0) warnings and character(0) unsupported
-    # while discarding them, which is the one outcome CLAUDE.md rules out.
-    #
-    # Sigma was the outlier of the three random-effect channels. Omega emits its
-    # block in full; .extract_kappas() warns when it drops an off-diagonal; only
-    # this branch said nothing.
+    # A `$SIGMA BLOCK` is a group of residual errors with non-zero covariance.
+    # ferx holds it as `block_sigma (A, B) = [lower triangle]` on the VARIANCE
+    # scale, the same scale NONMEM writes, so the matrix is carried through
+    # unconverted; the per-sigma entries below keep the diagonal SD that
+    # [error_model] ordering and name resolution work from. A block is detected
+    # by its non-zero off-diagonals, so a `BLOCK(2)` whose initial covariance is
+    # exactly zero is indistinguishable from two diagonal records here, and is
+    # emitted as two independent sigmas.
     off_diag <- ui_sigma
     diag(off_diag) <- 0
+    sig_warn <- character()
+    sig_unsp <- character()
+    blocks   <- list()
+    member   <- rep(NA_integer_, length(nms))
+    bidx     <- rep(NA_integer_, length(nms))
     if (any(abs(off_diag) > 0, na.rm = TRUE)) {
-      pairs <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
-      shown <- paste(vapply(seq_len(nrow(pairs)), function(k) paste0(
-        .norm(nms[pairs[k, 1]]), "/", .norm(nms[pairs[k, 2]]), " = ",
-        .fmt_num(ui_sigma[pairs[k, 1], pairs[k, 2]])), ""), collapse = ", ")
-      sig_warn <- paste0(
-        "ERROR | $SIGMA BLOCK declares residual covariances (", shown,
-        ") and only the diagonal is emitted, so the residual errors become ",
-        "independent. ferx can hold them with `block_sigma`, which this ",
-        "translator does not emit yet; the fit will run and report a ",
-        "plausible OFV computed under the wrong residual structure.")
-    } else {
-      sig_warn <- character()
+      pairs  <- which(abs(off_diag) > 0 & upper.tri(off_diag), arr.ind = TRUE)
+      groups <- unname(.detect_blocks(data.frame(neta1 = pairs[, 1],
+                                                 neta2 = pairs[, 2])))
+      for (k in seq_along(groups)) {
+        g   <- groups[[k]]
+        fx  <- sig_fixed[g]
+        mixed <- any(fx) && !all(fx)
+        if (mixed) {
+          sig_warn <- c(sig_warn, paste0(
+            "ERROR | $SIGMA BLOCK (", paste(.norm(nms[g]), collapse = ", "),
+            ") is only partly FIX. ferx fixes a whole `block_sigma` or none of ",
+            "it, so the block is emitted unfixed and the parameters the source ",
+            "held are estimated."))
+          sig_unsp <- c(sig_unsp, paste0(
+            "partially fixed $SIGMA BLOCK (", paste(.norm(nms[g]), collapse = ", "),
+            ") -- ferx has no per-element FIX inside block_sigma"))
+        }
+        cov <- ui_sigma[g, g, drop = FALSE]
+        dimnames(cov) <- NULL
+        blocks[[k]] <- list(id = k, cov = cov, fixed = all(fx))
+        member[g]   <- k
+        bidx[g]     <- seq_along(g)
+        if (mixed) sig_fixed[g] <- FALSE
+      }
     }
-    sigmas <- lapply(seq_along(nms), function(i)
+    sigmas <- lapply(seq_along(nms), function(i) {
       # .norm(), matching the nlmixr2 branch above. This was the last emitted-name
       # channel that only uppercased: the name comes from rownames(ui$sigma),
       # which is upstream-controlled, and it flows into both [parameters] and
       # [error_model].
-      list(name  = .norm(nms[i]),
-           value = sqrt(ui_sigma[i, i]),
-           scale = "sd",
-           fixed = sig_fixed[[i]])
-    )
-    sig_unsp <- if (length(sig_warn) > 0) paste0(
-      "residual covariances on $SIGMA BLOCK -- block_sigma is not emitted, so ",
-      "the residuals are treated as independent") else character()
-    return(list(sigmas = sigmas, raw_names = nms, warnings = sig_warn,
-                unsupported = sig_unsp))
+      s <- list(name  = .norm(nms[i]),
+                value = sqrt(ui_sigma[i, i]),
+                scale = "sd",
+                fixed = sig_fixed[[i]])
+      if (!is.na(member[i])) {
+        s$block     <- member[i]
+        s$block_idx <- bidx[i]
+      }
+      s
+    })
+    return(list(sigmas = sigmas, sigma_blocks = blocks, raw_names = nms,
+                warnings = sig_warn, unsupported = sig_unsp))
   }
-  list(sigmas = list(), raw_names = character(), warnings = character(),
-       unsupported = character())
+  list(sigmas = list(), sigma_blocks = list(), raw_names = character(),
+       warnings = character(), unsupported = character())
 }
 
 # -- expression classifiers ---------------------------------------------------

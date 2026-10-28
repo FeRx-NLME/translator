@@ -19,10 +19,22 @@
 #'   that belongs to a block that is not.
 #' @param kappas List of IOV kappa entries. Each element is a list with
 #'   `name` (character), `value` (numeric), and optionally `fixed` (logical
-#'   scalar).
+#'   scalar), and optionally `block` and `block_idx`, which make the entry a
+#'   member of the `kappa_blocks` element with that `id` and give its row in
+#'   that element's matrix.
+#' @param kappa_blocks List of correlated IOV blocks, in the same shape as
+#'   `sigma_blocks`. Emitted as one `block_kappa` at the position of the first
+#'   member.
 #' @param sigmas List of sigma entries. Each element is a list with `name`
 #'   (character), `value` (numeric), `scale` (`"sd"` or `"var"`), and
-#'   optionally `fixed` (logical scalar).
+#'   optionally `fixed` (logical scalar), and optionally `block` and
+#'   `block_idx`, which make the entry a member of the `sigma_blocks` element
+#'   with that `id` and give its row in that element's matrix.
+#' @param sigma_blocks List of residual-error blocks, each a list with `id`
+#'   (integer), `cov` (the covariance matrix on the variance scale, members in
+#'   `block_idx` order) and `fixed` (logical scalar). Emitted as one
+#'   `block_sigma` at the position of the first member; the members' own
+#'   `sigmas` entries are not emitted separately.
 #' @param indiv_params Ordered list of statements. Each element is a list with
 #'   a `kind`: `"assign"` (`lhs`, `rhs`, both character) or `"if"` (`cond`,
 #'   character; `then`, and optionally `else_`, each a nested statement list).
@@ -117,7 +129,9 @@ new_ferx_ir <- function(
   fit_options   = list(),
   warnings      = character(),
   unsupported   = character(),
-  state_renames = character()
+  state_renames = character(),
+  sigma_blocks  = list(),
+  kappa_blocks  = list()
 ) {
   structure(
     list(
@@ -126,7 +140,9 @@ new_ferx_ir <- function(
       thetas        = thetas,
       omegas        = omegas,
       kappas        = kappas,
+      kappa_blocks  = kappa_blocks,
       sigmas        = sigmas,
+      sigma_blocks  = sigma_blocks,
       indiv_params  = indiv_params,
       structural    = structural,
       odes          = odes,
@@ -193,6 +209,17 @@ validate_ferx_ir <- function(ir) {
         cli::cli_abort(
           "{grp}: {.field fixed} must be a single non-NA logical when present."
         )
+
+  for (grp in c("sigma", "kappa"))
+    for (b in ir[[paste0(grp, "_blocks")]]) {
+      members <- Filter(function(s) identical(s$block, b$id), ir[[paste0(grp, "s")]])
+      idx     <- vapply(members, function(s) as.integer(s$block_idx), 1L)
+      if (!is.matrix(b$cov) || nrow(b$cov) != ncol(b$cov) ||
+          !identical(sort(idx), seq_len(nrow(b$cov))))
+        cli::cli_abort(
+          "{grp}_blocks: block {b$id} needs a square {.field cov} with one {grp} per row."
+        )
+    }
 
   if (length(ir$odes) > 0 && !identical(ir$structural$type, "ode"))
     cli::cli_abort(
