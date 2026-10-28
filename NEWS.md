@@ -2,6 +2,33 @@
 
 ## Bug fixes
 
+* `S<n>` is now read on a solved (`linCmt`) system (issue #44). The scaling
+  block was gated on ODE models, so every solved model dropped its `S<n>`
+  without a message. That is correct only for `S1 = V` with `V` the macro's own
+  volume; a unit constant (`S1 = V/1000`) or a product (`S1 = V*MW`) put every
+  prediction out by that factor, and the fit absorbed it into the structural
+  parameters. The pk macros already return `A/v`, so the volume is divided out
+  and only the remainder reaches `[scaling] obs_scale` (`0.001`, `MW`). The
+  observed compartment is the central one (2 behind a depot, 1 otherwise); a
+  scale that cannot be placed is an `ERROR` with a `result$unsupported` entry,
+  and a model that scales only the depot gets a `WARN`.
+
+  Measured on self-written 1-compartment IV bolus models against ferx
+  0.4.0.9000, on data simulated from the closed form: before, `S1 = V/1000`
+  predicted 0.001 times the NONMEM `F`; after, it matches to 1e-4.
+
+* An `S<n>` that is an expression is now read whole (issue #45). The `$PK`
+  scaling reader stopped at the first identifier, so `S2 = V*MW` was taken as
+  `S2 = V`, `MW*V` as `S2 = MW`, and `V*MW` and `V/MW` gave the same scale. The
+  emitted `[scaling] obs_scale` divided by the wrong quantity, and the file
+  validated and fit without a warning. A scale that cannot be placed now
+  reports the whole statement in its `ERROR`, and a bare number is read as a
+  number rather than as a symbol.
+
+  Measured on a self-written 1-compartment ODE model against ferx
+  0.4.0.9000: before, `S2 = V*MW` predicted a concentration 500 times too
+  large; after, it matches the closed form to 1e-4.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

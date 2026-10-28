@@ -21,10 +21,11 @@ rxui_to_ir(
 \item{source_file}{Path to the source file, or \code{NA}.}
 
 \item{scaling_hint}{Named list mapping compartment number (as a character
-string) to the NONMEM \verb{Sn=} scaling variable name, as returned by
-\code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block for ODE models
-where the observed compartment is scaled (e.g. \code{S2=V}). The default empty
-list disables scaling translation.}
+string) to the right-hand side of the NONMEM \verb{Sn=} statement as written
+(e.g. \code{"V*MW"}), as returned by \code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block where
+the observed compartment is scaled (e.g. \code{S2=V}). For a solved (\code{linCmt})
+system the pk macro's own volume is divided out first, so only the
+remainder is emitted. The default empty list disables scaling translation.}
 
 \item{obs_hint}{Optional list with \code{index} (integer, 1-based \verb{$MODEL} COMP
 ordinal), \code{name} (character), \code{defdose} (integer, 1-based COMP ordinal) and
