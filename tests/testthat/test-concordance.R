@@ -751,3 +751,38 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+# ===========================================================================
+# S<n> as an expression (issue #45)
+# ===========================================================================
+# NONMEM applies S<n> to F, so with `Y = A(1)/S1` the source predicts the amount
+# over the WHOLE scale. Truth is closed form and eta-free (PRED at the theta
+# initials, maxiter = 0): 1-cpt IV bolus, dose 100, CL = 3, V = 30. A first-
+# identifier read of `S1 = V*MW` gave `obs_scale = V`, i.e. 500 times too large.
+
+test_that("an S<n> that is an expression scales the prediction by all of it", {
+  data <- .conc_data("scale_expr_concordance.csv")
+  expect_true(nzchar(data))
+  d     <- utils::read.csv(data)
+  obs_t <- d$TIME[d$EVID == 0L]
+  conc  <- 100 / 30 * exp(-3 / 30 * obs_t)
+
+  pred_of_model <- function(model) {
+    txt <- .eval_only(suppressWarnings(nm_to_ferx(
+      system.file(file.path("testmodels/nonmem", model),
+                  package = "ferxtranslate")))$ferx_text)
+    list(txt = txt, pred = .pred_of(txt, data)$pred)
+  }
+
+  # MW = 500, in either operand order: the same prediction.
+  for (m in c("scale_prod_ode.ctl", "scale_prod_rev_ode.ctl")) {
+    r <- pred_of_model(m)
+    expect_true(grepl("obs_scale = V * MW", r$txt, fixed = TRUE) ||
+                grepl("obs_scale = MW * V", r$txt, fixed = TRUE), label = m)
+    expect_equal(r$pred, conc / 500, tolerance = 1e-4, label = m)
+  }
+  # A quotient is not a product.
+  r <- pred_of_model("scale_quot_ode.ctl")
+  expect_match(r$txt, "obs_scale = V/1000", fixed = TRUE)
+  expect_equal(r$pred, conc * 1000, tolerance = 1e-4)
+})

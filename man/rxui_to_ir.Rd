@@ -21,8 +21,8 @@ rxui_to_ir(
 \item{source_file}{Path to the source file, or \code{NA}.}
 
 \item{scaling_hint}{Named list mapping compartment number (as a character
-string) to the NONMEM \verb{Sn=} scaling variable name, as returned by
-\code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block for ODE models
+string) to the right-hand side of the NONMEM \verb{Sn=} statement as written
+(e.g. \code{"V*MW"}), as returned by \code{.extract_nm_scaling()}. Used to emit a \verb{[scaling]} block for ODE models
 where the observed compartment is scaled (e.g. \code{S2=V}). The default empty
 list disables scaling translation.}
 

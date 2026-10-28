@@ -247,3 +247,23 @@ simulate_dataset(
                   obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 48),
                   cmt_a = 1L, cmt_b = 2L),
   seed = 607L, out_path = "inst/testdata/pkpd_cmt_dispatch.csv")
+
+# S<n> as an expression (issue #45). Closed-form 1-cpt IV bolus, CL 3, V 30, dose
+# 100; the scale in the control stream is applied by NONMEM to F, so the
+# reference prediction is the amount over S<n>, independent of our own output.
+local({
+  set.seed(45L)
+  obs_t <- c(0.5, 1, 2, 4, 8, 12, 24)
+  rows  <- lapply(seq_len(20L), function(id) {
+    cl <- 3 * exp(rnorm(1L, 0, 0.3))
+    cp <- 100 / 30 * exp(-cl / 30 * obs_t) * (1 + rnorm(length(obs_t), 0, 0.1))
+    rbind(
+      data.frame(ID = id, TIME = 0, DV = ".", AMT = "100", EVID = 1L, MDV = 1L,
+                 CMT = 1L),
+      data.frame(ID = id, TIME = obs_t, DV = sprintf("%.6f", cp), AMT = ".",
+                 EVID = 0L, MDV = 0L, CMT = 1L))
+  })
+  out <- "inst/testdata/scale_expr_concordance.csv"
+  write.csv(do.call(rbind, rows), out, row.names = FALSE, quote = FALSE)
+  message("Written ", out)
+})

@@ -2,6 +2,18 @@
 
 ## Bug fixes
 
+* An `S<n>` that is an expression is now read whole (issue #45). The `$PK`
+  scaling reader stopped at the first identifier, so `S2 = V*MW` was taken as
+  `S2 = V`, `MW*V` as `S2 = MW`, and `V*MW` and `V/MW` gave the same scale. The
+  emitted `[scaling] obs_scale` divided by the wrong quantity, and the file
+  validated and fit without a warning. A scale that cannot be placed now
+  reports the whole statement in its `ERROR`, and a bare number is read as a
+  number rather than as a symbol.
+
+  Measured on a self-written 1-compartment ODE model against ferx
+  0.4.0.9000: before, `S2 = V*MW` predicted a concentration 500 times too
+  large; after, it matches the closed form to 1e-4.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -13,8 +13,8 @@
 #'   observed compartment when the source is a NONMEM control stream; `NULL`
 #'   falls back to inference.
 #' @param scaling_hint Named list mapping compartment number (as a character
-#'   string) to the NONMEM `Sn=` scaling variable name, as returned by
-#'   `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
+#'   string) to the right-hand side of the NONMEM `Sn=` statement as written
+#'   (e.g. `"V*MW"`), as returned by `.extract_nm_scaling()`. Used to emit a `[scaling]` block for ODE models
 #'   where the observed compartment is scaled (e.g. `S2=V`). The default empty
 #'   list disables scaling translation.
 #' @param has_cmt_col `TRUE`, `FALSE` or `NA` -- whether `$INPUT` declares a
@@ -860,19 +860,11 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (!is.na(obs_idx)) {
       svar <- scaling_hint[[as.character(obs_idx)]]
       if (!is.null(svar)) {
-        # .norm(), not a hand-inlined copy of it. This line used to spell out the
-        # old dot-only rule; once .norm() gained the rest of the grammar the two
-        # disagreed for any other illegal character, and a mismatch here does not
-        # error -- `matched` comes back NULL and [scaling] is silently dropped,
-        # which is precisely the S2=V failure CLAUDE.md warns about.
-        norm_svar      <- .norm(svar)
-        theta_names_uc <- toupper(vapply(theta_out$thetas, function(t) t$name, ""))
-        indiv_lhs_uc   <- toupper(.ip_names(expr_out$indiv_params))
-        matched <- if (norm_svar %in% theta_names_uc) {
-          vapply(theta_out$thetas, function(t) t$name, "")[match(norm_svar, theta_names_uc)]
-        } else if (norm_svar %in% indiv_lhs_uc) {
-          .ip_names(expr_out$indiv_params)[match(norm_svar, indiv_lhs_uc)]
-        } else NULL
+        # The whole right-hand side is resolved, not its first identifier: a
+        # product, a quotient and a bare name are different scales, and a
+        # truncated read cannot tell them apart (#45).
+        theta_nms <- vapply(theta_out$thetas, function(t) t$name, "")
+        matched <- .resolve_scale_expr(svar, theta_nms, .ip_names(expr_out$indiv_params))
         if (isFALSE(dv_scaled) && is.null(expr_out$readout)) {
           # The source declares S<n> but its $ERROR reads the compartment AMOUNT,
           # which NONMEM does not scale. Emitting obs_scale here would divide by a
@@ -901,8 +893,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         } else {
           warn <- c(warn, paste0(
             "ERROR | $PK sets S", obs_idx, " = ", svar, " for the observed ",
-            "compartment, but '", svar, "' is neither a theta nor an individual ",
-            "parameter in the translated model, so no [scaling] block was ",
+            "compartment, but '", svar, "' is not an arithmetic expression of ",
+            "thetas, individual parameters and numbers in the translated model, so ",
+            "no [scaling] block was ",
             "emitted. The prediction will be an amount where the data are ",
             "concentrations."))
           unsp <- c(unsp, paste0("observation scaling variable not resolvable: ", svar))
@@ -1415,6 +1408,44 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # substitute only the dot, which covered every illegal character the bundled
 # corpus happens to contain and none of the others.
 .norm <- function(nm) toupper(.ferx_ident(nm))
+
+# Resolve the right-hand side of an `S<n>` statement into the text (or number)
+# ferx accepts as `obs_scale`. Every identifier must be a theta or an individual
+# parameter of the translated model and the operators are arithmetic only; a
+# covariate, a function call or anything unparseable returns NULL so the caller
+# can report the whole statement. A constant-only expression is returned as a
+# number.
+.resolve_scale_expr <- function(txt, theta_names, indiv_names) {
+  e <- tryCatch(str2lang(txt), error = function(e) NULL)
+  if (is.null(e)) return(NULL)
+  ok <- TRUE
+  lookup <- function(key, nms) {
+    i <- match(key, toupper(nms))
+    if (is.na(i)) NULL else nms[i]
+  }
+  walk <- function(x) {
+    if (is.numeric(x)) return(x)
+    if (is.symbol(x)) {
+      key <- .norm(as.character(x))
+      hit <- lookup(key, theta_names)
+      if (is.null(hit)) hit <- lookup(key, indiv_names)
+      if (is.null(hit)) { ok <<- FALSE; return(x) }
+      return(as.name(hit))
+    }
+    if (is.call(x) && is.symbol(x[[1L]]) &&
+        as.character(x[[1L]]) %in% c("+", "-", "*", "/", "^", "("))
+      return(as.call(c(list(x[[1L]]), lapply(as.list(x[-1L]), walk))))
+    ok <<- FALSE
+    x
+  }
+  out <- walk(e)
+  if (!ok) return(NULL)
+  if (length(.collect_symbols(out)) == 0L) {
+    v <- as.numeric(eval(out, baseenv()))
+    return(if (is.finite(v) && v > 0) v else NULL)
+  }
+  .expr_text(out)
+}
 
 .strip_prefix <- function(nm) sub("^[te][.]", "", nm)
 

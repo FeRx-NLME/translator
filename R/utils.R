@@ -38,20 +38,19 @@
 
 .is_abs_path <- function(p) grepl("^(/|~|[A-Za-z]:[\\\\/])", p)
 
-# Parse NONMEM $PK block for Sn = varname compartment scaling assignments.
-# Returns a named list mapping compartment number (as character) to variable name.
+# Parse NONMEM $PK block for `S<n> = <expression>` compartment scale statements.
+# Returns a named list mapping compartment number (as character) to the whole
+# right-hand side as written, comments already stripped. It is text rather than a
+# variable name because the scale is routinely a volume times or over a unit
+# constant (`S2 = V*MW`); keeping only the first identifier read that as `V`.
 .extract_nm_scaling <- function(ctl_file) {
   pk_lines <- .nm_block_lines(ctl_file, "PK")
   if (length(pk_lines) == 0L) return(list())
   result <- list()
   for (line in pk_lines) {
-    m <- regmatches(line,
-                    regexpr("^\\s*S(\\d+)\\s*=\\s*(\\w+)", line, perl = TRUE))
-    if (length(m) > 0L && nchar(m) > 0L) {
-      cmt_n        <- sub("^\\s*S(\\d+)\\s*=.*",      "\\1", m, perl = TRUE)
-      var          <- sub("^\\s*S\\d+\\s*=\\s*(\\w+).*", "\\1", m, perl = TRUE)
-      result[[cmt_n]] <- var
-    }
+    m <- regmatches(line, regexec("^\\s*S(\\d+)\\s*=\\s*(.+?)\\s*$", line,
+                                  perl = TRUE))[[1L]]
+    if (length(m) == 3L && nzchar(m[3L])) result[[m[2L]]] <- m[3L]
   }
   result
 }
