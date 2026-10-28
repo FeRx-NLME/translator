@@ -751,3 +751,30 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+test_that("a SIGMA(i,j) reference translates to a file the engine accepts without a dead parameter", {
+  codes <- function(txt) {
+    d <- ferx::ferx_model_validate(.write_tmp(txt))$diagnostics
+    list(ok = nrow(d) == 0L || !any(d$severity == "error"), codes = d$code)
+  }
+  mk <- function(v, error) {
+    ctl <- file.path(tmp_ctl_dir(), "g.ctl")
+    writeLines(c(
+      "$PROBLEM sigma reference", "$INPUT ID TIME DV AMT EVID MDV CMT", "$DATA d.csv IGNORE=@",
+      "$SUBROUTINES ADVAN1 TRANS2", "$PK", "  CL = THETA(1)*EXP(ETA(1))", v, "  S1 = V",
+      "$ERROR", "  IPRED = F", error, "  Y = IPRED + EPS(1)",
+      "$THETA", "  (0,3)", "  (0,30)", "$OMEGA 0.09", "$SIGMA 400",
+      "$EST METHOD=1 INTER"), ctl)
+    suppressWarnings(suppressMessages(nm_to_ferx(ctl, validate = FALSE)))$ferx_text
+  }
+  # The standard weighted-residual idiom: nothing is left for ferx to call
+  # computed but never used (the free theta was frozen by the engine on that
+  # warning alone).
+  idiom <- codes(mk("  V = THETA(2)", c("  W = SQRT(SIGMA(1,1))",
+                                         "  IWRES = (DV - IPRED)/W")))
+  expect_true(idiom$ok)
+  expect_false("W_PARSE" %in% idiom$codes)
+  # A reference the model reads still parses: the FIXED theta is a legal file.
+  live <- codes(mk("  V = THETA(2)*(1 + 0.5*SQRT(SIGMA(1,1)))", "  W = 1"))
+  expect_true(live$ok)
+})

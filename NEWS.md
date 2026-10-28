@@ -2,6 +2,23 @@
 
 ## Bug fixes
 
+* A `SIGMA(i,j)` reference in `$PK`/`$ERROR` code is no longer emitted as a free
+  estimated theta (issue #46). nonmem2rx turns the reference into a theta row
+  holding the sigma's initial variance, so the usual weighted-residual idiom
+  (`W = SQRT(SIGMA(1,1))`, `IWRES = (DV - IPRED)/W`) produced
+  `theta SIGMA_1_1(400.0, -1e15, 1e15)` next to the real `sigma`, declaring the
+  residual variance twice. The engine then also warned (`W_PARSE`) that `W` was
+  never used.
+
+  When nothing translated reads the reference, the individual parameter that
+  held it (`W`) is dropped with an `INFO` and no theta is emitted. When the
+  translated model does read it, ferx has no way to name a sigma in an expression
+  (measured: `EPS1` in `[individual_parameters]` is read as a data covariate and
+  gives `E_MISSING_COVARIATE`), so the theta is emitted `FIX`ed at the initial
+  variance, with an `ERROR`, a `# WARNING:` comment and an entry in
+  `result$unsupported`: it holds the starting value and does not follow the sigma
+  once that is estimated. NONMEM models only.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -1359,6 +1359,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     }
   }
 
+  sig_out <- .resolve_sigma_refs(theta_out, expr_out$indiv_params, expr_out$odes,
+                                 init_conds, scaling, structural,
+                                 enabled = identical(source_format, "nonmem"))
+  theta_out$thetas      <- sig_out$thetas
+  expr_out$indiv_params <- sig_out$indiv_params
+  warn <- c(warn, sig_out$warnings)
+  unsp <- c(unsp, sig_out$unsupported)
+
   # CLAUDE.md: every translation warning is emitted at translation time so the
   # user sees it immediately, not only when they inspect result$warnings.
   .emit_warnings(warn)
@@ -1383,6 +1391,95 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     unsupported   = unsp,
     state_renames = state_map
   )
+}
+
+# -- SIGMA(i,j) references ------------------------------------------------------
+
+# nonmem2rx turns a `SIGMA(i,j)` read in $PK/$ERROR into a THETA row named
+# `sigma.i.j` holding the sigma's initial VARIANCE. It is not a parameter: it is
+# the residual variance that `$SIGMA` already declares, and emitting it as an
+# estimable theta declares that quantity a second time with no link to the first
+# (#46). ferx cannot express the link: an identifier in [individual_parameters]
+# that is not a theta, eta or individual parameter is read as a data covariate,
+# so `EPS1^2` there fails with E_MISSING_COVARIATE rather than naming the sigma.
+#
+# Two cases remain, and they are told apart by whether anything emitted reads
+# the value. The standard `W = SQRT(SIGMA(1,1)); IWRES = IRES/W` idiom is the
+# first: ferx computes IWRES itself, so `W` is dead, and it is dropped together
+# with the theta. If the value reaches the prediction there is no faithful
+# translation, so the theta stays but FIXED at the initial variance and the
+# reference is reported as an ERROR: a pinned number is visibly wrong once the
+# sigma moves, where a free one silently estimates the residual twice.
+.resolve_sigma_refs <- function(theta_out, indiv_params, odes, init_conds, scaling,
+                                structural, enabled = TRUE) {
+  out <- list(thetas = theta_out$thetas, indiv_params = indiv_params,
+              warnings = character(), unsupported = character())
+  is_ref <- grepl("^sigma[.][0-9]+[.][0-9]+$", theta_out$raw_names)
+  if (!enabled || !any(is_ref)) return(out)
+
+  nms    <- vapply(theta_out$thetas, function(t) t$name, "")
+  ref_nm <- toupper(nms[is_ref])
+  label  <- vapply(theta_out$raw_names[is_ref], function(r) {
+    m <- regmatches(r, regexec("^sigma[.]([0-9]+)[.]([0-9]+)$", r))[[1L]]
+    paste0("SIGMA(", m[2L], ",", m[3L], ")")
+  }, "")
+  names(label) <- ref_nm
+
+  sym_of <- function(x) {
+    e <- tryCatch(str2lang(x), error = function(e) NULL)
+    if (is.null(e)) character() else .collect_symbols(e)
+  }
+  # Everything outside [individual_parameters] that can read a name.
+  other_refs <- toupper(c(
+    .emitted_ode_symbols(odes),
+    unlist(lapply(init_conds, function(x) sym_of(x$rhs))),
+    unlist(lapply(unlist(scaling), function(x)
+      if (is.character(x)) sym_of(x))),
+    unlist(structural$pk_args)))
+
+  ips     <- indiv_params
+  dropped <- character()
+  repeat {
+    hit <- NULL
+    for (i in seq_along(ips)) {
+      p <- ips[[i]]
+      if (identical(.stmt_kind(p, "assign"), "if")) next
+      if (!any(toupper(.collect_symbols(str2lang(p$rhs))) %in% ref_nm)) next
+      elsewhere <- c(other_refs, toupper(.ip_refs(ips[-i])))
+      if (!toupper(p$lhs) %in% elsewhere) { hit <- i; break }
+    }
+    if (is.null(hit)) break
+    dropped <- c(dropped, ips[[hit]]$lhs)
+    ips <- ips[-hit]
+  }
+  if (length(dropped) > 0L)
+    out$warnings <- c(out$warnings, paste0(
+      "INFO  | ", paste(dropped, collapse = ", "),
+      if (length(dropped) == 1L) " reads" else " read",
+      " a SIGMA(i,j) reference and nothing translated uses ",
+      if (length(dropped) == 1L) "it" else "them",
+      " -- dropped. The residual variance is the `sigma` already declared."))
+  out$indiv_params <- ips
+
+  live <- ref_nm %in% toupper(c(other_refs, .ip_refs(ips)))
+  keep <- rep(TRUE, length(nms))
+  for (k in seq_along(ref_nm)) {
+    idx <- which(is_ref)[k]
+    if (live[k]) {
+      out$thetas[[idx]]$fixed <- TRUE
+      out$warnings <- c(out$warnings, paste0(
+        "ERROR | ", label[[k]], " is read by the translated model, but ferx cannot ",
+        "name a sigma in an expression. It is emitted as the FIXED theta ",
+        nms[idx], " at the initial variance ", out$thetas[[idx]]$init,
+        ", which diverges from the sigma as soon as that is estimated."))
+      out$unsupported <- c(out$unsupported, paste0(
+        label[[k]], " reference (the residual variance is not usable in an expression)"))
+    } else {
+      keep[idx] <- FALSE
+    }
+  }
+  out$thetas <- out$thetas[keep]
+  out
 }
 
 # -- name normalisation -------------------------------------------------------
