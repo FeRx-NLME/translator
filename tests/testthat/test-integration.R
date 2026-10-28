@@ -1042,51 +1042,6 @@ test_that("only a scale<n> symbol counts as the source having scaled the DV", {
   expect_length(grep("reads the compartment amount", result$warnings), 1L)
 })
 
-test_that("a $MODEL that cannot be reconciled by name reports the numbering as a gap", {
-  skip_if_not_installed("nonmem2rx")
-  # The decline path. A $MODEL compartment declared AFTER every DADT-bearing one
-  # makes nonmem2rx drop it and lose the remaining names (issue #26), so the COMP
-  # list and the state list cannot be matched up: 3 compartments against 2
-  # placeholder-named states. No permutation is available, so d/dt order stands
-  # -- and ferx will then read a CMT column against a numbering that is not the
-  # source's, which is silent in the numbers. That has to be said out loud.
-  dir <- tmp_ctl_dir()
-  ctl <- file.path(dir, "trailing_gap.ctl")
-  writeLines(c(
-    "$PROBLEM a trailing $MODEL compartment with no DADT",
-    "$INPUT ID TIME DV AMT EVID MDV CMT",
-    "$DATA d.csv IGNORE=@",
-    "$SUBROUTINE ADVAN6 TOL=6",
-    "$MODEL",
-    "  COMP=(DEPOT, DEFDOSE)",
-    "  COMP=(CENTRAL, DEFOBS)",
-    "  COMP=(DUMMY)",
-    "$PK",
-    "  CL = THETA(1)*EXP(ETA(1))",
-    "  V  = THETA(2)",
-    "  KA = THETA(3)",
-    "  S2 = V",
-    "$DES",
-    "  DADT(1) = -KA*A(1)",
-    "  DADT(2) =  KA*A(1) - (CL/V)*A(2)",
-    "$ERROR",
-    "  Y = A(2)*(1 + EPS(1))",
-    "$THETA (0,5) (0,50) (0,1)",
-    "$OMEGA 0.09",
-    "$SIGMA 0.04",
-    "$EST METHOD=1"), ctl)
-
-  result <- suppressWarnings(nm_to_ferx(ctl, validate = FALSE))
-  num <- grep("^ERROR .*numbers the compartments", result$warnings, value = TRUE)
-  expect_length(num, 1L)
-  expect_match(num, "DEPOT, CENTRAL, DUMMY", fixed = TRUE)
-  expect_match(num, "including the dose", fixed = TRUE)
-  # An action list entry, not just a console message.
-  expect_length(grep("numbering could not be reconciled", result$unsupported), 1L)
-  # Declined, so d/dt order is left exactly as it was -- no half-permutation.
-  expect_length(grep("put in \\$MODEL compartment order", result$warnings), 0L)
-})
-
 test_that("an unnamed scaling_hint does not abort the translation", {
   skip_if_not_installed("nonmem2rx")
   # names() on an unnamed list is NULL, so as.integer() gives integer(0) and

@@ -50,6 +50,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn <- character()
   unsp <- character()
 
+  # nonmem2rx loses every state name when a $MODEL compartment is declared after
+  # all the DADT-bearing ones (issue #26) and substitutes `rxddta<N>`, N being
+  # the DADT/A index. Put the names back before anything reads `lst`, so the
+  # state list, the observation lookup and the numbering check all see the
+  # source's own names.
+  restored <- .restore_placeholder_states(lst, if (!is.null(obs_hint)) obs_hint$comps)
+  lst  <- restored$lst
+  warn <- c(warn, restored$warnings)
+
   theta_out <- .extract_thetas(ini)
   warn      <- c(warn, theta_out$warnings)
 
@@ -1619,6 +1628,76 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     else if (.is_ddt_lhs(lhs))        assigned <- c(assigned, .ddt_state(lhs))
   }
   setdiff(unique(used), c(names(name_map), assigned))
+}
+
+# Undo nonmem2rx's loss of state names (issue #26).
+#
+# A `$MODEL` compartment declared AFTER every compartment that has a DADT makes
+# nonmem2rx drop it and fall back to `rxddta<N>` for all the others, N being the
+# DADT/A index (measured: `DADT(2)` is `rxddta2` whatever order the statements
+# are written in). `$MODEL` COMP order IS the DADT index, so `rxddta<N>` is the
+# N-th COMP name -- and the compartments past the last DADT are exactly the ones
+# nonmem2rx dropped, each a compartment with no equation. They are given
+# `d/dt(NAME) = 0`, which is what nonmem2rx itself emits for a gap anywhere
+# else, so ferx numbers them as NONMEM does and a CMT value naming one still
+# selects it.
+#
+# Declines (returns `lst` untouched, no message) unless the mapping is verifiably
+# total: every state is a placeholder, every placeholder index falls inside the
+# COMP list, and the COMP names are non-empty and distinct. The caller's existing
+# "could not be reconciled" ERROR is what then reports it.
+.restore_placeholder_states <- function(lst, comps) {
+  none <- list(lst = lst, warnings = character())
+  if (is.null(comps) || length(comps) == 0L || !all(nzchar(comps))) return(none)
+  if (anyDuplicated(toupper(.ferx_ident(comps))) > 0L)                return(none)
+
+  raw <- .state_raw_names(lst)
+  re  <- "^rxddta([0-9]+)$"
+  if (length(raw) == 0L || !all(grepl(re, raw)))                      return(none)
+
+  used <- unique(unlist(lapply(lst, .collect_symbols_deep)))
+  ph   <- grep(re, used, value = TRUE)
+  idx  <- as.integer(sub(re, "\\1", ph))
+  if (any(idx < 1L | idx > length(comps)))                            return(none)
+  n_state <- as.integer(sub(re, "\\1", raw))
+  if (anyDuplicated(n_state) > 0L)                                    return(none)
+
+  for (k in ph)
+    lst <- lapply(lst, .substitute_sym, sym = k,
+                  value = as.name(comps[as.integer(sub(re, "\\1", k))]))
+
+  extra <- setdiff(seq_along(comps), n_state)
+  if (length(extra) > 0L) {
+    # Straight after the last existing d/dt statement: the ODE block is read as
+    # a unit, and a statement stranded after $ERROR code would not be.
+    last <- max(which(vapply(lst, function(e)
+      .is_assignment(e) && .is_ddt_lhs(e[[2]]), TRUE)))
+    zero <- lapply(comps[extra], function(nm)
+      call("<-", call("/", as.name("d"), call("dt", as.name(nm))), 0))
+    lst  <- c(lst[seq_len(last)], zero, lst[-seq_len(last)])
+  }
+
+  msg <- paste0(
+    "INFO  | nonmem2rx lost the compartment names of this $MODEL (a compartment ",
+    "is declared after every one that has a DADT) and left internal ",
+    "placeholders; the names were restored from the $MODEL COMP order.")
+  if (length(extra) > 0L)
+    msg <- paste0(msg, " Compartment", if (length(extra) > 1L) "s ", " ",
+                  paste0("'", comps[extra], "'", collapse = ", "),
+                  " ha", if (length(extra) > 1L) "ve" else "s",
+                  " no differential equation and ",
+                  if (length(extra) > 1L) "are" else "is",
+                  " emitted as d/dt(...) = 0, so the numbering stays the ",
+                  "source's.")
+  list(lst = lst, warnings = msg)
+}
+
+# Every symbol in an expression, call heads included. `.collect_symbols()` skips
+# a call's head, which is right for model variables and wrong here.
+.collect_symbols_deep <- function(expr) {
+  if (is.symbol(expr)) return(as.character(expr))
+  if (!is.call(expr))  return(character())
+  unlist(lapply(as.list(expr), .collect_symbols_deep))
 }
 
 # The raw `d/dt()` targets, in source order. One owner: `rxui_to_ir()` needs the

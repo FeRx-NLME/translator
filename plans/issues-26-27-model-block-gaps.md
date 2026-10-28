@@ -233,7 +233,10 @@ sees real names and needs no knowledge of this at all.
    worse than none, since it produces a file that looks correct and is not.
 3. Report at `INFO` that the names were recovered from `$MODEL`, naming them.
    This is a correctness-relevant change to identifiers the user will read.
-4. Report at `ERROR` plus `unsupported` that compartment(s) `k..n` are declared in
+4. (Superseded in the implementation: the dropped compartments are emitted as
+   `d/dt(NAME) = 0`, as nonmem2rx does for a middle gap, so nothing is missing
+   from the emitted model and no ERROR is needed. The text below is the original
+   plan.) Report at `ERROR` plus `unsupported` that compartment(s) `k..n` are declared in
    `$MODEL` but absent from the emitted model, so a `CMT=k` row cannot be
    expressed. Do not paper over it: ferx genuinely has fewer compartments than
    NONMEM here.

@@ -2,6 +2,24 @@
 
 ## Bug fixes
 
+* A `$MODEL` compartment declared after every compartment that has a `DADT` no
+  longer loses the state names (issue #26). nonmem2rx drops such a compartment
+  and replaces the names of all the others with internal `rxddta<N>`
+  placeholders, which reached `[structural_model]`, `[odes]` and the warning
+  text, and made the DEFOBS cross-check accuse a perfectly consistent source of
+  contradicting itself.
+
+  The names are now restored from the `$MODEL` COMP list before anything reads
+  the model: `rxddta<N>` is the N-th COMP name, because N is the `DADT`/`A`
+  index (measured: it follows the index, not the statement order, so a `$DES`
+  written 2-then-1 still maps correctly). The dropped compartment is emitted as
+  `d/dt(NAME) = 0`, which is what nonmem2rx does for a gap anywhere else, so the
+  numbering stays the source's and a `CMT` value naming it is still a
+  compartment. An `INFO` says what was restored. The restore declines, and the
+  existing "could not be reconciled" ERROR stands, whenever the mapping is not
+  verifiably total: a placeholder past the end of the COMP list, COMP names that
+  collapse to one identifier, or a state that is not a placeholder.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that
