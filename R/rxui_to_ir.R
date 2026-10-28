@@ -24,6 +24,12 @@
 #'   route doses differently; `NA` means unknown and reports nothing. The
 #'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
 #'   two agree only while the state list could be put in `$MODEL` COMP order.
+#' @param cmt_header `TRUE`, `FALSE` or `NA` -- whether the CSV header of the
+#'   dataset `$DATA` names a column `CMT` (case-insensitive, which is how ferx
+#'   binds it), as returned by `.nm_data_has_cmt_header()`. `NA` means the
+#'   dataset could not be read and reports nothing. `FALSE` together with
+#'   `has_cmt_col = TRUE` is the combination where NONMEM reads a CMT item that
+#'   ferx never finds, so ferx doses compartment 1 whatever the item holds.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -44,7 +50,7 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA) {
+                       has_cmt_col = NA, cmt_header = NA) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -836,6 +842,38 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       structural$note <- paste0(
         "WARNING: doses land in '", ferx_cmt, "' here; NONMEM dosed '", dd_name,
         "' (compartment ", dd, ", $MODEL DEFDOSE, no CMT item on $INPUT)")
+    }
+
+    # The other half of the same routing question, from the dataset side (#36).
+    # $INPUT names columns by POSITION; ferx binds them by CSV HEADER NAME and
+    # never reads $INPUT. So a CMT item on $INPUT over a column the header spells
+    # anything but CMT (`COMPT`, `CPT`) is read by NONMEM and invisible to ferx,
+    # which then doses compartment 1 whatever the item holds. Only the header is
+    # looked at, never a row, so this cannot say what the CMT values ARE: the
+    # message states the condition under which the two engines still agree
+    # (every dose row carries the compartment ferx puts first) rather than
+    # claiming a certain mismatch. NA (dataset unreadable) stays silent.
+    #
+    # More than one state: with a single compartment there is nothing to
+    # mis-route, and the same reasoning keeps pk-macro models out, as above.
+    if (isTRUE(has_cmt_col) && isFALSE(cmt_header) &&
+        length(structural$states) > 1L) {
+      ferx_cmt <- structural$states[[1L]]
+      warn <- c(warn, paste0(
+        "ERROR | $INPUT gives NONMEM a CMT data item, but the dataset's header ",
+        "has no column named CMT. ferx binds columns by header name and never ",
+        "reads $INPUT, so it ignores that column and doses every row it cannot ",
+        "read a CMT for into compartment 1 ('", ferx_cmt, "'), while NONMEM ",
+        "doses the compartment the item holds. Rename the header of that column ",
+        "to CMT (or confirm every dose row is meant for '", ferx_cmt, "'); ",
+        "otherwise the doses land in the wrong compartment silently."))
+      unsp <- c(unsp, paste0(
+        "CMT column not bound by header -- $INPUT reads a CMT item, the dataset ",
+        "header names no CMT column, and ferx doses compartment 1 ('",
+        ferx_cmt, "')"))
+      structural$note <- paste0(
+        "WARNING: doses land in '", ferx_cmt, "' here; $INPUT gives NONMEM a ",
+        "CMT item the dataset header does not name CMT")
     }
     structural$obs_cmt <- obs_cmt
   }

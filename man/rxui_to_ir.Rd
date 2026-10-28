@@ -10,7 +10,8 @@ rxui_to_ir(
   source_file = NA_character_,
   scaling_hint = list(),
   obs_hint = NULL,
-  has_cmt_col = NA
+  has_cmt_col = NA,
+  cmt_header = NA
 )
 }
 \arguments{
@@ -39,6 +40,13 @@ emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
 route doses differently; \code{NA} means unknown and reports nothing. The
 comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
 two agree only while the state list could be put in \verb{$MODEL} COMP order.}
+
+\item{cmt_header}{\code{TRUE}, \code{FALSE} or \code{NA} -- whether the CSV header of the
+dataset \verb{$DATA} names a column \code{CMT} (case-insensitive, which is how ferx
+binds it), as returned by \code{.nm_data_has_cmt_header()}. \code{NA} means the
+dataset could not be read and reports nothing. \code{FALSE} together with
+\code{has_cmt_col = TRUE} is the combination where NONMEM reads a CMT item that
+ferx never finds, so ferx doses compartment 1 whatever the item holds.}
 }
 \value{
 A \code{ferx_ir} object.

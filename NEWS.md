@@ -2,6 +2,19 @@
 
 ## Bug fixes
 
+* A `$INPUT` `CMT` item over a dataset whose header does not name that column
+  `CMT` is now reported (issue #36). NONMEM binds columns by `$INPUT` position;
+  ferx binds them by CSV header name and never reads `$INPUT`. With
+  `$INPUT ... COMPT=CMT` over a header `COMPT`, NONMEM dosed the compartment the
+  column held while ferx found no `CMT` column and dosed compartment 1 -- and the
+  existing DEFDOSE guard (issue #27) stayed quiet because `$INPUT` does have a
+  `CMT` item. `to_ferx()` now reads the first line of the `$DATA` file (the
+  header only, never a row) and, for an ODE model with more than one state,
+  adds an ERROR-level warning, a `# WARNING:` note above `ode(...)` and a
+  `result$unsupported` entry. An unreadable or headerless dataset stays silent,
+  as before, since the check is only as good as what it can see. New argument
+  `cmt_header` on `rxui_to_ir()`.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

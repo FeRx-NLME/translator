@@ -36,6 +36,38 @@
   else NA_character_
 }
 
+# The column names on the first line of the dataset `$DATA` names, or NULL when
+# they cannot be read as a header.
+#
+# Header only: one line is read and no row is ever looked at. The path comes
+# from .extract_nm_data_path(), so it is NULL for an absent file too. A first
+# line whose first field is numeric is a headerless file, not a header, and is
+# NULL as well -- ferx requires a header, but calling a data row a header would
+# report every column as missing.
+.nm_data_header <- function(ctl_file) {
+  path <- .extract_nm_data_path(ctl_file)
+  if (is.na(path)) return(NULL)
+  first <- tryCatch(readLines(path, n = 1L, warn = FALSE),
+                    error = function(e) character())
+  if (length(first) == 0L || !nzchar(trimws(first))) return(NULL)
+  # Non-ASCII bytes (a UTF-8 byte-order mark) are dropped: a header name is
+  # compared, never displayed, and a BOM would otherwise hide the first column.
+  first <- iconv(first, "UTF-8", "ASCII", sub = "")
+  cols  <- trimws(gsub("[\"']", "", strsplit(first, ",", fixed = TRUE)[[1]]))
+  if (length(cols) == 0L || !nzchar(cols[1L])) return(NULL)
+  if (!is.na(suppressWarnings(as.numeric(cols[1L])))) return(NULL)
+  cols
+}
+
+# Does the dataset header name a CMT column, the way ferx looks for one?
+# TRUE / FALSE / NA, NA when there is no readable header. ferx matches the name
+# case-insensitively (datareader.rs `col_idx_ci("cmt")`).
+.nm_data_has_cmt_header <- function(ctl_file) {
+  cols <- .nm_data_header(ctl_file)
+  if (is.null(cols)) return(NA)
+  any(toupper(cols) == "CMT")
+}
+
 .is_abs_path <- function(p) grepl("^(/|~|[A-Za-z]:[\\\\/])", p)
 
 # Parse NONMEM $PK block for Sn = varname compartment scaling assignments.

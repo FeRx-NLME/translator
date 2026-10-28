@@ -1298,3 +1298,39 @@ test_that("FIX on an IOV kappa survives the pipeline, and a free kappa stays fre
   # kappas free -- that attribute is NULL on any model carrying IOV.
   expect_match(result$ferx_text, "iov_column = occ", fixed = TRUE)
 })
+
+test_that("a $INPUT CMT item over a differently-named CSV header is reported", {
+  skip_if_not_installed("nonmem2rx")
+  # cmt_header_match.ctl and cmt_header_mismatch.ctl have the same model and the
+  # same $INPUT; only the header of the CSV beside each differs (CMT vs COMPT).
+  # NONMEM binds by position, ferx by header name, so only the mismatch loses
+  # the column. A guard that looked at $INPUT alone would treat them alike.
+  bad  <- suppressWarnings(nm_to_ferx(nm_path("cmt_header_mismatch.ctl"),
+                                      validate = FALSE))
+  good <- suppressWarnings(nm_to_ferx(nm_path("cmt_header_match.ctl"),
+                                      validate = FALSE))
+
+  expect_length(grep("^ERROR.*no column named CMT", bad$warnings), 1L)
+  expect_length(grep("CMT column not bound", bad$unsupported), 1L)
+  expect_match(bad$unsupported, "PERIPH", all = FALSE)
+  ln  <- strsplit(bad$ferx_text, "\n")[[1]]
+  hdr <- which(ln == "[structural_model]")
+  expect_length(hdr, 1L)
+  expect_match(ln[hdr + 1L], "^  # WARNING: doses land in 'PERIPH'")
+  expect_equal(ln[hdr + 2L], "  ode(obs_cmt=CENTRAL, states=[PERIPH, CENTRAL])")
+
+  expect_length(good$unsupported, 0L)
+  expect_length(grep("CMT", good$warnings), 0L)
+  expect_length(grep("# WARNING: doses land", good$ferx_text), 0L)
+  # Same emitted model otherwise.
+  expect_match(good$ferx_text, "states=[PERIPH, CENTRAL]", fixed = TRUE)
+})
+
+test_that("an absent dataset leaves the CMT-header check silent", {
+  skip_if_not_installed("nonmem2rx")
+  # cmt_present has $INPUT CMT and a $DATA file that does not exist beside it:
+  # the common case, which must stay as quiet as it was.
+  r <- suppressWarnings(nm_to_ferx(nm_path("defdose_cmt_present.ctl"),
+                                   validate = FALSE))
+  expect_length(grep("CMT column not bound", r$unsupported), 0L)
+})

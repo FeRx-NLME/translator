@@ -751,3 +751,25 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+test_that("ferx really ignores a CMT column its header does not name CMT (#36)", {
+  # The premise of the guard, measured: the same model text on the same rows,
+  # differing only in the header of the CMT column. If binding ever became
+  # positional the two OFVs would coincide and the warning would be crying wolf.
+  txt <- .eval_only(suppressWarnings(
+    nm_to_ferx(nm_path("cmt_header_match.ctl"), validate = FALSE))$ferx_text)
+  d   <- tempfile(); dir.create(d)
+  rows <- do.call(rbind, lapply(1:6, function(i) rbind(
+    data.frame(ID = i, TIME = 0, AMT = 100, EVID = 1L, MDV = 1L, CMT = 2L, DV = 0),
+    data.frame(ID = i, TIME = c(0.5, 2, 8, 24), AMT = 0, EVID = 0L, MDV = 0L,
+               CMT = 2L, DV = c(9.5, 8.2, 4.5, 0.9)))))
+  named <- file.path(d, "named.csv")
+  other <- file.path(d, "other.csv")
+  write.csv(rows, named, row.names = FALSE, quote = FALSE)
+  names(rows)[names(rows) == "CMT"] <- "COMPT"
+  write.csv(rows, other, row.names = FALSE, quote = FALSE)
+
+  a <- .pred_of(txt, named)
+  b <- .pred_of(txt, other)
+  expect_false(isTRUE(all.equal(a$pred, b$pred, tolerance = 1e-6)))
+})

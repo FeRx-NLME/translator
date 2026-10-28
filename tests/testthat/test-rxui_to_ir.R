@@ -3770,3 +3770,59 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
   expect_length(diag_only$warnings, 0L)
   expect_length(diag_only$unsupported, 0L)
 })
+
+# -- dataset header: does ferx find the CMT column? (issue #36) ---------------
+
+test_that(".nm_data_has_cmt_header reads the header only, the way ferx binds", {
+  d <- tempfile(); dir.create(d)
+  mk <- function(first_line, data_name = "d.csv", write = TRUE) {
+    ctl <- file.path(d, "m.ctl")
+    writeLines(c("$PROBLEM x", "$INPUT ID TIME AMT DV CMT",
+                 paste("$DATA", data_name, "IGNORE=@")), ctl)
+    if (write) writeLines(c(first_line, "1,0,100,0,2"), file.path(d, data_name))
+    ctl
+  }
+  expect_true(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,CMT")))
+  # ferx matches the header name case-insensitively.
+  expect_true(.nm_data_has_cmt_header(mk("id,time,amt,dv,cmt")))
+  # A quoted, padded header still names the column.
+  expect_true(.nm_data_has_cmt_header(mk('"ID", "TIME","AMT","DV", "CMT"')))
+  # A UTF-8 byte-order mark must not hide the first column or break the match.
+  expect_true(.nm_data_has_cmt_header(mk("\ufeffCMT,ID,TIME,AMT,DV")))
+  # The case that matters: $INPUT says CMT, the header says something else.
+  expect_false(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,COMPT")))
+  # A name that merely contains CMT is not the column.
+  expect_false(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,CMTX")))
+  # Unknown, never FALSE: no dataset, a headerless file, an empty file.
+  expect_true(is.na(.nm_data_has_cmt_header(mk("", data_name = "absent.csv", write = FALSE))))
+  expect_true(is.na(.nm_data_has_cmt_header(mk("1,0,100,0,2"))))
+  expect_true(is.na(.nm_data_has_cmt_header(mk(""))))
+  # No $DATA record at all.
+  ctl <- file.path(d, "nodata.ctl")
+  writeLines(c("$PROBLEM x", "$INPUT ID TIME AMT DV CMT"), ctl)
+  expect_true(is.na(.nm_data_has_cmt_header(ctl)))
+})
+
+test_that("a CMT item over a header that does not name CMT is reported", {
+  skip_if_not_installed("nonmem2rx")
+  p  <- nm_path("defdose_cmt_present.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  mk <- function(has_cmt, hdr) suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = .extract_nm_defobs(p), has_cmt_col = has_cmt, cmt_header = hdr))
+  fires <- function(ir) any(grepl("CMT column not bound", ir$unsupported))
+
+  # The sync table from the issue, every row.
+  expect_true(fires(mk(TRUE,  FALSE)))   # NONMEM: column.  ferx: compartment 1.
+  expect_false(fires(mk(TRUE,  TRUE)))   # both read the column.
+  expect_false(fires(mk(TRUE,  NA)))     # dataset unreadable: stay silent.
+  expect_false(fires(mk(FALSE, FALSE)))  # no item: the DEFDOSE guard's case.
+  expect_false(fires(mk(NA,    FALSE)))  # $INPUT unreadable: stay silent.
+
+  ir <- mk(TRUE, FALSE)
+  expect_true(any(grepl("^ERROR.*header has no column named CMT", ir$warnings)))
+  expect_match(ir$structural$note, "does not name CMT", fixed = TRUE)
+  # It is the DEFDOSE guard's twin, not the same finding.
+  expect_false(any(grepl("DEFDOSE", ir$unsupported)))
+
+})
