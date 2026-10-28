@@ -222,3 +222,129 @@
   if (any(parts %in% c("DROP", "SKIP"))) return(FALSE)
   any(parts == "CMT")
 }
+
+# ---- $OMEGA BLOCK(n) SAME ---------------------------------------------------
+#
+# nonmem2rx turns `SAME` into `fix = TRUE` on the later rows of iniDf and keeps
+# nothing else, so which etas share a variance can only be recovered from the
+# raw $OMEGA records. This reads them, for the same reason .extract_nm_scaling()
+# reads $PK.
+
+# Every $OMEGA record, comments stripped, with the record name removed. $OMEGAP
+# and $OMEGAPD (priors) are different records and are not matched.
+.nm_omega_records <- function(ctl_file) {
+  lines <- tryCatch(readLines(ctl_file, warn = FALSE), error = function(e) character())
+  if (length(lines) == 0L) return(character())
+  starts <- grep("^\\s*\\$", lines)
+  re     <- "^\\s*\\$OM(E(G(A)?)?)?(\\s|$)"
+  om     <- grep(re, lines, ignore.case = TRUE)
+  vapply(om, function(i) {
+    nxt  <- starts[starts > i][1L]
+    body <- lines[i:(if (is.na(nxt)) length(lines) else nxt - 1L)]
+    txt  <- paste(sub(";.*$", "", body), collapse = " ")
+    sub("^\\s*\\$OM(E(G(A)?)?)?", "", txt, ignore.case = TRUE)
+  }, "")
+}
+
+.nm_count_numbers <- function(txt) {
+  re <- "(?<![[:alnum:]_.])[-+]?(?:[0-9]+\\.?[0-9]*|\\.[0-9]+)(?:[eEdD][-+]?[0-9]+)?(?![[:alnum:]_.])"
+  m  <- gregexpr(re, txt, perl = TRUE)[[1]]
+  if (m[1L] == -1L) 0L else length(m)
+}
+
+# How many etas one $OMEGA record declares, and whether it is a SAME record.
+.nm_omega_record_info <- function(txt) {
+  same <- grepl("\\bSAME\\b", txt, ignore.case = TRUE, perl = TRUE)
+  blk  <- regmatches(txt, regexec("\\bBLOCK\\s*\\(\\s*([0-9]+)\\s*\\)", txt,
+                                  ignore.case = TRUE, perl = TRUE))[[1]]
+  if (length(blk) > 0L)
+    return(list(same = same, n = as.integer(blk[2L]), block = TRUE))
+  dia <- regmatches(txt, regexec("\\bDIAG(ONAL)?\\s*\\(\\s*([0-9]+)\\s*\\)", txt,
+                                 ignore.case = TRUE, perl = TRUE))[[1]]
+  if (length(dia) > 0L)
+    return(list(same = same, n = as.integer(dia[3L]), block = FALSE))
+  # Plain diagonal record: one eta per value, `(v)x3` repeating a group.
+  txt  <- gsub("\\bNAMES?\\s*\\([^)]*\\)", " ", txt, ignore.case = TRUE, perl = TRUE)
+  grp  <- gregexpr("\\(([^)]*)\\)\\s*(?:[xX]\\s*([0-9]+))?", txt, perl = TRUE)[[1]]
+  n    <- 0L
+  if (grp[1L] != -1L) {
+    pieces <- regmatches(txt, list(grp))[[1]]
+    for (p in pieces) {
+      reps <- sub("^.*\\)\\s*(?:[xX]\\s*([0-9]+))?\\s*$", "\\1", p, perl = TRUE)
+      reps <- if (nzchar(reps)) as.integer(reps) else 1L
+      n    <- n + reps * .nm_count_numbers(sub("\\)\\s*[xX].*$", ")", p, perl = TRUE))
+    }
+    txt <- paste(regmatches(txt, list(grp), invert = TRUE)[[1]], collapse = " ")
+  }
+  list(same = same, n = n + .nm_count_numbers(txt), block = FALSE)
+}
+
+# The `BLOCK(n) SAME` groups of a control stream, as 1-based eta indices.
+#
+# NULL when the stream has no SAME record. Otherwise a list:
+#   groups   one element per block that is repeated, `etas` listing the block's
+#            own etas followed by every eta a SAME record gives it, `block_n`
+#            the block size
+#   n_eta    how many etas the $OMEGA records declare in total, so the caller can
+#            check it against iniDf before trusting any index
+#   problems SAME records that cannot be attributed to a block
+.extract_nm_same <- function(ctl_file) {
+  recs <- .nm_omega_records(ctl_file)
+  if (!any(grepl("\\bSAME\\b", recs, ignore.case = TRUE, perl = TRUE))) return(NULL)
+
+  eta <- 0L
+  groups   <- list()
+  problems <- character()
+  cur      <- NULL
+  flush    <- function() {
+    if (!is.null(cur) && cur$n_same > 0L) groups[[length(groups) + 1L]] <<- cur
+  }
+  for (txt in recs) {
+    info <- .nm_omega_record_info(txt)
+    idx  <- eta + seq_len(info$n)
+    eta  <- eta + info$n
+    if (!info$same) {
+      flush()
+      # A multi-eta diagonal record is several blocks of size one, and which of
+      # them a following SAME repeats is not something to guess.
+      cur <- list(etas = idx, block_n = info$n, n_same = 0L,
+                  attributable = info$block || info$n == 1L)
+      next
+    }
+    if (is.null(cur)) {
+      problems <- c(problems, "a SAME record with no $OMEGA block before it")
+    } else if (!cur$attributable) {
+      problems <- c(problems, paste0(
+        "a SAME record after a multi-eta diagonal $OMEGA record, where the block ",
+        "it repeats is ambiguous"))
+      cur$etas <- c(cur$etas, idx); cur$n_same <- cur$n_same + 1L
+    } else if (info$n != cur$block_n) {
+      problems <- c(problems, paste0(
+        "a BLOCK(", info$n, ") SAME record after a block of size ", cur$block_n))
+      cur$etas <- c(cur$etas, idx); cur$n_same <- cur$n_same + 1L
+    } else {
+      cur$etas <- c(cur$etas, idx); cur$n_same <- cur$n_same + 1L
+    }
+  }
+  flush()
+  list(groups = groups, n_eta = eta, problems = unique(problems))
+}
+
+# The names $INPUT gives the data items, so a column named by the model can be
+# checked against the dataset. Both halves of a synonym pair count; an item
+# dropped with DROP / SKIP does not exist for the model. NULL when unreadable.
+.nm_input_items <- function(ctl_file) {
+  body <- .nm_block_lines(ctl_file, "INP")
+  if (length(body) == 0L) return(NULL)
+  txt  <- sub("^\\s*[$]INP[A-Za-z]*", "", paste(body, collapse = " "),
+              ignore.case = TRUE)
+  txt  <- gsub("[[:space:]]*=[[:space:]]*", "=", txt)
+  toks <- trimws(strsplit(txt, "[,[:space:]]+")[[1]])
+  toks <- toks[nzchar(toks)]
+  if (length(toks) == 0L) return(NULL)
+  keep <- lapply(toks, function(t) {
+    parts <- toupper(trimws(strsplit(t, "=")[[1]]))
+    if (any(parts %in% c("DROP", "SKIP"))) character() else parts[nzchar(parts)]
+  })
+  unique(unlist(keep))
+}

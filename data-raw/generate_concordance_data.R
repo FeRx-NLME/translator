@@ -11,6 +11,7 @@
 #   2cpt_iv.ctl             : TVCL=5.0,   TVV1=20.0, TVQ=8.0, TVV2=60.0
 #   pk_1cmt_oral_ampsim.ctl : KA=0.0825, CL=2.676, V=1.588 (amp.sim NONMEM reference)
 #   cmt_order_gap.ctl       : TVCL=3.0, TVV=50.0, TVKA=1.2 (theta initials)
+#   iov_same.ctl            : TVCL=5.0, TVV=50.0, IIV 0.09, IOV 0.16 (NOT the initials)
 
 library(ferxtranslate)
 library(ferx)
@@ -247,3 +248,35 @@ simulate_dataset(
                   obs_times = c(0.5, 1, 2, 4, 8, 12, 24, 48),
                   cmt_a = 1L, cmt_b = 2L),
   seed = 607L, out_path = "inst/testdata/pkpd_cmt_dispatch.csv")
+
+# ---- inter-occasion variability via BLOCK(1) SAME (issue #50) ---------------
+# iov_same.ctl starts every parameter away from the truth below (thetas 3 / 30,
+# IIV 0.04, IOV 0.04), so a fit that recovers the IOV variance has moved it, and
+# one that leaves it at 0.04 has not. Simulated directly rather than through
+# ferx_simulate(): ferx_simulate() draws at the model's initials, which would put
+# the truth and the starting point in the same place.
+#
+#   truth: TVCL = 5, TVV = 50, IIV variance on CL = 0.09, IOV variance on CL =
+#          0.16 per occasion, proportional error SD = 0.1
+#   design: 40 subjects x 3 occasions (24 h apart), AMT = 500 at the start of
+#           each occasion, observations 0.5, 2, 6, 12, 18 h after it
+set.seed(5050)
+iov_rows <- list()
+for (id in 1:40) {
+  eta <- rnorm(1, 0, sqrt(0.09))
+  for (occ in 1:3) {
+    kap <- rnorm(1, 0, sqrt(0.16))
+    cl  <- 5 * exp(eta + kap)
+    t0  <- (occ - 1) * 24
+    iov_rows[[length(iov_rows) + 1L]] <- data.frame(
+      ID = id, TIME = t0, AMT = 500, DV = ".", OCC = occ)
+    for (dt in c(0.5, 2, 6, 12, 18)) {
+      conc <- 500 / 50 * exp(-cl / 50 * dt)
+      iov_rows[[length(iov_rows) + 1L]] <- data.frame(
+        ID = id, TIME = t0 + dt, AMT = 0, DV = signif(conc * (1 + rnorm(1, 0, 0.1)), 6),
+        OCC = occ)
+    }
+  }
+}
+write.csv(do.call(rbind, iov_rows), "inst/testdata/iov_same_concordance.csv",
+          row.names = FALSE, quote = FALSE)

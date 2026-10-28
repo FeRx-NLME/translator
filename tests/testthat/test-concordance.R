@@ -751,3 +751,39 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+# ---------------------------------------------------------------------------
+# BLOCK(1) SAME: one shared occasion variance
+#
+# nonmem2rx keeps only `fix = TRUE` on the repeated rows, so before this was
+# handled the repeated etas became FIXED omegas at the starting value and the
+# fit reported no inter-occasion variance at all. iov_same.ctl starts the
+# shared variance at 0.04 against a simulation truth of 0.16, so "moved to the
+# truth" and "never left its start" are different observations.
+# ---------------------------------------------------------------------------
+
+test_that("BLOCK(1) SAME: the shared occasion variance is estimated as one kappa", {
+  ferx_file <- .translate_to_tmp("iov_same.ctl")
+  data_file <- .conc_data("iov_same_concordance.csv")
+  txt <- paste(readLines(ferx_file), collapse = "\n")
+  expect_match(txt, "kappa IOV_CL ~ 0.04", fixed = TRUE)
+  expect_match(txt, "iov_column = OCC", fixed = TRUE)
+
+  fit <- ferx_fit(ferx_file, data_file, method = "focei",
+                  covariance = FALSE, verbose = FALSE)
+
+  ref <- c(TVCL = 5, TVV = 50)
+  .report_deviations(fit$theta, ref, "SAME-IOV thetas")
+  expect_lt(abs(fit$theta[["TVCL"]] / ref[["TVCL"]] - 1), 0.15, label = "CL")
+  expect_lt(abs(fit$theta[["TVV"]]  / ref[["TVV"]] - 1), 0.15, label = "V")
+
+  om <- .omega_diag(fit)
+  expect_lt(abs(om[["ETA_CL"]] / 0.09 - 1), 0.35, label = "IIV on CL")
+
+  # The kappa variance is reported apart from the IIV omegas.
+  expect_false(is.null(fit$omega_iov))
+  iov <- unname(unlist(fit$omega_iov))
+  expect_length(iov, 1L)
+  expect_lt(abs(iov / 0.16 - 1), 0.35, label = "IOV variance")
+  expect_gt(abs(iov / 0.04 - 1), 0.5, label = "IOV variance moved off its start")
+})

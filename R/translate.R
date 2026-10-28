@@ -89,9 +89,13 @@ to_ferx <- function(source,
   # $MODEL's DEFDOSE compartment and ferx doses compartment 1, and nothing in
   # the emitted file can say which was meant -- see .nm_input_has_cmt().
   has_cmt_col  <- if (read_ctl) .nm_input_has_cmt(source) else NA
+  # $OMEGA BLOCK(1) SAME groups, which nonmem2rx reduces to `fix = TRUE`.
+  same_hint    <- if (read_ctl) .extract_nm_same(source) else NULL
+  input_items  <- if (read_ctl && !is.null(same_hint)) .nm_input_items(source) else NULL
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
-                   has_cmt_col = has_cmt_col)
+                   has_cmt_col = has_cmt_col, same_hint = same_hint,
+                   input_items = input_items)
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

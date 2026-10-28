@@ -244,7 +244,9 @@ test_that("every bundled model translates, without a shadowing theta", {
     ir <- tryCatch(suppressWarnings(
                      rxui_to_ir(nonmem2rx::nonmem2rx(m), source_format = "nonmem",
                                 scaling_hint = .extract_nm_scaling(m),
-                                obs_hint     = .extract_nm_defobs(m))),
+                                obs_hint     = .extract_nm_defobs(m),
+                                same_hint    = .extract_nm_same(m),
+                                input_items  = .nm_input_items(m))),
                    error = function(e) conditionMessage(e))
     if (is.character(ir)) {
       crashed <- c(crashed, paste0(basename(m), " -- ", ir))

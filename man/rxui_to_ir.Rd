@@ -10,7 +10,9 @@ rxui_to_ir(
   source_file = NA_character_,
   scaling_hint = list(),
   obs_hint = NULL,
-  has_cmt_col = NA
+  has_cmt_col = NA,
+  same_hint = NULL,
+  input_items = NULL
 )
 }
 \arguments{
@@ -39,6 +41,15 @@ emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
 route doses differently; \code{NA} means unknown and reports nothing. The
 comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
 two agree only while the state list could be put in \verb{$MODEL} COMP order.}
+
+\item{same_hint}{The \verb{$OMEGA BLOCK(1) SAME} groups of the control stream, as
+returned by \code{.extract_nm_same()}, or \code{NULL} when it has none. nonmem2rx keeps
+only \code{fix = TRUE} for a SAME record, so this is the only record of which etas
+share a variance.}
+
+\item{input_items}{The data items \verb{$INPUT} declares, as returned by
+\code{.nm_input_items()}, used to check that a SAME group's occasion column
+exists in the dataset. \code{NULL} skips the check.}
 }
 \value{
 A \code{ferx_ir} object.

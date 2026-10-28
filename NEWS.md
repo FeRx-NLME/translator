@@ -2,6 +2,22 @@
 
 ## Bug fixes
 
+* `$OMEGA BLOCK(1) SAME` now translates to one `kappa` with `iov_column`
+  (issue #50). nonmem2rx keeps only `fix = TRUE` on the repeated rows, so the
+  repeated occasion etas were emitted as separate omegas pinned at their
+  starting value: the fit reported no inter-occasion variance, and the shared
+  variance NONMEM estimates was never estimated.
+
+  The sets are recovered from the raw `$OMEGA` records. When the per-occasion
+  `IF (<column> .EQ. <n>)` overrides are provably the same expression in
+  different etas, the set becomes `kappa NAME ~ var` and `iov_column = <column>`.
+  Anything that cannot be proved equivalent (a different formula on one
+  occasion, a column that is not in `$INPUT`, an eta used elsewhere, an eta
+  count that does not match) and `BLOCK(n > 1) SAME` (ferx kappas are diagonal)
+  are left as nonmem2rx produced them, with an `ERROR` warning and a
+  `result$unsupported` entry. On synthetic data the shared variance recovers to
+  within 35% of the simulation truth after starting at a quarter of it.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -24,6 +24,13 @@
 #'   route doses differently; `NA` means unknown and reports nothing. The
 #'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
 #'   two agree only while the state list could be put in `$MODEL` COMP order.
+#' @param same_hint The `$OMEGA BLOCK(1) SAME` groups of the control stream, as
+#'   returned by `.extract_nm_same()`, or `NULL` when it has none. nonmem2rx keeps
+#'   only `fix = TRUE` for a SAME record, so this is the only record of which etas
+#'   share a variance.
+#' @param input_items The data items `$INPUT` declares, as returned by
+#'   `.nm_input_items()`, used to check that a SAME group's occasion column
+#'   exists in the dataset. `NULL` skips the check.
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -44,11 +51,17 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA) {
+                       has_cmt_col = NA, same_hint = NULL, input_items = NULL) {
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
   unsp <- character()
+
+  same_out <- .apply_same_iov(ini, lst, same_hint, input_items)
+  ini  <- same_out$ini
+  lst  <- same_out$lst
+  warn <- c(warn, same_out$warnings)
+  unsp <- c(unsp, same_out$unsupported)
 
   theta_out <- .extract_thetas(ini)
   warn      <- c(warn, theta_out$warnings)
@@ -2561,6 +2574,184 @@ bound_name <- function(entries, raw) {
          value = diag$est[i], fixed = .ini_fixed(diag, i))
   )
   list(kappas = kappas, iov_column = iov_col, warnings = warn)
+}
+
+# -- $OMEGA BLOCK(1) SAME: inter-occasion variability -------------------------
+#
+# `$OMEGA BLOCK(1) 0.04` followed by `BLOCK(1) SAME` records is how NONMEM writes
+# IOV: one variance shared by an eta per occasion, selected by an
+# `IF (OCC.EQ.n) CL = ...EXP(ETA(1)+ETA(k))` override. nonmem2rx keeps only
+# `fix = TRUE` on the repeated rows, so without the raw $OMEGA records the shared
+# variance reads as one free omega and several held at their initial value.
+#
+# ferx's construct for it is a `kappa` with `iov_column`: one declaration, one
+# draw per subject per distinct value of the column. The group collapses to the
+# first eta, which is relabelled with the occasion column in iniDf's `condition`
+# -- the field the nlmixr2 `| occ` syntax already uses -- so .extract_omegas()
+# lets go of it and .extract_kappas() picks it up with no further change, and the
+# per-occasion overrides collapse to one unconditional assignment.
+#
+# All or nothing. A group whose overrides are not in a shape this can prove
+# equivalent is left exactly as nonmem2rx produced it and reported as ERROR, so
+# the output is never a quiet reinterpretation.
+.apply_same_iov <- function(ini, lst, same_hint, input_items = NULL) {
+  out <- list(ini = ini, lst = lst, warnings = character(),
+              unsupported = character())
+  if (is.null(same_hint)) return(out)
+
+  bad <- function(why, etas = NULL) {
+    lbl <- if (length(etas)) paste0(" (", paste(etas, collapse = ", "), ")") else ""
+    out$warnings   <<- c(out$warnings, paste0(
+      "ERROR | $OMEGA BLOCK SAME", lbl, " could not be translated to a ferx ",
+      "kappa: ", why, ". The repeated etas are emitted as fixed omegas held at ",
+      "their initial value, which is NOT what SAME means (one shared variance ",
+      "estimated across occasions) and gives wrong variance components."))
+    out$unsupported <<- c(out$unsupported, paste0(
+      "$OMEGA BLOCK SAME", lbl, " -- ", why))
+  }
+
+  diag_rows <- ini[!is.na(ini$neta1) & ini$neta1 == ini$neta2, , drop = FALSE]
+  if (!identical(as.integer(same_hint$n_eta), as.integer(nrow(diag_rows)))) {
+    bad(paste0("the $OMEGA records declare ", same_hint$n_eta, " eta(s) but the ",
+               "parsed model has ", nrow(diag_rows), ", so the SAME records ",
+               "cannot be matched to etas"))
+    return(out)
+  }
+  if (length(same_hint$problems) > 0L) {
+    for (p in same_hint$problems) bad(p)
+    return(out)
+  }
+
+  for (g in same_hint$groups) {
+    nms <- diag_rows$name[match(g$etas, diag_rows$neta1)]
+    if (g$block_n != 1L) {
+      bad(paste0("BLOCK(", g$block_n, ") SAME repeats a block with covariances, ",
+                 "and ferx kappas are diagonal"), nms)
+      next
+    }
+    if (!isTRUE(g$attributable)) next
+    rw <- .same_iov_rewrite(out$lst, nms, input_items)
+    if (!isTRUE(rw$ok)) { bad(rw$reason, nms); next }
+    out$lst <- rw$lst
+    first   <- which(!is.na(out$ini$neta1) & out$ini$neta1 == g$etas[1L])
+    out$ini$condition[first] <- rw$column
+    out$ini <- out$ini[is.na(out$ini$neta1) | !out$ini$neta1 %in% g$etas[-1L], ,
+                       drop = FALSE]
+    out$warnings <- c(out$warnings, paste0(
+      "INFO  | $OMEGA BLOCK(1) SAME set (", paste(nms, collapse = ", "),
+      ") translated to kappa '", nms[1L], "' with iov_column = ", rw$column,
+      ". NONMEM gives an occasion that is not in the IF overrides no IOV, while ",
+      "ferx draws a kappa for every value of ", rw$column, "."))
+  }
+  out
+}
+
+# Collapse the per-occasion overrides of one SAME group into one assignment.
+#
+# The recognised shape, and the only one:
+#
+#   [T <- default]                        optional, immediately above
+#   if (COL == v1) T <- RHS(eta_1)
+#   if (COL == v2) T <- RHS(eta_2)        one override per eta, contiguous
+#   ...
+#
+# where the overrides differ only in which group eta they read, COL is one data
+# item with distinct values, the group etas appear nowhere else, and the default
+# equals the override with the eta set to zero. Under those conditions
+# `T <- RHS(kappa)` is the same model for every occasion the overrides cover.
+# Returns list(ok, lst, column) or list(ok = FALSE, reason).
+.same_iov_rewrite <- function(lst, eta_names, input_items = NULL) {
+  no <- function(why) list(ok = FALSE, reason = why)
+  m  <- length(eta_names)
+  is_if <- function(e) is.call(e) && identical(e[[1L]], as.name("if")) &&
+                       length(e) == 3L
+  mentions <- vapply(lst, function(e) any(all.vars(e) %in% eta_names), TRUE)
+  idx <- which(mentions)
+  if (length(idx) != m)
+    return(no(paste0("the repeated etas appear in ", length(idx), " statement(s) ",
+                     "and an occasion override is expected for each of the ", m)))
+  if (!all(vapply(lst[idx], is_if, TRUE)) || !all(diff(idx) == 1L))
+    return(no(paste0("the etas are not used in a contiguous run of ",
+                     "`IF (<column> .EQ. <n>) <var> = ...` overrides")))
+
+  parts <- lapply(lst[idx], function(e) {
+    cond <- e[[2L]]
+    body <- e[[3L]]
+    if (is.call(body) && identical(body[[1L]], as.name("{")) && length(body) == 2L)
+      body <- body[[2L]]
+    if (!is.call(cond) || !identical(cond[[1L]], as.name("==")) ||
+        length(cond) != 3L) return(NULL)
+    sym <- Filter(is.symbol, list(cond[[2L]], cond[[3L]]))
+    num <- Filter(is.numeric, list(cond[[2L]], cond[[3L]]))
+    if (length(sym) != 1L || length(num) != 1L) return(NULL)
+    if (!.is_assignment(body) || !is.symbol(body[[2L]])) return(NULL)
+    list(col = as.character(sym[[1L]]), value = num[[1L]],
+         target = as.character(body[[2L]]), rhs = body[[3L]],
+         eta = intersect(all.vars(body[[3L]]), eta_names))
+  })
+  if (any(vapply(parts, is.null, TRUE)))
+    return(no("an override is not of the form `IF (<column> .EQ. <n>) <var> = ...`"))
+  cols    <- unique(vapply(parts, function(p) p$col, ""))
+  targets <- unique(vapply(parts, function(p) p$target, ""))
+  vals    <- vapply(parts, function(p) p$value, 0)
+  etas    <- vapply(parts, function(p) if (length(p$eta) == 1L) p$eta else NA_character_, "")
+  if (length(cols) != 1L)
+    return(no("the overrides test more than one column"))
+  if (length(targets) != 1L)
+    return(no("the overrides assign more than one variable"))
+  if (anyDuplicated(vals))
+    return(no("two overrides test the same occasion value"))
+  if (anyNA(etas) || !setequal(etas, eta_names))
+    return(no("each override must read exactly one of the repeated etas, once each"))
+
+  ph    <- as.name("RXKAPPA_PLACEHOLDER")
+  norm  <- function(p) deparse(do.call(substitute,
+                         list(p$rhs, stats::setNames(list(ph), p$eta))))
+  forms <- vapply(parts, norm, "")
+  if (length(unique(forms)) != 1L)
+    return(no("the overrides differ in more than the eta they read"))
+  rhs_k <- do.call(substitute, list(parts[[1L]]$rhs,
+                   stats::setNames(list(ph), parts[[1L]]$eta)))
+
+  col <- cols
+  if (!is.null(input_items) && !toupper(col) %in% toupper(input_items))
+    return(no(paste0("the occasion column '", col, "' is not a data item in ",
+                     "$INPUT, so it cannot be iov_column")))
+
+  start <- idx[1L]
+  d <- idx[1L] - 1L
+  if (d >= 1L && .is_assignment(lst[[d]]) && is.symbol(lst[[d]][[2L]]) &&
+      identical(as.character(lst[[d]][[2L]]), targets)) {
+    zero <- do.call(substitute, list(rhs_k, stats::setNames(list(0), "RXKAPPA_PLACEHOLDER")))
+    if (!.same_value(lst[[d]][[3L]], zero))
+      return(no(paste0("the assignment above the overrides does not equal them ",
+                       "with the repeated eta set to zero")))
+    start <- d
+  }
+  final <- do.call(substitute, list(rhs_k, stats::setNames(list(as.name(eta_names[1L])),
+                                                          "RXKAPPA_PLACEHOLDER")))
+  new_stmt <- as.call(list(as.name("<-"), as.name(targets), final))
+  list(ok = TRUE, column = col,
+       lst = c(lst[seq_len(start - 1L)], list(new_stmt),
+               lst[-seq_len(max(idx))]))
+}
+
+# Are two expressions the same function of their free variables? Checked by
+# evaluation at three fixed points, which decides `eta1 + 0` against `eta1`
+# where comparing deparsed text would not. Anything that does not evaluate (a
+# function base R lacks) is "not equal", which is the safe answer for a caller
+# that refuses to rewrite on a mismatch.
+.same_value <- function(a, b) {
+  vars <- union(all.vars(a), all.vars(b))
+  tryCatch({
+    for (k in 1:3) {
+      vals <- stats::setNames(as.list(0.5 + abs(sin(seq_along(vars) * k * 1.7))), vars)
+      va <- eval(a, vals, baseenv())
+      vb <- eval(b, vals, baseenv())
+      if (!isTRUE(all.equal(va, vb))) return(FALSE)
+    }
+    TRUE
+  }, error = function(e) FALSE)
 }
 
 # Detect etas that look like inter-occasion variability (IOV) but landed in the
