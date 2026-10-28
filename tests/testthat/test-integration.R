@@ -252,7 +252,7 @@ test_that("every bundled model translates, without a shadowing theta", {
     }
     clash <- intersect(
       toupper(vapply(ir$thetas, function(t) t$name, "")),
-      toupper(vapply(ir$indiv_params, function(p) p$lhs, ""))
+      toupper(.stmt_declared(ir$indiv_params, "assign", "assign"))
     )
     if (length(clash) > 0)
       offenders <- c(offenders, paste0(basename(m), ": ", paste(clash, collapse = ", ")))

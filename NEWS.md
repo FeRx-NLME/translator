@@ -2,6 +2,20 @@
 
 ## Bug fixes
 
+* A name assigned in only some branches of an `IF` is no longer emitted in a
+  form ferx refuses (issue #43). NM-TRAN's usual covariate idiom is two else-less
+  `IF`s -- `IF (SEX.EQ.0) TVCL = ...` then `IF (SEX.EQ.1) TVCL = ...` -- and it
+  translated into two else-less `if` blocks. ferx-core rejects a name that is
+  not assigned on every path and is read afterwards (`E_PARSE`), so the file
+  failed at validation, or at fit time on an engine that does not check yet.
+
+  A default is now written before the first such `if`: `0` for an ordinary
+  variable (a WARN says so, because NONMEM would instead keep the previous
+  record's value), `F`/`F<n>` = 1 and lag/duration/rate = 0 for dose
+  attributes (an INFO, the engine defaults). `F = 0` is never emitted, since it
+  would zero the dose. A name that nothing reads, or that an earlier statement
+  already assigns on every path, is left as it was.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -1359,6 +1359,16 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     }
   }
 
+  # ferx refuses a name that is assigned on only some paths through an `if` and
+  # read afterwards; give such a name the default NONMEM would have left it with.
+  ext_reads <- unique(toupper(c(
+    .emitted_ode_symbols(expr_out$odes),
+    .all_symbols(list(init_conds, scaling, structural$pk_args,
+                      expr_out$error_model)))))
+  part_out <- .default_partial_assignments(expr_out$indiv_params, ext_reads)
+  expr_out$indiv_params <- part_out$stmts
+  warn <- c(warn, part_out$warnings)
+
   # CLAUDE.md: every translation warning is emitted at translation time so the
   # user sees it immediately, not only when they inspect result$warnings.
   .emit_warnings(warn)
@@ -4422,4 +4432,89 @@ bound_name <- function(entries, raw) {
   }
 
   list(pk_call = pk_call, pk_args = pk_args, warnings = warn, unsupported = unsp)
+}
+
+# -- names assigned on only some paths ------------------------------------------
+
+# Every symbol in any character leaf of a nested list, upper-cased. Used to ask
+# "does any other block read this name", where over-approximating costs one
+# harmless default and under-approximating is a parse error in the engine.
+.all_symbols <- function(x) {
+  leaves <- function(v) {
+    if (is.character(v)) return(v)
+    if (is.list(v)) return(unlist(lapply(v, leaves)))
+    character()
+  }
+  toupper(unlist(lapply(unique(leaves(x)), function(t) {
+    e <- tryCatch(str2lang(t), error = function(e) NULL)
+    if (is.null(e)) character() else .collect_symbols(e)
+  })))
+}
+
+# Names a statement list assigns on EVERY path through it (upper-cased).
+.assigned_every_path <- function(sts) {
+  out <- character()
+  for (st in sts) {
+    out <- c(out, if (identical(.stmt_kind(st, "assign"), "if")) {
+      if (length(st$else_) == 0L) character()
+      else intersect(.assigned_every_path(st$then), .assigned_every_path(st$else_))
+    } else toupper(st$lhs))
+  }
+  unique(out)
+}
+
+# ferx-core refuses an [individual_parameters] name that is assigned inside an
+# `if` but not on every path through it, when anything reads it (E_PARSE: it has
+# no value on a record where no branch ran). NM-TRAN's idiom
+#
+#   IF (SEX.EQ.0) TVCL = THETA(1)
+#   IF (SEX.EQ.1) TVCL = THETA(1)*THETA(5)
+#
+# is two else-less `if`s, so it reaches that refusal. The default placed before
+# the `if` is what NONMEM does when no branch runs: 0 for a variable, and the
+# ferx engine defaults for bioavailability (1) and lag (0). `F = 0` would zero
+# the dose on the skipped path.
+#
+# A name is left alone when an earlier statement assigns it on every path, or
+# when nothing reads it. Returns list(stmts, warnings).
+.default_partial_assignments <- function(stmts, external_reads = character()) {
+  warnings <- character()
+  out      <- list()
+  definite <- character()
+  for (i in seq_along(stmts)) {
+    st <- stmts[[i]]
+    if (!identical(.stmt_kind(st, "assign"), "if")) {
+      definite <- c(definite, toupper(st$lhs))
+      out[[length(out) + 1L]] <- st
+      next
+    }
+    declared <- unique(.stmt_declared(list(st), "assign", "assign"))
+    partial  <- declared[!toupper(declared) %in% .assigned_every_path(list(st))]
+    partial  <- partial[!toupper(partial) %in% definite]
+    if (length(partial) > 0L) {
+      elsewhere <- unique(c(external_reads,
+                            if (length(stmts) > 1L) .ip_refs(stmts[-i])))
+      for (nm in partial) {
+        dose <- .is_dose_attr_name(nm)
+        if (!dose && !toupper(nm) %in% elsewhere) next
+        val  <- if (dose && startsWith(toupper(nm), "F")) "1" else "0"
+        out[[length(out) + 1L]] <- list(lhs = nm, rhs = val)
+        definite <- c(definite, toupper(nm))
+        warnings <- c(warnings, if (dose) paste0(
+          "INFO  | ", nm, " is assigned in only some branches of an IF, so ",
+          "`", nm, " = ", val, "` was added before it: ferx refuses a name that ",
+          "is not assigned on every path, and ", val, " is the engine default for ",
+          .dose_attr_kind(nm), ".")
+        else paste0(
+          "WARN  | ", nm, " is assigned in only some branches of an IF, so ",
+          "`", nm, " = 0` was added before it: ferx refuses a name that is not ",
+          "assigned on every path. On a record where no branch applies NONMEM ",
+          "keeps the value from the previous record, which ferx cannot express; ",
+          "if the conditions cover every record the default is never used."))
+      }
+    }
+    definite <- c(definite, .assigned_every_path(list(st)))
+    out[[length(out) + 1L]] <- st
+  }
+  list(stmts = out, warnings = warnings)
 }
