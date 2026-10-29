@@ -339,6 +339,15 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                    theta_orig[toupper(theta_orig) %in% .PK_CANDIDATES &
                               !toupper(theta_orig) %in% toupper(cur_lhs)])
 
+    # The dose attributes this model will emit are individual parameters too, and
+    # a theta labelled `F1` (a common NONMEM label for relative bioavailability)
+    # would shadow the `F1` that carries the dose attribute. The compartment is
+    # not known until the states are final, so every index the model could use is
+    # listed: a theta renamed for an index that ends up unused costs a rename,
+    # and a missed one costs the attribute.
+    cur_lhs <- c(cur_lhs, .dose_attr_candidates(expr_out$dose_attrs,
+                                                max(1L, length(state_raw))))
+
     # A theta referenced from [odes], where thetas are out of scope, needs an
     # individual parameter to carry the value in. The test is whether the theta's
     # CURRENT EMITTED name appears in the emitted ODE text -- not its source name,
@@ -1260,11 +1269,12 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # them. `.infer_pk_macro()` draws pk argument values only from
     # `.PK_CANDIDATES` (CL/V/V1/V2/V3/Q/Q2/Q3/KA), and no name in that set can
     # match the dose-attribute grammar -- so a renamed parameter cannot currently
-    # BE a pk argument. That stops being true the moment translator#16 starts
-    # emitting `f=`/`alag=` arguments, which is the change most likely to reach
-    # this code. obs_scale is reachable only through NONMEM `S1 = <param>`, which
-    # needs a raw control stream rather than a mock UI; the same `.rewrite_syms()`
-    # call is exercised by the [individual_parameters] cross-reference test.
+    # BE a pk argument. `f=`/`alag=` are the exception, taken from a parameter
+    # named F or ALAG. The `f=F1` that .resolve_dose_attrs() binds is added after
+    # this pass and is never rewritten by it. obs_scale is reachable only through
+    # NONMEM `S1 = <param>`, which needs a raw control stream rather than a mock
+    # UI; the same `.rewrite_syms()` call is exercised by the
+    # [individual_parameters] cross-reference test.
     # Statement-aware since phase 5b: a conditional has no `lhs`/`rhs` of its
     # own, and `dose_out$map[[NULL]]` aborts rather than returning nothing --
     # measured, on a model carrying both a $PK conditional and an `F1`. Its
@@ -1302,6 +1312,17 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (is.character(scaling$obs_scale))
       scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, dose_out$map)
   }
+
+  # Dose attributes: rename the aliases the parse registered to the spelling
+  # ferx reads, now that the compartment numbering is final. After the
+  # deconflict pass above on purpose -- that pass renames every USER-written
+  # parameter that happens to look like a dose attribute, so by here the only
+  # `F1` that can exist is one this step makes.
+  da <- .resolve_dose_attrs(expr_out$dose_attrs, expr_out$indiv_params,
+                            structural, state_decl)
+  expr_out$indiv_params <- da$indiv_params
+  structural            <- da$structural
+  warn                  <- c(warn, da$warnings)
 
   # Drop $ERROR scaffolding from [individual_parameters] (issue #6 defect 6).
   #
@@ -1586,6 +1607,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
 # still emits `c.RTOT` verbatim into an unparseable file.
 .unmapped_symbols <- function(lst, name_map) {
   used <- character()
+  states_raw <- .state_raw_names(lst)
   for (expr in lst) {
     if (.is_tilde(expr)) { used <- c(used, .collect_symbols(expr)); next }
     if (!.is_assignment(expr)) next
@@ -1602,6 +1624,18 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     # does not exist. The dropped statement is reported at the skip site
     # instead, where the feature is known.
     lhs <- expr[[2]]
+    # A dose attribute with a literal or covariate right-hand side (nlmixr2
+    # `f(central) <- bio`) IS emitted now, as `F<n> = bio`, so its names count.
+    # Only when the state is one the model declares: a statement naming no state
+    # is dropped, and its right-hand side appears nowhere in the file.
+    if (is.call(lhs) && !.is_ddt_lhs(lhs) && is.symbol(lhs[[2]]) &&
+        .describe_dropped_lhs(lhs)$kind %in% c("f", "alag", "lag", "dur", "rate") &&
+        (length(states_raw) == 0L || as.character(lhs[[2]]) %in% states_raw) &&
+        !(is.symbol(expr[[3]]) &&
+          grepl(.NM2RX_TEMP_RE, as.character(expr[[3]]), ignore.case = TRUE))) {
+      used <- c(used, .collect_symbols(expr[[3]]))
+      next
+    }
     if (!is.symbol(lhs) && !.is_ddt_lhs(lhs)) next
     used <- c(used, .collect_symbols(expr[[3]]))
   }
@@ -2365,10 +2399,140 @@ bound_name <- function(entries, raw) {
       "attribute -- renamed to '", cand, "'. ferx would have read the name as ",
       .dose_attr_kind(old), " and applied it to the dose in addition to the ",
       "use the source model makes of it, with no error and no warning from the ",
-      "engine. If the source really did mean a dose attribute, it is not ",
-      "translated yet -- see translator#16."))
+      "engine. A dose attribute the source declares (NONMEM F1/ALAG1/D1/R1, ",
+      "nlmixr2 f()/alag()/dur()/rate()) is translated separately and is not ",
+      "affected by this rename."))
   }
   list(map = map, warnings = warn)
+}
+
+# The ferx names a model's registered dose attributes could take, for the theta
+# de-shadowing loop. See the call site for why every index is listed.
+.dose_attr_candidates <- function(attrs, n_states) {
+  if (length(attrs) == 0L) return(character())
+  prefixes <- unique(vapply(attrs, function(a) a$prefix, ""))
+  as.vector(outer(prefixes, seq_len(n_states), paste0))
+}
+
+# What a dose attribute is called in a message.
+.dose_attr_what <- function(prefix) {
+  switch(prefix, F = "bioavailability", ALAG = "dose lag time",
+         D = "zero-order infusion duration", R = "zero-order infusion rate",
+         prefix)
+}
+
+# Turn the aliases `.parse_model_exprs()` registered as dose attributes into the
+# individual parameters ferx reads as such, or report the ones that cannot be.
+#
+# ferx binds a dose attribute two opposite ways (measured, ferx-r@9c97c13):
+#
+#   * ODE models bind it by NAME. A parameter called `F{n}` / `ALAG{n}` / `D{n}` /
+#     `R{n}` applies to doses into the n-th entry of `states=[...]`, and nothing
+#     in the `ode(...)` line mentions it.
+#   * Analytical models bind F and lag by ROLE, in the `pk(...)` call
+#     (`f=F1`, `alag=ALAG1`), and only for the one compartment the dose enters.
+#     Per-compartment attributes elsewhere, and a modelled duration or rate, are
+#     ODE-only here.
+#
+# Anything this cannot carry is an ERROR and is dropped, never emitted half-made:
+# it is a translator limit rather than a ferx gap, so it stays out of
+# `$unsupported`.
+.resolve_dose_attrs <- function(attrs, indiv_params, structural, state_decl = list()) {
+  out <- list(indiv_params = indiv_params, structural = structural,
+              warnings = character())
+  if (length(attrs) == 0L) return(out)
+
+  warn     <- character()
+  declared <- toupper(.ip_names(indiv_params))
+  is_ode   <- identical(structural$type, "ode")
+  is_pk    <- identical(structural$type, "pk_macro")
+  map      <- list()
+  drop     <- character()
+  taken    <- character()
+
+  for (alias in names(attrs)) {
+    a   <- attrs[[alias]]
+    src <- paste0(.dose_attr_what(a$prefix), " for compartment '", a$state_raw, "'")
+    fail <- function(why) {
+      warn <<- c(warn, paste0("ERROR | ", src, " could not be carried over: ", why,
+                              " The statement was dropped, so the fitted model ",
+                              "will not include it."))
+      drop <<- c(drop, toupper(alias))
+    }
+    if (!toupper(alias) %in% declared) {
+      fail(paste0("the value it takes did not reach [individual_parameters] ",
+                  "(it depends on a compartment amount, or nothing defines it)."))
+      next
+    }
+
+    state <- if (a$state_raw %in% names(state_decl)) state_decl[[a$state_raw]]
+             else a$state_raw
+    key <- NULL
+    if (is_ode) {
+      n <- .cmt_index(state, structural$states)
+      if (is.na(n)) {
+        fail("the compartment is not a state of the translated ODE model.")
+        next
+      }
+    } else if (is_pk) {
+      key <- switch(a$prefix, F = "f", ALAG = "alag", NULL)
+      dose_cmt <- if (grepl("oral$", structural$pk_call)) "depot" else "central"
+      if (is.null(key)) {
+        fail(paste0("ferx takes a modelled duration or rate only on ODE ",
+                    "models."))
+        next
+      }
+      if (!identical(tolower(state), dose_cmt)) {
+        fail(paste0("an analytical ferx model applies it to the dose ",
+                    "compartment ('", dose_cmt, "') only."))
+        next
+      }
+      if (!is.null(structural$pk_args[[key]])) {
+        fail(paste0("the pk call already binds '", key, "' to '",
+                    structural$pk_args[[key]], "'."))
+        next
+      }
+      n <- 1L
+    } else {
+      fail("the model has no structural model it could attach to.")
+      next
+    }
+
+    final <- paste0(a$prefix, n)
+    if (toupper(final) %in% taken) {
+      fail(paste0("another statement already takes the name '", final, "'."))
+      next
+    }
+    taken <- c(taken, toupper(final))
+    map[[toupper(alias)]] <- final
+    if (!is.null(key)) structural$pk_args[[key]] <- final
+    warn <- c(warn, paste0(
+      "INFO  | ", src, " emitted as individual parameter '", final, "'",
+      if (!is.null(key)) paste0(" bound as '", key, "=' in the pk call") else "",
+      if (a$prefix %in% c("D", "R")) paste0(
+        "; ferx consults it only for doses with RATE=",
+        if (a$prefix == "D") "-2" else "-1", " in the dataset") else "",
+      "."))
+  }
+
+  walk <- function(sts) {
+    res <- list()
+    for (p in sts) {
+      if (identical(.stmt_kind(p, "assign"), "if")) {
+        p$then <- walk(p$then)
+        if (length(p$else_) > 0) p$else_ <- walk(p$else_)
+        if (length(p$then) == 0L && length(p$else_) == 0L) next
+      } else if (toupper(p$lhs) %in% drop) {
+        next
+      } else if (!is.null(map[[toupper(p$lhs)]])) {
+        p$lhs <- map[[toupper(p$lhs)]]
+      }
+      res <- c(res, list(p))
+    }
+    res
+  }
+  list(indiv_params = walk(indiv_params), structural = structural,
+       warnings = warn)
 }
 
 # Rewrite an emitted expression STRING through a rename map, via the parse tree
@@ -2895,6 +3059,10 @@ bound_name <- function(entries, raw) {
   # Propagated forward; used in pass 2 to classify auxiliaries.
   init_conds <- list()
   conditionals <- list()
+  # Dose attributes (`f(STATE) <- alias`, `alag(...)`, `dur(...)`, `rate(...)`)
+  # keyed by the normalised name of the alias that carries the value. Each entry
+  # is list(prefix, state_raw); see register_dose_attr().
+  dose_attrs <- list()
   aux_vars <- toupper(sigma_names)  # eps1, eps2, ...
 
   # Source position, stamped on every record this pass produces.
@@ -2924,6 +3092,52 @@ bound_name <- function(entries, raw) {
   # rebinds names mid-parse), but re-normalising against the map as it stood AT
   # CAPTURE is exact, and it is what lets the partition apply `state_ode_pins`
   # only to the statements that actually land in [odes].
+  # -- dose attributes ---------------------------------------------------------
+  #
+  # `f(depot) <- rxf.rxddta1.` (NONMEM `F1 = ...`), `alag()`, `dur()` and
+  # `rate()` are real modelling features that ferx expresses as an individual
+  # parameter whose NAME carries the compartment (`F1`, `ALAG1`, `D2`, `R2`). The
+  # value is already an ordinary assignment to the alias, so what this records is
+  # only which alias means what; rxui_to_ir() renames it once the compartment
+  # numbering is final. Returns TRUE when the statement was taken over, FALSE
+  # when the caller should report it as dropped (an unrecognised target, an
+  # alias nothing binds, or one alias shared by two attributes).
+  #
+  # A right-hand side that is not an nonmem2rx alias (nlmixr2 `f(central) <-
+  # bio`) gets a synthetic alias bound to it, so both sources reach the same
+  # rename. That is refused inside a conditional arm, where the synthetic binding
+  # would have to be conditional too.
+  register_dose_attr <- function(lhs_expr, rhs_expr, d, in_arm = FALSE) {
+    prefix <- c(f = "F", alag = "ALAG", lag = "ALAG", dur = "D", rate = "R")[d$kind]
+    if (is.na(prefix) || !is.call(lhs_expr) || !is.symbol(lhs_expr[[2]]))
+      return(FALSE)
+    state_raw <- as.character(lhs_expr[[2]])
+    is_alias  <- is.symbol(rhs_expr) &&
+                 grepl(.NM2RX_TEMP_RE, as.character(rhs_expr), ignore.case = TRUE)
+    if (is_alias) {
+      nb <- .resolve_alias(rhs_expr, lst)$n_bindings
+      if (is.na(nb) || nb == 0L) return(FALSE)
+      alias <- .norm(as.character(rhs_expr))
+    } else {
+      if (in_arm) return(FALSE)
+      alias   <- paste0("RXDOSEATTR", pos, "_")
+      rhs_map <- name_map
+      rhs_n   <- .normalise_expr(rhs_expr, rhs_map)
+      all_assigns <<- c(all_assigns,
+                        list(list(lhs = alias,
+                                  rhs = paste(deparse(rhs_n, width.cutoff = 500L),
+                                              collapse = " "),
+                                  rhs_expr = rhs_expr, rhs_expr_norm = rhs_n,
+                                  pos = pos)))
+    }
+    prev <- dose_attrs[[alias]]
+    if (!is.null(prev))
+      return(identical(prev$prefix, unname(prefix)) &&
+             identical(prev$state_raw, state_raw))
+    dose_attrs[[alias]] <<- list(prefix = unname(prefix), state_raw = state_raw)
+    TRUE
+  }
+
   capture_arm <- function(b) {
     if (is.null(b)) return(NULL)
     stmts <- if (is.call(b) && identical(as.character(b[[1]])[1L], "{"))
@@ -2934,6 +3148,12 @@ bound_name <- function(entries, raw) {
         out <- c(out, list(capture_if(st)))
         next
       }
+      # The repeated `f(STATE) <- alias` nonmem2rx writes inside a conditional
+      # is the same attribute the top level already declared.
+      if (.is_assignment(st) && is.call(st[[2]]) &&
+          register_dose_attr(st[[2]], st[[3]],
+                             .describe_dropped_lhs(st[[2]]), in_arm = TRUE))
+        next
       # Only a plain assignment is translatable inside a branch. Anything else
       # is reported rather than dropped -- silently discarding it is how the
       # whole `if` used to disappear.
@@ -3085,6 +3305,9 @@ bound_name <- function(entries, raw) {
           warnings <- c(warnings, paste0(
             "INFO  | ", d$what, " (", d$src, " = ", shown, ") sets the value ferx ",
             "already uses, so dropping it does not change the model."))
+        } else if (register_dose_attr(lhs_expr, expr[[3]], d)) {
+          # Carried over: the alias's own assignment reaches
+          # [individual_parameters] and is renamed in rxui_to_ir().
         } else {
           # NOT "ferx has no equivalent" -- ferx supports all four; see
           # .describe_dropped_lhs() for how each is actually expressed. This is
@@ -3361,7 +3584,8 @@ bound_name <- function(entries, raw) {
 
     # SCALE* vars are NONMEM-specific scaling intermediates.
     # RXINI* / RXF_* / RXM_* are nonmem2rx internal temporaries and IOV aliases.
-    if (grepl("^SCALE\\d*$", a$lhs) || grepl(.NM2RX_TEMP_NORM_RE, a$lhs)) next
+    if (grepl("^SCALE\\d*$", a$lhs) ||
+        (grepl(.NM2RX_TEMP_NORM_RE, a$lhs) && !a$lhs %in% names(dose_attrs))) next
 
     if (a$lhs %in% aux_vars) {
       # Check if this is the error model assignment (RHS contains sigma vars).
@@ -3448,6 +3672,7 @@ bound_name <- function(entries, raw) {
     odes         = odes,
     conditionals = conditionals,
     init_conds   = init_conds,
+    dose_attrs   = dose_attrs,
     error_model  = error_model,
     error_suggestion = error_suggestion,
     readout      = readout,

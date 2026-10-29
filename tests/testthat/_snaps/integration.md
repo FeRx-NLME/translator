@@ -32,6 +32,86 @@
         maxiter = 500
         covariance = true
 
+# ODE F1/ALAG1: emitted as dose-attribute parameters, snapshot
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: ode_dose_attr.ctl
+      
+      [parameters]
+        theta THETA1(1.0, 0.0, 1e15)
+        theta THETA2(2.0, 0.0, 1e15)
+        theta THETA3(10.0, 0.0, 1e15)
+        theta THETA4(0.6, 0.0, 1.0)
+        theta THETA5(0.5, 0.0, 1e15)
+      
+        omega ETA1 ~ 0.1
+      
+        sigma EPS1 ~ 0.2 (sd)
+      
+      [individual_parameters]
+        KA = THETA1 * exp(ETA1)
+        CL = THETA2
+        V = THETA3
+        K20 = CL/V
+        F1 = THETA4
+        ALAG1 = THETA5
+      
+      [structural_model]
+        ode(obs_cmt=CENTRAL, states=[ABS, CENTRAL])
+      
+      [odes]
+        d/dt(ABS) = -KA * ABS
+        d/dt(CENTRAL) = KA * ABS - K20 * CENTRAL
+      
+      [error_model]
+        DV ~ proportional(EPS1)
+      
+      [scaling]
+        obs_scale = V
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+
+# analytical F1/ALAG1: bound by role in the pk macro, snapshot
+
+    Code
+      cat(norm_snap(result$ferx_text))
+    Output
+      # Translated from nonmem: adv2_dose_attr.ctl
+      
+      [parameters]
+        theta THETA1(1.0, 0.0, 1e15)
+        theta THETA2(2.0, 0.0, 1e15)
+        theta THETA3(10.0, 0.0, 1e15)
+        theta THETA4(0.6, 0.0, 1.0)
+        theta THETA5(0.5, 0.0, 1e15)
+      
+        omega ETA1 ~ 0.1
+      
+        sigma EPS1 ~ 0.2 (sd)
+      
+      [individual_parameters]
+        KA = THETA1 * exp(ETA1)
+        CL = THETA2
+        V = THETA3
+        F1 = THETA4
+        ALAG1 = THETA5
+      
+      [structural_model]
+        pk one_cpt_oral(cl=CL, v=V, ka=KA, f=F1, alag=ALAG1)
+      
+      [error_model]
+        DV ~ proportional(EPS1)
+      
+      [fit_options]
+        method = focei
+        maxiter = 500
+        covariance = true
+
 # 2-cpt oral with covariates: snapshot + no unsupported
 
     Code

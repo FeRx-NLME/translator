@@ -1881,25 +1881,56 @@ test_that(".same_cmt_name sees through nonmem2rx's c. prefix and case", {
 
 # -- statements with a call-shaped assignment target --------------------------
 
-test_that("a dropped f()/alag() statement is reported, not silently discarded", {
+test_that("f()/alag() on an ODE state become F{n}/ALAG{n} individual parameters", {
   ini <- rbind(theta_row("t.TCL", 1), theta_row("t.TV", 10), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(v <- t.TV),
-              quote(f(depot) <- BIO.AV), quote(alag(depot) <- 0.5),
+              quote(f(depot) <- 0.6), quote(alag(depot) <- 0.5),
               quote(d/dt(depot) <- -cl * depot),
               quote(d/dt(central) <- cl * depot - cl/v * central))
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
-  expect_match(ir$warnings, "bioavailability for compartment 'depot'", all = FALSE)
-  expect_match(ir$warnings, "dose lag time for compartment 'depot'",   all = FALSE)
+  rhs <- function(nm) vapply(Filter(function(p) identical(p$lhs, nm),
+                                    ir$indiv_params), function(p) p$rhs, "")
+  expect_equal(rhs("F1"), "0.6")
+  expect_equal(rhs("ALAG1"), "0.5")
+  expect_length(grep("F1|ALAG|dose|bioavail|lag", ir$unsupported), 0L)
+  expect_match(ir$warnings, "bioavailability for compartment 'depot' emitted as individual parameter 'F1'",
+               all = FALSE)
+  expect_match(ir$warnings, "dose lag time for compartment 'depot' emitted as individual parameter 'ALAG1'",
+               all = FALSE)
 })
 
-test_that("a feature ferx supports is NOT filed as a ferx-core gap", {
-  # ferx-core maps F{cmt} -> `f=`, ALAG{cmt} -> `lagtime=` and D/R -> duration
-  # and rate, and ferx-r ships bioavailability.ferx and warfarin_ode_lagtime.ferx
-  # as worked examples. So the translator not emitting these is a ferxtranslate
-  # limitation, and $unsupported -- which CLAUDE.md defines as the ferx-core
-  # prioritisation signal -- must stay empty for them. Filing them there asked
-  # the engine team to build what they had already shipped.
+test_that("the dose attribute index follows the order of the states", {
+  # ferx binds F{n} by the 1-based position in `states=[...]`, so a dose into
+  # the second state must be F2, not F1.
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)),
+              quote(f(central) <- 0.6),
+              quote(d/dt(depot) <- -cl * depot),
+              quote(d/dt(central) <- cl * depot - cl * central))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true("F2" %in% lhs)
+  expect_false("F1" %in% lhs)
+})
+
+test_that("a dose attribute naming no state is dropped with an ERROR, not a gap", {
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(ghost) <- 0.7),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_false(any(grepl("^F[0-9]*$", lhs)))
+  expect_match(ir$warnings, "ERROR.*could not be carried over", all = FALSE)
+  expect_length(ir$unsupported, 0L)
+})
+
+test_that("a dose attribute is emitted, not filed as a ferx-core gap", {
+  # ferx-core maps F{cmt}, ALAG{cmt}, D{cmt} and R{cmt} by name, so these are
+  # translated and $unsupported -- the ferx-core prioritisation signal -- stays
+  # empty for them.
   ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- 0.7),
               quote(alag(depot) <- 0.5), quote(dur(depot) <- 2),
@@ -1907,8 +1938,9 @@ test_that("a feature ferx supports is NOT filed as a ferx-core gap", {
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
   expect_length(ir$unsupported, 0L)
-  # ... but the user is still told, at ERROR level, that it was dropped.
-  expect_match(ir$warnings, "supported by ferx but is not yet emitted", all = FALSE)
+  lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
+  expect_true(all(c("F1", "ALAG1", "D1") %in% lhs))
+  expect_length(grep("not yet emitted", ir$warnings), 0L)
 })
 
 test_that("a state initial condition is translated, not reported as a gap", {
@@ -2053,11 +2085,10 @@ test_that("an initial condition of 0 is a no-op, not a dropped feature", {
                all = FALSE)
 })
 
-test_that("an alias bound twice is not read as a constant", {
+test_that("a conditional override of a dose attribute is kept as an if", {
   # The relative-bioavailability idiom `F1 = 1` / `IF (FORM.EQ.2) F1 = THETA(4)`.
-  # Taking the FIRST binding made const(1) true, so the translator said "sets
-  # the value ferx already uses, so dropping it does not change the model" --
-  # asserting nothing was lost while the formulation-dependent F disappeared.
+  # Taking the FIRST binding made it a constant 1 and the formulation-dependent
+  # F disappeared; both arms must reach F1.
   ini <- rbind(theta_row("t.TCL", 1), theta_row("t.T4", 0.7), eta_row("eta1", 0.09, 1L))
   lst <- list(quote(cl <- t.TCL * exp(eta1)),
               quote(rxf.rxddta1. <- 1),
@@ -2067,7 +2098,23 @@ test_that("an alias bound twice is not read as a constant", {
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
   expect_length(grep("does not change the model", ir$warnings), 0L)
-  expect_match(ir$warnings, "binds it more than once", all = FALSE)
+  expect_length(ir$unsupported, 0L)
+  txt <- emit_ferx(ir)
+  expect_match(txt, "F1 = 1", fixed = TRUE)
+  expect_match(txt, "if \\(FORM == 2\\) \\{ F1 = ")
+  expect_false(grepl("RXF", txt))
+})
+
+test_that("an alias shared by two dose attributes is reported, not guessed", {
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)),
+              quote(rxf.rxddta1. <- 0.5),
+              quote(f(depot) <- rxf.rxddta1.),
+              quote(alag(depot) <- rxf.rxddta1.),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_match(ir$warnings, "ERROR", all = FALSE)
 })
 
 test_that("a nonmem2rx alias temporary never reaches [individual_parameters]", {
@@ -2083,20 +2130,30 @@ test_that("a nonmem2rx alias temporary never reaches [individual_parameters]", {
                                     source_format = "nonmem"))
   lhs <- vapply(ir$indiv_params, function(p) p$lhs, "")
   expect_length(grep("^RX", lhs), 0L)
+  expect_true(all(c("D1", "ALAG1") %in% lhs))
 })
 
 test_that("a name only reachable through a dropped statement is not a covariate", {
-  # BIO.AV appears solely on the RHS of `f(depot) <- BIO.AV`, which is never
-  # emitted. Reporting it as an illegal covariate prescribed renaming a data
+  # BIO.AV appears solely on the RHS of `f(ghost) <- BIO.AV`, which names no
+  # state and is never emitted. Reporting it as an illegal covariate prescribed renaming a data
   # column that fixes nothing, and put a phantom entry in $unsupported -- which
   # per CLAUDE.md is the ferx-core prioritisation signal.
   ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
-  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- BIO.AV),
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(ghost) <- BIO.AV),
               quote(d/dt(depot) <- -cl * depot))
   ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
                                     source_format = "nonmem"))
   expect_length(grep("covariate reference", ir$warnings), 0L)
   expect_length(grep("BIO.AV", ir$unsupported, fixed = TRUE), 0L)
+})
+
+test_that("a covariate on a dose attribute that IS emitted is checked", {
+  ini <- rbind(theta_row("t.TCL", 1), eta_row("eta1", 0.09, 1L))
+  lst <- list(quote(cl <- t.TCL * exp(eta1)), quote(f(depot) <- BIO.AV),
+              quote(d/dt(depot) <- -cl * depot))
+  ir <- suppressWarnings(rxui_to_ir(list(iniDf = ini, lstExpr = lst),
+                                    source_format = "nonmem"))
+  expect_match(ir$warnings, "covariate reference", all = FALSE)
 })
 
 test_that("a genuinely illegal covariate is still reported", {

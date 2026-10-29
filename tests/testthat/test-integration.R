@@ -25,6 +25,28 @@ test_that("1-cpt oral NONMEM: snapshot + no unsupported", {
   expect_match(result$ferx_text, "one_cpt_oral", fixed = TRUE)
 })
 
+test_that("ODE F1/ALAG1: emitted as dose-attribute parameters, snapshot", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("ode_dose_attr.ctl")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  expect_match(result$ferx_text, "F1 = ",    fixed = TRUE)
+  expect_match(result$ferx_text, "ALAG1 = ", fixed = TRUE)
+  # The theta that carries the value must not be called F1 / ALAG1, or it would
+  # shadow the individual parameter ferx binds as the dose attribute.
+  expect_no_match(result$ferx_text, "theta F1\\(")
+  expect_no_match(result$ferx_text, "theta ALAG1\\(")
+})
+
+test_that("analytical F1/ALAG1: bound by role in the pk macro, snapshot", {
+  skip_if_not_installed("nonmem2rx")
+  result <- suppressWarnings(nm_to_ferx(nm_path("adv2_dose_attr.ctl")))
+  expect_snapshot(cat(norm_snap(result$ferx_text)))
+  expect_length(result$unsupported, 0L)
+  expect_match(result$ferx_text, "f=F1",       fixed = TRUE)
+  expect_match(result$ferx_text, "alag=ALAG1", fixed = TRUE)
+})
+
 test_that("2-cpt oral with covariates: snapshot + no unsupported", {
   skip_if_not_installed("nonmem2rx")
   result <- suppressWarnings(nm_to_ferx(nm_path("2cpt_oral_cov.ctl")))
