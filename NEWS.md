@@ -2,6 +2,32 @@
 
 ## Bug fixes
 
+* A dose row whose `CMT` cell is `0`, `.` or empty is now reported when the
+  dataset can be read (issue #35). NONMEM sends such a dose to the `$MODEL`
+  DEFDOSE compartment; ferx has no model-side dose compartment and doses
+  compartment 1, so a model whose DEFDOSE is elsewhere dosed the wrong
+  compartment from a dataset that looked fully specified, with a `CMT` column
+  right there. This is the per-row half of the DEFDOSE guard (issue #27), which
+  only saw `$INPUT`. `to_ferx()` reads the `AMT`, `CMT` and (if present) `EVID`
+  columns of the `$DATA` file and, for an ODE model whose DEFDOSE compartment is
+  not the one ferx puts first, adds an ERROR-level warning naming how many dose
+  rows and the first few row numbers, a `# WARNING:` note above `ode(...)` and a
+  `result$unsupported` entry. An unreadable dataset stays silent. New argument
+  `default_dose_rows` on `rxui_to_ir()`.
+
+* A `$INPUT` `CMT` item over a dataset whose header does not name that column
+  `CMT` is now reported (issue #36). NONMEM binds columns by `$INPUT` position;
+  ferx binds them by CSV header name and never reads `$INPUT`. With
+  `$INPUT ... COMPT=CMT` over a header `COMPT`, NONMEM dosed the compartment the
+  column held while ferx found no `CMT` column and dosed compartment 1 -- and the
+  existing DEFDOSE guard (issue #27) stayed quiet because `$INPUT` does have a
+  `CMT` item. `to_ferx()` now reads the first line of the `$DATA` file (the
+  header only, never a row) and, for an ODE model with more than one state,
+  adds an ERROR-level warning, a `# WARNING:` note above `ode(...)` and a
+  `result$unsupported` entry. An unreadable or headerless dataset stays silent,
+  as before, since the check is only as good as what it can see. New argument
+  `cmt_header` on `rxui_to_ir()`.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

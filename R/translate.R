@@ -89,9 +89,12 @@ to_ferx <- function(source,
   # $MODEL's DEFDOSE compartment and ferx doses compartment 1, and nothing in
   # the emitted file can say which was meant -- see .nm_input_has_cmt().
   has_cmt_col  <- if (read_ctl) .nm_input_has_cmt(source) else NA
+  cmt_header   <- if (read_ctl) .nm_data_has_cmt_header(source) else NA
+  default_dose_rows <- if (read_ctl) .nm_data_default_dose_rows(source) else NULL
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
-                   has_cmt_col = has_cmt_col)
+                   has_cmt_col = has_cmt_col, cmt_header = cmt_header,
+                   default_dose_rows = default_dose_rows)
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {

@@ -3770,3 +3770,118 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
   expect_length(diag_only$warnings, 0L)
   expect_length(diag_only$unsupported, 0L)
 })
+
+# -- dataset header: does ferx find the CMT column? (issue #36) ---------------
+
+test_that(".nm_data_has_cmt_header reads the header only, the way ferx binds", {
+  d <- tempfile(); dir.create(d)
+  mk <- function(first_line, data_name = "d.csv", write = TRUE) {
+    ctl <- file.path(d, "m.ctl")
+    writeLines(c("$PROBLEM x", "$INPUT ID TIME AMT DV CMT",
+                 paste("$DATA", data_name, "IGNORE=@")), ctl)
+    if (write) writeLines(c(first_line, "1,0,100,0,2"), file.path(d, data_name))
+    ctl
+  }
+  expect_true(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,CMT")))
+  # ferx matches the header name case-insensitively.
+  expect_true(.nm_data_has_cmt_header(mk("id,time,amt,dv,cmt")))
+  # A quoted, padded header still names the column.
+  expect_true(.nm_data_has_cmt_header(mk('"ID", "TIME","AMT","DV", "CMT"')))
+  # A UTF-8 byte-order mark must not hide the first column or break the match.
+  expect_true(.nm_data_has_cmt_header(mk("\ufeffCMT,ID,TIME,AMT,DV")))
+  # The case that matters: $INPUT says CMT, the header says something else.
+  expect_false(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,COMPT")))
+  # A name that merely contains CMT is not the column.
+  expect_false(.nm_data_has_cmt_header(mk("ID,TIME,AMT,DV,CMTX")))
+  # Unknown, never FALSE: no dataset, a headerless file, an empty file.
+  expect_true(is.na(.nm_data_has_cmt_header(mk("", data_name = "absent.csv", write = FALSE))))
+  expect_true(is.na(.nm_data_has_cmt_header(mk("1,0,100,0,2"))))
+  expect_true(is.na(.nm_data_has_cmt_header(mk(""))))
+  # No $DATA record at all.
+  ctl <- file.path(d, "nodata.ctl")
+  writeLines(c("$PROBLEM x", "$INPUT ID TIME AMT DV CMT"), ctl)
+  expect_true(is.na(.nm_data_has_cmt_header(ctl)))
+})
+
+test_that("a CMT item over a header that does not name CMT is reported", {
+  skip_if_not_installed("nonmem2rx")
+  p  <- nm_path("defdose_cmt_present.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  mk <- function(has_cmt, hdr) suppressWarnings(rxui_to_ir(
+    ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+    obs_hint = .extract_nm_defobs(p), has_cmt_col = has_cmt, cmt_header = hdr))
+  fires <- function(ir) any(grepl("CMT column not bound", ir$unsupported))
+
+  # The sync table from the issue, every row.
+  expect_true(fires(mk(TRUE,  FALSE)))   # NONMEM: column.  ferx: compartment 1.
+  expect_false(fires(mk(TRUE,  TRUE)))   # both read the column.
+  expect_false(fires(mk(TRUE,  NA)))     # dataset unreadable: stay silent.
+  expect_false(fires(mk(FALSE, FALSE)))  # no item: the DEFDOSE guard's case.
+  expect_false(fires(mk(NA,    FALSE)))  # $INPUT unreadable: stay silent.
+
+  ir <- mk(TRUE, FALSE)
+  expect_true(any(grepl("^ERROR.*header has no column named CMT", ir$warnings)))
+  expect_match(ir$structural$note, "does not name CMT", fixed = TRUE)
+  # It is the DEFDOSE guard's twin, not the same finding.
+  expect_false(any(grepl("DEFDOSE", ir$unsupported)))
+
+})
+
+# -- dose rows whose CMT cell NONMEM sends to DEFDOSE (issue #35) -------------
+
+test_that(".nm_data_default_dose_rows finds dose rows with CMT 0, '.' or empty", {
+  d <- tempfile(); dir.create(d)
+  mk <- function(lines, data_name = "d.csv") {
+    ctl <- file.path(d, "m.ctl")
+    writeLines(c("$PROBLEM x", "$INPUT ID TIME AMT DV CMT",
+                 paste("$DATA", data_name, "IGNORE=@")), ctl)
+    if (!is.null(lines)) writeLines(lines, file.path(d, data_name))
+    ctl
+  }
+  hdr <- "ID,TIME,AMT,DV,CMT"
+  # Dose rows are rows 1, 3 and 5; row 2 and 4 are observations.
+  expect_equal(.nm_data_default_dose_rows(mk(c(hdr,
+    "1,0,100,0,0", "1,1,0,5,2", "2,0,100,0,.", "2,1,0,5,0", "3,0,100,0,"))),
+    c(1L, 3L, 5L))
+  # Observation rows with CMT 0 are NOT dose rows.
+  expect_equal(.nm_data_default_dose_rows(mk(c(hdr, "1,0,100,0,2", "1,1,0,5,0"))),
+               integer(0))
+  # Every dose row names a compartment.
+  expect_equal(.nm_data_default_dose_rows(mk(c(hdr, "1,0,100,0,2", "1,1,0,5,2"))),
+               integer(0))
+  # 0.0 and padded cells are still CMT 0.
+  expect_equal(.nm_data_default_dose_rows(mk(c(hdr, "1,0,100,0, 0.0 "))), 1L)
+  # With an EVID column the dose rows are EVID 1/4, AMT is not consulted.
+  expect_equal(.nm_data_default_dose_rows(mk(c("ID,TIME,AMT,DV,EVID,CMT",
+    "1,0,0,0,1,0", "1,1,50,0,0,0", "1,2,0,0,4,."))), c(1L, 3L))
+  # Unknown, not "none": no file, no CMT column, no AMT column.
+  expect_null(.nm_data_default_dose_rows(mk(NULL, "absent.csv")))
+  expect_null(.nm_data_default_dose_rows(mk(c("ID,TIME,AMT,DV", "1,0,100,0"))))
+  expect_null(.nm_data_default_dose_rows(mk(c("ID,TIME,DV,CMT", "1,0,0,0"))))
+})
+
+test_that("dose rows routed to DEFDOSE by NONMEM are reported when the data is read", {
+  skip_if_not_installed("nonmem2rx")
+  p  <- nm_path("cmt_explicit_dose.ctl")
+  ui <- nonmem2rx::nonmem2rx(p)
+  mk <- function(rows, obs = .extract_nm_defobs(p), has_cmt = TRUE, hdr = TRUE)
+    suppressWarnings(rxui_to_ir(
+      ui, source_format = "nonmem", scaling_hint = .extract_nm_scaling(p),
+      obs_hint = obs, has_cmt_col = has_cmt, cmt_header = hdr,
+      default_dose_rows = rows))
+  fires <- function(ir) any(grepl("CMT 0/./empty", ir$unsupported))
+
+  expect_true(fires(mk(c(4L, 9L))))
+  ir <- mk(c(4L, 9L, 11L, 12L, 15L))
+  expect_true(any(grepl("^ERROR.*5 dose row.*data row 4, 9, 11, \\.\\.\\.", ir$warnings)))
+  expect_match(ir$structural$note, "5 dose row(s)", fixed = TRUE)
+
+  expect_false(fires(mk(integer(0))))   # read, none found
+  expect_false(fires(mk(NULL)))         # unreadable: silent
+  # DEFDOSE on the compartment ferx puts first: the two rules agree.
+  h <- .extract_nm_defobs(p); h$defdose <- 1L; h$comps <- rev(h$comps)
+  expect_false(fires(mk(4L, obs = h)))
+  # No CMT column / not bound by header: other findings, not this one.
+  expect_false(fires(mk(4L, has_cmt = FALSE)))
+  expect_false(fires(mk(4L, hdr = FALSE)))
+})

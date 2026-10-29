@@ -751,3 +751,48 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+test_that("ferx really ignores a CMT column its header does not name CMT (#36)", {
+  # The premise of the guard, measured: the same model text on the same rows,
+  # differing only in the header of the CMT column. If binding ever became
+  # positional the two OFVs would coincide and the warning would be crying wolf.
+  txt <- .eval_only(suppressWarnings(
+    nm_to_ferx(nm_path("cmt_header_match.ctl"), validate = FALSE))$ferx_text)
+  d   <- tempfile(); dir.create(d)
+  rows <- do.call(rbind, lapply(1:6, function(i) rbind(
+    data.frame(ID = i, TIME = 0, AMT = 100, EVID = 1L, MDV = 1L, CMT = 2L, DV = 0),
+    data.frame(ID = i, TIME = c(0.5, 2, 8, 24), AMT = 0, EVID = 0L, MDV = 0L,
+               CMT = 2L, DV = c(9.5, 8.2, 4.5, 0.9)))))
+  named <- file.path(d, "named.csv")
+  other <- file.path(d, "other.csv")
+  write.csv(rows, named, row.names = FALSE, quote = FALSE)
+  names(rows)[names(rows) == "CMT"] <- "COMPT"
+  write.csv(rows, other, row.names = FALSE, quote = FALSE)
+
+  a <- .pred_of(txt, named)
+  b <- .pred_of(txt, other)
+  expect_false(isTRUE(all.equal(a$pred, b$pred, tolerance = 1e-6)))
+})
+
+test_that("ferx doses compartment 1 for a CMT-0 or '.' dose row (#35)", {
+  # The premise of the guard, measured: the same rows, differing only in the CMT
+  # cell of the dose row. NONMEM would send 0 and '.' to DEFDOSE (compartment 2
+  # here); if ferx ever did the same, 0 and 2 would coincide.
+  txt <- .eval_only(suppressWarnings(
+    nm_to_ferx(nm_path("cmt_explicit_dose.ctl"), validate = FALSE))$ferx_text)
+  d <- tempfile(); dir.create(d)
+  data_with <- function(dose_cmt) {
+    rows <- do.call(rbind, lapply(1:6, function(i) rbind(
+      data.frame(ID = i, TIME = 0, AMT = 100, EVID = 1L, MDV = 1L, CMT = dose_cmt, DV = 0),
+      data.frame(ID = i, TIME = c(0.5, 2, 8, 24), AMT = 0, EVID = 0L, MDV = 0L,
+                 CMT = "2", DV = c(9.5, 8.2, 4.5, 0.9)))))
+    f <- tempfile(tmpdir = d, fileext = ".csv")
+    write.csv(rows, f, row.names = FALSE, quote = FALSE)
+    f
+  }
+  two  <- .pred_of(txt, data_with("2"))
+  zero <- .pred_of(txt, data_with("0"))
+  dot  <- .pred_of(txt, data_with("."))
+  expect_false(isTRUE(all.equal(two$pred, zero$pred, tolerance = 1e-6)))
+  expect_equal(zero$pred, dot$pred, tolerance = 1e-9)
+})

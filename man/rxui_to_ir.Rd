@@ -10,7 +10,9 @@ rxui_to_ir(
   source_file = NA_character_,
   scaling_hint = list(),
   obs_hint = NULL,
-  has_cmt_col = NA
+  has_cmt_col = NA,
+  cmt_header = NA,
+  default_dose_rows = NULL
 )
 }
 \arguments{
@@ -39,6 +41,21 @@ emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
 route doses differently; \code{NA} means unknown and reports nothing. The
 comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
 two agree only while the state list could be put in \verb{$MODEL} COMP order.}
+
+\item{cmt_header}{\code{TRUE}, \code{FALSE} or \code{NA} -- whether the CSV header of the
+dataset \verb{$DATA} names a column \code{CMT} (case-insensitive, which is how ferx
+binds it), as returned by \code{.nm_data_has_cmt_header()}. \code{NA} means the
+dataset could not be read and reports nothing. \code{FALSE} together with
+\code{has_cmt_col = TRUE} is the combination where NONMEM reads a CMT item that
+ferx never finds, so ferx doses compartment 1 whatever the item holds.}
+
+\item{default_dose_rows}{Integer vector of the dataset rows (1-based, header
+excluded) that are dose records whose \code{CMT} cell is \code{0}, \code{.} or empty, as
+returned by \code{.nm_data_default_dose_rows()}; \code{integer(0)} when the dataset
+was read and has none, \code{NULL} (the default) when it could not be read.
+NONMEM sends such a dose to the \verb{$MODEL} DEFDOSE compartment and ferx to
+compartment 1, so a non-empty vector with a DEFDOSE compartment that is not
+the one ferx puts first is reported.}
 }
 \value{
 A \code{ferx_ir} object.
