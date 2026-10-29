@@ -751,3 +751,66 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
 })
+
+# ===========================================================================
+# Dose attributes (F1 / ALAG1): the engine applies them exactly once
+# ===========================================================================
+#
+# A fixture with F1 = 1 cannot show bioavailability being dropped, so the
+# initial is 0.6. The control is the same model with F1 = 1 and the dose AMT
+# scaled by 0.6: equal predictions mean the engine applied F once (not twice,
+# not zero times); the unscaled F1 = 1 run is the wrong-code control.
+
+.dose_attr_data <- function(amt = 100) {
+  d <- do.call(rbind, lapply(1:6, function(i) rbind(
+    data.frame(ID = i, TIME = 0, DV = 0, EVID = 1L, AMT = amt, CMT = 1L, MDV = 1L),
+    data.frame(ID = i, TIME = c(0.25, 0.5, 1, 2, 4, 8, 16), DV = 1, EVID = 0L,
+               AMT = 0, CMT = 2L, MDV = 0L))))
+  f <- tempfile(fileext = ".csv")
+  utils::write.csv(d, f, row.names = FALSE, quote = FALSE)
+  f
+}
+
+for (.m in c("ode_dose_attr.ctl", "adv2_dose_attr.ctl")) local({
+  model <- .m
+  test_that(paste0("F1 and ALAG1 reach the engine and act once: ", model), {
+    txt <- .eval_only(suppressWarnings(
+      nm_to_ferx(system.file(file.path("testmodels/nonmem", model),
+                             package = "ferxtranslate")))$ferx_text)
+    v <- ferx_model_validate(.write_tmp(txt), data = .dose_attr_data())
+    expect_true(isTRUE(v$ok))
+
+    base <- .pred_of(txt, .dose_attr_data())$pred
+    no_f <- sub("F1 = [A-Za-z0-9_.]+", "F1 = 1", txt)
+    expect_false(identical(no_f, txt))
+    f_in_dose <- .pred_of(no_f, .dose_attr_data(amt = 60))$pred
+    f_ignored <- .pred_of(no_f, .dose_attr_data())$pred
+    no_lag <- sub("ALAG1 = [A-Za-z0-9_.]+", "ALAG1 = 0", txt)
+    expect_false(identical(no_lag, txt))
+    lag_off <- .pred_of(no_lag, .dose_attr_data())$pred
+
+    expect_equal(max(abs(base - f_in_dose)), 0, tolerance = 1e-8)
+    expect_gt(max(abs(base - f_ignored)), 0.1)
+    expect_gt(max(abs(base - lag_off)), 0.01)
+  })
+})
+
+# A dose attribute the model also reads: the file must validate (the engine
+# rejects a bound name read in [odes]) and the read must reach the ODE. Each
+# mutation below changes only what is read, so it can tell "read the value" from
+# "read nothing" -- F1 = 0.6 means a stray 1 is a different number.
+test_that("a dose attribute read in the ODE validates and reaches the ODE", {
+  txt <- .eval_only(suppressWarnings(
+    nm_to_ferx(system.file("testmodels/nonmem/ode_dose_attr_read.ctl",
+                           package = "ferxtranslate")))$ferx_text)
+  v <- ferx_model_validate(.write_tmp(txt), data = .dose_attr_data())
+  expect_true(isTRUE(v$ok))
+
+  base <- .pred_of(txt, .dose_attr_data())$pred
+  copy_one <- sub("F1_VAL = F1", "F1_VAL = 1", txt, fixed = TRUE)
+  expect_false(identical(copy_one, txt))
+  expect_gt(max(abs(base - .pred_of(copy_one, .dose_attr_data())$pred)), 0.01)
+  qq_one <- sub("QQ = F1 * 2", "QQ = 2", txt, fixed = TRUE)
+  expect_false(identical(qq_one, txt))
+  expect_gt(max(abs(base - .pred_of(qq_one, .dose_attr_data())$pred)), 0.01)
+})

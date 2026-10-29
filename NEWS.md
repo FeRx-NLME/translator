@@ -2,6 +2,34 @@
 
 ## Bug fixes
 
+* NONMEM `F1`/`ALAG1`/`D1`/`R1` and nlmixr2 `f()`/`alag()`/`dur()`/`rate()` are
+  now translated instead of dropped (issue #16). A model with a bioavailability
+  or lag-time statement used to lose it with an ERROR, so the emitted file dosed
+  the full amount at time zero.
+
+  On an ODE model the value is emitted as an individual parameter named for the
+  compartment's 1-based position in `states=[...]` (`F1`, `ALAG2`, `D1`, `R1`),
+  which is how ferx binds them; a conditional override (`IF (FORM.EQ.2) F1 =
+  THETA(4)`) keeps its `if`. On an analytical model F and lag are bound by role
+  in the macro (`pk one_cpt_oral(..., f=F1, alag=ALAG1)`); D and R have no
+  analytical equivalent and are reported as an ERROR. The prediction `F` is not
+  touched. A theta labelled `F1` is renamed `TVF1` so it cannot shadow the
+  parameter, and the dose attribute is kept apart from a user parameter that
+  happens to be called `F1` (renamed `F1_PAR`).
+
+  Checked against the engine with `F1 = 0.6`: predictions equal those of
+  `F1 = 1` with the dose scaled by 0.6 to the last digit, so F is applied exactly
+  once, on both engines.
+
+* A dose attribute that the model also reads (`QQ = F1*2`, or `F1` inside
+  `$DES`) no longer emits the nonmem2rx internal name `RXF_RXDDTA1_` as an
+  undefined identifier (issue #71). Reads inside `[individual_parameters]` use
+  the attribute directly. Reads in `[odes]` or `init()` go through a plain copy
+  (`F1_VAL = F1`) declared after the last statement that defines `F1`, because
+  ferx rejects a bound dose attribute that is also read there
+  (`E_DOSE_ATTR_DOUBLE_USE`). An `INFO` warning names the copy. `S<n> = V/F1`
+  is not covered here.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that
