@@ -1,5 +1,21 @@
 # ferxtranslate 0.1.0.9000
 
+## CI
+
+* The engine pin moves to `ferx-r@4d73254` (ferx-r main; ferx-core
+  `3cd15863`), from `ferx-r@9c97c13`. The pinned engine refused every
+  compartment-free model ("No PK model found in [structural_model] block") and
+  had no `weight =`, so the compartment-free translation of translator#74
+  could not be checked in CI without the move. The full suite was run locally against a build of exactly
+  `4d73254`. The reference omegas and `inst/testdata/` did not need
+  re-baselining. Two tests changed with the engine:
+  - The sigma-order test now asserts `E_SIGMA_ORDER_MISMATCH`, ferx-core#1001's
+    resolution. The engine checks sigma names against positions and refuses a
+    mismatch, where it used to bind positionally and silently.
+  - The `qss_tmdd.mod` snapshot is taken with `validate = FALSE`. The newer
+    engine adds two advisory notes about the model's `if` in `[odes]`, and those
+    would make one snapshot disagree between the engine job and the fast job.
+
 ## Bug fixes
 
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped

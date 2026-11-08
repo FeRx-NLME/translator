@@ -519,6 +519,11 @@ test_that("a parameter named like a dose attribute is not applied to the dose", 
 # the `sigma` lines in [parameters], so that is what this guards. A test written
 # against the combined() arguments would pass whether or not the bug is fixed --
 # it was, until this was measured.
+#
+# ferx-core#1001 has since been answered by refusing the mismatch
+# (E_SIGMA_ORDER_MISMATCH, ferx-core 3cd1586 / ferx-r 4d73254): the names are
+# now checked against the positions. The test below asserts that contract; the
+# history above is why the declaration order is what this translator owns.
 test_that("sigma declaration order follows the error roles, and is load-bearing", {
   ctl <- c(
     "$PROBLEM combined error, additive term written first",
@@ -574,19 +579,27 @@ test_that("sigma declaration order follows the error roles, and is load-bearing"
     fit$ofv
   }
   correct <- ofv_of(emitted)
-  swapped <- ofv_of(sub("sigma EPS2 ~ 0.05 (sd)\n  sigma EPS1 ~ 2.0 (sd)",
-                        "sigma EPS1 ~ 2.0 (sd)\n  sigma EPS2 ~ 0.05 (sd)",
-                        emitted, fixed = TRUE))
-  # The discriminating half. If this ever stops holding, the declaration order has
-  # stopped mattering and the assertion above has become decorative.
-  expect_false(isTRUE(all.equal(correct, swapped, tolerance = 1e-6)))
+  swap_decl <- function(txt) sub("sigma EPS2 ~ 0.05 (sd)\n  sigma EPS1 ~ 2.0 (sd)",
+                                 "sigma EPS1 ~ 2.0 (sd)\n  sigma EPS2 ~ 0.05 (sd)",
+                                 txt, fixed = TRUE)
+  swap_args <- function(txt) sub("combined(EPS2, EPS1)", "combined(EPS1, EPS2)",
+                                 txt, fixed = TRUE)
 
-  # And the transposed ARGUMENT order really is inert -- the fact that makes the
-  # declaration order the only lever. Stated as a test so it cannot quietly
-  # change under us.
-  arg_swapped <- ofv_of(sub("combined(EPS2, EPS1)", "combined(EPS1, EPS2)",
-                            emitted, fixed = TRUE))
-  expect_equal(arg_swapped, correct, tolerance = 1e-9)
+  # Since ferx-core 3cd1586 (ferx-r 4d73254, ferx-core#1001) the engine checks
+  # the names against the positions and REFUSES a mismatch, where ferx-r
+  # 9c97c13 bound positionally and silently: swapping the declarations used to
+  # move the OFV, swapping the arguments used to do nothing. Either half alone
+  # is now E_SIGMA_ORDER_MISMATCH -- so the declaration order this translator
+  # emits is load-bearing in the loud direction, and the argument order (which
+  # .order_sigmas_for_error() also keeps in role order) has stopped being inert.
+  expect_error(ofv_of(swap_decl(emitted)), "E_SIGMA_ORDER_MISMATCH")
+  expect_error(ofv_of(swap_args(emitted)), "E_SIGMA_ORDER_MISMATCH")
+
+  # The discriminating half. Swapping BOTH consistently parses, and makes the
+  # SD-2.0 sigma the proportional one. If this stops moving the OFV, the role
+  # assignment the assertions above protect has stopped mattering.
+  both <- ofv_of(swap_args(swap_decl(emitted)))
+  expect_false(isTRUE(all.equal(correct, both, tolerance = 1e-6)))
 })
 
 # ===========================================================================

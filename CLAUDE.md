@@ -285,7 +285,7 @@ Gated with `skip_if_not_installed("ferx")`. They require the `ferx` package
   engine accepted and fit the emitted `.ferx` - do not re-add a blanket
   `skip_on_ci()`, or the only tier that exercises the engine stops running in CI.
 
-The `engine` job pins `ferx` (currently `ferx-r@9c97c13`). Pin the SHA, not the
+The `engine` job pins `ferx` (currently `ferx-r@4d73254`, ferx-core `3cd15863`). Pin the SHA, not the
 tag: a tag can be moved, and this job is the only thing between a silent engine
 regression and a merge.
 
