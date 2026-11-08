@@ -10,7 +10,8 @@ rxui_to_ir(
   source_file = NA_character_,
   scaling_hint = list(),
   obs_hint = NULL,
-  has_cmt_col = NA
+  has_cmt_col = NA,
+  weighting = "as_written"
 )
 }
 \arguments{
@@ -39,6 +40,10 @@ emitted first in \verb{states=[...]} is the combination where NM-TRAN and ferx
 route doses differently; \code{NA} means unknown and reports nothing. The
 comparison is by compartment NAME, not by \verb{$MODEL} ordinal, because the
 two agree only while the state list could be put in \verb{$MODEL} COMP order.}
+
+\item{weighting}{\code{"as_written"} (default) or \code{"weight"}: how a
+compartment-free model's hand-built inverse-variance weighting
+(\code{pred <- f * sqrt(W)}) is emitted. See \code{\link[=to_ferx]{to_ferx()}}.}
 }
 \value{
 A \code{ferx_ir} object.

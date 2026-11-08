@@ -24,6 +24,9 @@
 #'   route doses differently; `NA` means unknown and reports nothing. The
 #'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
 #'   two agree only while the state list could be put in `$MODEL` COMP order.
+#' @param weighting `"as_written"` (default) or `"weight"`: how a
+#'   compartment-free model's hand-built inverse-variance weighting
+#'   (`pred <- f * sqrt(W)`) is emitted. See [to_ferx()].
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -44,7 +47,8 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA) {
+                       has_cmt_col = NA, weighting = "as_written") {
+  weighting <- match.arg(weighting, c("as_written", "weight"))
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -58,6 +62,13 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   unsp      <- c(unsp, omega_out$unsupported)
   kappa_out <- .extract_kappas(ini)
   warn      <- c(warn, kappa_out$warnings)
+
+  # A variance below ferx's guard is moved by the engine without a word; move it
+  # here instead, where it can be reported (translator#74).
+  floor_out <- .floor_variances(omega_out$omegas, kappa_out$kappas)
+  omega_out$omegas <- floor_out$omegas
+  kappa_out$kappas <- floor_out$kappas
+  warn      <- c(warn, floor_out$warnings)
 
   sigma_out <- .extract_sigmas(ini, tryCatch(ui$sigma, error = function(e) NULL))
   warn      <- c(warn, sigma_out$warnings)
@@ -1209,6 +1220,34 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, expr_out$warnings)
   unsp      <- c(unsp, expr_out$unsupported)
 
+  coll <- .source_name_collisions(lst, name_map)
+  warn <- c(warn, coll$warnings)
+  unsp <- c(unsp, coll$unsupported)
+
+  # A compartment-free model (translator#74): no linCmt(), no d/dt(), and an
+  # error line reading an ordinary variable. Its prediction becomes `y = ...`.
+  weight_column <- NA_character_
+  if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
+    cf <- .lower_compartment_free(
+      expr_out,
+      kappa_names = vapply(kappa_out$kappas, function(k) k$name, ""),
+      param_names = c(vapply(theta_out$thetas, function(t) t$name, ""),
+                      random_names),
+      weighting = weighting)
+    if (!is.null(cf)) {
+      expr_out$indiv_params <- cf$indiv_params
+      expr_out$error_model  <- cf$error_model
+      structural            <- cf$structural
+      weight_column         <- cf$weight_column
+      warn                  <- c(warn, cf$warnings)
+    }
+  }
+  if (identical(weighting, "weight") && is.na(weight_column))
+    cli::cli_abort(c(
+      "{.code weighting = \"weight\"} applies only to a compartment-free model whose error line reads a prediction written as {.code f * sqrt(W)}.",
+      i = "This model has a linCmt(), a d/dt(), or no such error line."),
+      call = NULL)
+
   if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
     warn <- c(warn, "ERROR | No structural model detected -- [structural_model] section omitted")
     unsp <- c(unsp, "structural model (no linCmt() or d/dt() found in model block)")
@@ -1301,6 +1340,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                                    map = dose_out$map)
     if (is.character(scaling$obs_scale))
       scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, dose_out$map)
+    if (identical(structural$type, "algebraic"))
+      structural$y <- .rewrite_syms(structural$y, dose_out$map)
   }
 
   # Drop $ERROR scaffolding from [individual_parameters] (issue #6 defect 6).
@@ -1331,6 +1372,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       .ip_refs(expr_out$indiv_params),
       unlist(lapply(init_conds, function(x) sym_of(x$rhs))),
       if (is.character(scaling$obs_scale)) sym_of(scaling$obs_scale),
+      # A compartment-free `y = PRED` reads PRED; never treat it as scaffolding.
+      if (identical(structural$type, "algebraic")) sym_of(structural$y),
       unlist(structural$pk_args)))
 
     # Per STATEMENT, not per name. `.ip_names()` walks into branches, so a
@@ -1379,6 +1422,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     error_suggestion = expr_out$error_suggestion,
     scaling       = scaling,
     fit_options   = fit_opts,
+    covariates    = if (is.na(weight_column)) character() else
+                      sort(unique(c(weight_column, .model_covariates(lst, name_map)))),
+    weight_column = weight_column,
     warnings      = warn,
     unsupported   = unsp,
     state_renames = state_map
@@ -2868,6 +2914,7 @@ bound_name <- function(entries, raw) {
   structural   <- list()
   warnings     <- character()
   unsupported  <- character()
+  tilde_lhs    <- character()
 
   # Seed every ordinary assignment target before the walk, so a reference that
   # appears BEFORE its defining assignment resolves to the same emitted name as
@@ -2994,6 +3041,13 @@ bound_name <- function(entries, raw) {
     }
 
     if (.is_tilde(expr)) {
+      # The variable the error line reads -- `pred` in `pred ~ add(sd)`. With no
+      # linCmt() and no d/dt() it IS the prediction of a compartment-free model,
+      # and .lower_compartment_free() moves it into [structural_model] as `y`.
+      # Recorded as emitted (normalised), which is how [individual_parameters]
+      # spells its assignment.
+      if (is.symbol(expr[[2]]))
+        tilde_lhs <- c(tilde_lhs, .norm(as.character(expr[[2]])))
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
       if (is.na(err_out$type))
         error_suggestion <- .error_model_suggestion(deparse1(expr[[3]]), err_out$eps)
@@ -3452,6 +3506,7 @@ bound_name <- function(entries, raw) {
     error_suggestion = error_suggestion,
     readout      = readout,
     structural   = structural,
+    tilde_lhs    = tilde_lhs,
     warnings     = warnings,
     unsupported  = unsupported
   )

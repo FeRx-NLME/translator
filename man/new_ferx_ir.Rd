@@ -20,6 +20,8 @@ new_ferx_ir(
   error_suggestion = character(),
   scaling = list(),
   fit_options = list(),
+  covariates = character(),
+  weight_column = NA_character_,
   warnings = character(),
   unsupported = character(),
   state_renames = character()
@@ -58,8 +60,10 @@ An element with no \code{kind} is read as an \code{"assign"}, which is the shape
 field held before statement lists. Order is preserved exactly.}
 
 \item{structural}{List describing the structural model. Must have \code{type}:
-\code{"pk_macro"} (add \code{pk_call} and \code{pk_args}) or \code{"ode"} (add \code{obs_cmt}
-and \code{states}). May be empty during incremental construction. An optional
+\code{"pk_macro"} (add \code{pk_call} and \code{pk_args}), \code{"ode"} (add \code{obs_cmt}
+and \code{states}) or \code{"algebraic"} (add \code{y}, a single expression string,
+rendered as \code{y = ...} for a compartment-free model). May be empty during
+incremental construction. An optional
 \code{note} is emitted as a comment line directly above the \code{ode(...)} /
 \verb{pk ...} line, for a warning that belongs where a reader looks rather than
 only in the header block.}
@@ -90,7 +94,9 @@ rather than emitting a file the engine rejects.}
 \item{error_model}{List of error model entries. Each element is a list
 with \code{dv} (character), \code{type} (\code{"proportional"}, \code{"additive"}, or
 \code{"combined"}), and \code{params} (character vector of parameter names). An entry
-may additionally carry \code{cmt} (integer, rendered as \code{CMT=N: DV ~ ...}) or
+may additionally carry \code{weight} (character expression, rendered as a
+trailing \code{weight = ...} modifier; single-endpoint additive only) and
+\code{cmt} (integer, rendered as \code{CMT=N: DV ~ ...}) or
 \code{cond} (character, rendered as an \code{if}/\verb{else if} chain whose last entry
 omits \code{cond} and becomes the \verb{else} ferx requires). The three forms are
 mutually exclusive within one list.}
@@ -109,6 +115,14 @@ cannot be combined with either readout: ferx applies it on top of them.}
 
 \item{fit_options}{List with named elements such as \code{method}, \code{maxiter},
 \code{covariance}, and (when IOV is present) \code{iov_column}.}
+
+\item{covariates}{Character vector of data columns declared \code{continuous} in
+a \verb{[covariates]} block. Emitted only when ferx requires one -- currently
+for the column a \verb{weight =} expression reads -- and then listing every
+data column the model reads, since ferx warns about any it leaves out.}
+
+\item{weight_column}{The data column \code{W} of a model translated with
+\code{weighting = "weight"}, or \code{NA}. See \code{\link[=ferx_weighted_data]{ferx_weighted_data()}}.}
 
 \item{warnings}{Character vector of diagnostic messages, each prefixed
 with \code{INFO}, \code{WARN}, or \code{ERROR}.}

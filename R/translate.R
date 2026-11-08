@@ -21,9 +21,19 @@
 #' @param strict If validation reports any error-severity diagnostic, abort.
 #'   Default `TRUE`. Pass `FALSE` to downgrade to a warning and return the
 #'   result anyway. Ignored when `validate = FALSE`.
+#' @param weighting For a compartment-free nlmixr2 model whose prediction is
+#'   written for hand-built inverse-variance weighting, `pred <- f * sqrt(W)`
+#'   with DV already multiplied by `sqrt(W)`: `"as_written"` (default) emits
+#'   the model unchanged, to be fitted to the same data; `"weight"` emits
+#'   `y = f` and `DV ~ additive(SD) weight = 1/sqrt(W)`, to be fitted to the
+#'   data returned by [ferx_weighted_data()]. Both have the same likelihood;
+#'   ferx's OFV for `"weight"` is the source's minus `sum(log(W))`. Only
+#'   `"nlmixr2"` sources accept `"weight"`, and a model that does not have that
+#'   shape is refused rather than translated as written.
 #'
 #' @return A `ferx_translate_result` invisibly, with fields `$ferx_text`,
-#'   `$warnings`, `$unsupported`, and `$validation` (`NULL` when
+#'   `$warnings`, `$unsupported`, `$weight_column` (the data column `W` for
+#'   `weighting = "weight"`, otherwise `NA`), and `$validation` (`NULL` when
 #'   `validate = FALSE`, otherwise a list with `ok`, `diagnostics`, the
 #'   `data_file` used, and the full `warnings` including the `INFO` notes on how
 #'   validation ran). Only engine findings about the model reach `$warnings` and
@@ -54,8 +64,13 @@ to_ferx <- function(source,
                     output    = NULL,
                     overwrite = FALSE,
                     validate  = TRUE,
-                    strict    = TRUE) {
+                    strict    = TRUE,
+                    weighting = c("as_written", "weight")) {
   format <- match.arg(format)
+  weighting <- match.arg(weighting)
+  if (identical(weighting, "weight") && !identical(format, "nlmixr2"))
+    cli::cli_abort("{.code weighting = \"weight\"} is only available for nlmixr2 sources.",
+                   call = NULL)
 
   if (format == "monolix" && !requireNamespace("monolix2rx", quietly = TRUE))
     cli::cli_abort(c(
@@ -67,7 +82,10 @@ to_ferx <- function(source,
   rxui <- tryCatch(
     switch(format,
       nonmem  = nonmem2rx::nonmem2rx(source),
-      nlmixr2 = rxode2::rxode2(source),
+      # A fitted nlmixr2 object carries its estimates in `$finalUi`;
+      # rxode2() on the fit itself returns no usable iniDf.
+      nlmixr2 = if (inherits(source, "nlmixr2FitCore")) source$finalUi
+                else rxode2::rxode2(source),
       monolix = monolix2rx::monolix2rx(source)
     ),
     error = function(e)
@@ -91,7 +109,7 @@ to_ferx <- function(source,
   has_cmt_col  <- if (read_ctl) .nm_input_has_cmt(source) else NA
   ir <- rxui_to_ir(rxui, source_format = format, source_file = src_file,
                    scaling_hint = scaling_hint, obs_hint = obs_hint,
-                   has_cmt_col = has_cmt_col)
+                   has_cmt_col = has_cmt_col, weighting = weighting)
   text <- emit_ferx(ir)
 
   val <- if (isTRUE(validate)) {
@@ -138,10 +156,47 @@ nm_to_ferx <- function(ctl_file, output = NULL, ...) {
 }
 
 #' @rdname to_ferx
-#' @param model_fn An nlmixr2 / rxode2 model function.
+#' @param model_fn An nlmixr2 / rxode2 model function, or a fitted nlmixr2
+#'   object (its estimates become the initial values).
 #' @export
 nlmixr2_to_ferx <- function(model_fn, output = NULL, ...) {
   to_ferx(model_fn, "nlmixr2", output, ...)
+}
+
+#' Data for a model translated with `weighting = "weight"`
+#'
+#' A hand-weighted nlmixr2 model reads `DV` multiplied by `sqrt(W)`, where `W`
+#' is the inverse variance of the observation. The `weighting = "weight"`
+#' translation scores the natural-scale `DV` instead, with
+#' `weight = 1/sqrt(W)` in its error model, so the data need `DV` divided back
+#' by `sqrt(W)`. `W` itself is kept: the emitted model reads it.
+#'
+#' @param data A data frame in the form the nlmixr2 model was fitted to.
+#' @param weight_column Name of the `W` column, as returned in
+#'   `$weight_column` by [nlmixr2_to_ferx()].
+#'
+#' @return `data` with `DV` divided by `sqrt(data[[weight_column]])`.
+#'
+#' @examples
+#' d <- data.frame(ID = 1, TIME = 0:1, DV = c(6, 4), W = c(4, 4))
+#' ferx_weighted_data(d, "W")$DV
+#' @export
+ferx_weighted_data <- function(data, weight_column) {
+  if (!is.data.frame(data) || !"DV" %in% names(data))
+    cli::cli_abort("{.arg data} must be a data frame with a {.field DV} column.")
+  if (!is.character(weight_column) || length(weight_column) != 1L ||
+      is.na(weight_column) || !weight_column %in% names(data))
+    cli::cli_abort("{.arg weight_column} must name a column of {.arg data}.")
+  w <- data[[weight_column]]
+  # Only observation rows carry a weight that matters, but a dose row's DV is
+  # ignored by ferx anyway, so every row is checked: a W of 0, a negative W or
+  # a missing W on an observation would divide DV into Inf or NaN silently.
+  obs <- if ("EVID" %in% names(data)) data$EVID %in% 0 else rep(TRUE, nrow(data))
+  bad <- obs & !(is.finite(w) & w > 0)
+  if (any(bad))
+    cli::cli_abort("{.field {weight_column}} must be positive and finite on every observation row ({sum(bad)} row{?s} {?is/are} not).")
+  data$DV[obs] <- data$DV[obs] / sqrt(w[obs])
+  data
 }
 
 #' @rdname to_ferx
@@ -173,6 +228,7 @@ new_ferx_translate_result <- function(text, ir, validation = NULL) {
       warnings      = ir$warnings,
       unsupported   = ir$unsupported,
       validation    = validation,
+      weight_column = ir$weight_column,
       source_format = ir$source_format,
       source_file   = ir$source_file
     ),
