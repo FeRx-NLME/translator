@@ -1536,10 +1536,6 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   M_LN_SQRT_PId2 = log(sqrt(pi / 2))
 )
 
-# The raw symbols in `syms` that name an rxode2 constant. Callers subtract the
-# names the model defines itself before asking, so this is a name filter only.
-.free_constants <- function(syms) intersect(syms, names(.RX_CONSTANTS))
-
 # Recursively substitute known parameter names in an expression.
 # Does NOT touch the function-name position of a call (call[[1]]).
 #
@@ -1699,8 +1695,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   known <- unique(c(assigned,
                     toupper(unlist(name_map, use.names = FALSE)),
                     .norm(names(name_map))))
-  # A free rxode2 constant is emitted as its value, not read from the data.
-  used <- setdiff(used, .free_constants(used))
+  # A free rxode2 constant is emitted as its value, not read from the data. A
+  # model's own `pi` is dropped here too, harmlessly: it is in `known` below.
+  used <- setdiff(used, names(.RX_CONSTANTS))
   setdiff(unique(.norm(used)), known)
 }
 
@@ -1752,8 +1749,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     else if (.is_ddt_lhs(lhs))        assigned <- c(assigned, .ddt_state(lhs))
   }
   # A free rxode2 constant is emitted as a numeric literal, so it is not a
-  # symbol in the output at all.
-  used <- setdiff(used, .free_constants(used))
+  # symbol in the output at all. A model's own `pi` is dropped here too,
+  # harmlessly: it is subtracted as an assigned name or map key below.
+  used <- setdiff(used, names(.RX_CONSTANTS))
   setdiff(unique(used), c(names(name_map), assigned))
 }
 

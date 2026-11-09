@@ -112,9 +112,9 @@
   # A free rxode2 constant (`pi`, `M_SQRT2`, ...) is emitted as its value by
   # .normalise_expr(), so it is not a column: declaring it made ferx demand a
   # `pi` column, E_MISSING_COVARIATE. The model's own names were removed above,
-  # so what .free_constants() finds here is free. Same table, so the two cannot
-  # drift apart (#76).
-  covs <- setdiff(covs, .free_constants(covs))
+  # so a constant name left here is free. Same table as the emitter, so the two
+  # cannot drift apart (#76).
+  covs <- setdiff(covs, names(.RX_CONSTANTS))
   covs[!toupper(covs) %in% .RESERVED_ODE_NAMES]
 }
 
