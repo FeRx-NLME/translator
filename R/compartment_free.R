@@ -71,12 +71,15 @@
 
 # -- source-name collisions ---------------------------------------------------
 
-# Every symbol a model() statement list assigns, and every symbol it reads, at
-# any depth -- including inside `if` arms, which .covariate_names() and
-# .unmapped_symbols() do not descend into.
+# Every symbol a model() statement list assigns, every symbol it reads, and
+# every ODE state it declares (`d/dt(x) <-`), at any depth -- including inside
+# `if` arms, which .covariate_names() and .unmapped_symbols() do not descend
+# into. A state is read on right-hand sides like any variable, so without its
+# own set it would look like a free symbol, i.e. a data column.
 .walk_names <- function(lst) {
   assigned <- character()
   used     <- character()
+  states   <- character()
   walk <- function(e) {
     if (!is.call(e)) return(invisible())
     head <- as.character(e[[1]])[1L]
@@ -89,13 +92,14 @@
     if (.is_assignment(e)) {
       lhs <- e[[2]]
       if (is.symbol(lhs)) assigned <<- c(assigned, as.character(lhs))
+      else if (.is_ddt_lhs(lhs)) states <<- c(states, .ddt_state(lhs))
       used <<- c(used, .collect_symbols(e[[3]]))
       return(invisible())
     }
     if (.is_tilde(e)) used <<- c(used, .collect_symbols(e))
   }
   for (e in lst) walk(e)
-  list(assigned = unique(assigned), used = unique(used))
+  list(assigned = unique(assigned), used = unique(used), states = unique(states))
 }
 
 # The data columns a model() statement list reads, as the source spells them
@@ -104,25 +108,31 @@
 # rest, so a block emitted for one column has to list them all.
 .model_covariates <- function(lst, name_map) {
   nm <- .walk_names(lst)
-  covs <- setdiff(nm$used, c(nm$assigned, names(name_map)))
+  covs <- setdiff(nm$used, c(nm$assigned, nm$states, names(name_map)))
   covs[!toupper(covs) %in% .RESERVED_ODE_NAMES]
 }
 
 # Distinct source names that ferx would read as ONE name.
 #
-# ferx compares identifiers without regard to case and allows no dots, so
-# nlmixr2's `eff` and `EFF`, or `a.b` and `a_b`, are two variables in the source
-# and one in the emitted file: the second assignment silently becomes a
-# reassignment of the first. Worse, a variable `dose` beside a data column
-# `DOSE` emits `DOSE = 3` and then reads it where the source read the column --
-# the covariate is gone, with no diagnostic from either side.
+# The two kinds of name are compared differently, because ferx treats them
+# differently. A model variable is emitted through .norm(),
+# upper-cased with dots folded to `_`, so nlmixr2's `eff` and `EFF`, or `a.b`
+# and `a_b`, are two variables in the source and one in the emitted file: the
+# second assignment silently becomes a reassignment of the first. A data column
+# is emitted verbatim and ferx binds it by its exact, case-sensitive header
+# (E_MISSING_COVARIATE "(case-sensitive)"), so `wt` and `WT` are two columns to
+# ferx as they are to the source, and are NOT a collision. A model name meets a
+# column when its emitted spelling equals the column's header: a variable `dose`
+# beside a column `DOSE` emits `DOSE = 3` and then reads it where the source
+# read the column -- the covariate is gone, with no diagnostic from either side.
 #
-# Model variables and data columns only. A theta or random effect that collides
-# with one of them already has an owner that renames it with a warning
-# (.deshadow_theta_names(), .uniquify_random_names()), and a model variable can
-# not be renamed the same way: a data column binds by its exact header, and two
-# model variables that the source keeps apart cannot be told apart from the
-# emitted text to decide which one a reference meant.
+# Thetas, random effects and ODE states are not checked here: each has an owner
+# that renames it with a message when it collides with a variable or a column
+# (.deshadow_theta_names() and .uniquify_random_names(), both passed the column
+# names, and .sanitise_state_names()). A state is still kept out of the column
+# set -- it is read on right-hand sides like any variable. A model variable cannot be renamed the same way: two variables
+# the source keeps apart cannot be told apart in the emitted text to decide
+# which one a reference meant, and a column cannot be renamed at all.
 #
 # Runs for NONMEM too, where it should never fire: NM-TRAN is case-insensitive
 # and has no dots, and nonmem2rx canonicalises (variables lower-case, data
@@ -130,21 +140,24 @@
 # across the bundled corpus, which raises nothing; a test pins that, so a check
 # grown too broad shows up as a false refusal there rather than in a user's model.
 .source_name_collisions <- function(lst, name_map) {
-  nm   <- .walk_names(lst)
-  vars <- nm$assigned
-  covs <- setdiff(nm$used, c(vars, names(name_map)))
-  raw  <- unique(c(vars, covs))
-  if (length(raw) < 2L) return(list(warnings = character(), unsupported = character()))
-  key  <- toupper(.ferx_ident(raw))
-  dup  <- unique(key[duplicated(key)])
+  nm    <- .walk_names(lst)
+  model <- nm$assigned
+  cols  <- setdiff(nm$used, c(model, nm$states, names(name_map)))
+  key   <- .norm(model)
+  groups <- list()
+  for (k in unique(key)) {
+    who <- c(model[key == k], cols[cols == k])
+    if (length(who) > 1L) groups[[k]] <- who
+  }
   warn <- character(); unsp <- character()
-  for (k in dup) {
-    who  <- raw[key == k]
-    what <- vapply(who, function(x) if (x %in% vars) "model variable" else "data column", "")
+  for (k in names(groups)) {
+    who  <- groups[[k]]
+    what <- ifelse(who %in% model, "model variable", "data column")
     warn <- c(warn, paste0(
       "ERROR | ", paste0("'", who, "' (", what, ")", collapse = " and "),
-      " are distinct in the source but are the same name to ferx, which ignores ",
-      "case and allows no dots. The emitted file merges them into '", k,
+      " are distinct in the source but are the same name to ferx: model names ",
+      "are emitted upper-cased with dots as `_`, and a data column is read by ",
+      "its exact header. The emitted file merges them into '", k,
       "', so a reference to one reads the other. Rename one of them in the source."))
     unsp <- c(unsp, paste0("source names ferx cannot tell apart: ",
                            paste(who, collapse = ", ")))
@@ -207,7 +220,15 @@
   read_elsewhere <- toupper(lhs) %in% toupper(.ip_refs(others)) ||
     (length(top) == 1L && toupper(lhs) %in%
        toupper(.collect_symbols(str2lang(ips[[top]]$rhs))))
-  single <- length(top) == 1L && !in_if && !read_elsewhere
+  # Inlining moves the prediction from its own position to the end of the
+  # model, past every later statement. That is the same value only if no later
+  # statement reassigns something the prediction reads: `eff <- temax*DOSE;
+  # pred <- E0 - eff; eff <- 0` predicts E0 - temax*DOSE, and `y = E0 - EFF`
+  # would read the 0. Such a prediction stays where it is, as `y = PRED`.
+  reassigned_after <- length(top) == 1L && top < length(ips) &&
+    any(toupper(.collect_symbols(str2lang(ips[[top]]$rhs))) %in%
+          toupper(.ip_names(ips[(top + 1L):length(ips)])))
+  single <- length(top) == 1L && !in_if && !read_elsewhere && !reassigned_after
 
   warn <- character()
   weight_col <- NA_character_
@@ -215,8 +236,8 @@
     why <- NULL
     if (!single)
       why <- paste0("'", lhs, "' is assigned more than once, inside an if, or read ",
-                    "by another statement, so `* sqrt(W)` cannot be removed from ",
-                    "one place")
+                    "by another statement, or a name it reads is reassigned after ",
+                    "it, so `* sqrt(W)` cannot be removed from one place")
     em <- expr_out$error_model
     if (is.null(why) && !(length(em) == 1L && identical(em[[1]]$type, "additive")))
       why <- "the error model is not a single additive one (ferx's `weight =` scales the additive loading only)"
@@ -224,10 +245,19 @@
     if (is.null(why) && is.null(split))
       why <- paste0("the prediction '", lhs, " = ", ips[[top]]$rhs,
                     "' is not written as `f * sqrt(W)` with W a data column")
-    if (is.null(why) && toupper(split$w) %in% toupper(c(param_names, lhs_of)))
+    # .ip_names(), not the top-level left-hand sides: a W assigned only inside
+    # an `if` arm is a model variable too, and taking it for a data column
+    # declares a column that does not exist.
+    if (is.null(why) && toupper(split$w) %in% toupper(c(param_names, .ip_names(ips))))
       why <- paste0("'", split$w, "' in sqrt(", split$w, ") is a model parameter or ",
                     "variable, not a data column; ferx's `weight =` may read data ",
                     "columns, TIME and thetas only")
+    # A solver builtin is not a column either: `sqrt(TIME)` would declare TIME
+    # in [covariates] and have ferx_weighted_data() divide DV by a column named
+    # TIME that the model reads as the clock.
+    if (is.null(why) && toupper(split$w) %in% .RESERVED_ODE_NAMES)
+      why <- paste0("'", split$w, "' in sqrt(", split$w, ") is a ferx builtin (",
+                    paste(.RESERVED_ODE_NAMES, collapse = ", "), "), not a data column")
     if (!is.null(why))
       cli::cli_abort(c(
         "{.code weighting = \"weight\"} cannot be applied: {why}.",

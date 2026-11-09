@@ -85,6 +85,43 @@ test_that("row 1: a prediction assigned twice or read elsewhere is not inlined",
   expect_identical(.section(res$ferx_text, "structural_model"), "y = PRED")
   ip <- .section(res$ferx_text, "individual_parameters")
   expect_identical(ip, c("PRED = TVE0 + ETA_E0", "PRED = PRED * 2"))
+
+  # Break caught: ignoring the `if` arm inlines the default, so the block that
+  # overrides it assigns a PRED nothing reads. ferx validates that file
+  # without complaint, so nothing downstream would notice (review #75, #5).
+  g <- function() {
+    ini({ tve0 <- 9; eta.e0 ~ 1; sdw <- 1 })
+    model({ pred <- tve0 + eta.e0; if (TIME > 0) pred <- tve0 * 2; pred ~ add(sdw) })
+  }
+  res <- .cf(g)
+  expect_identical(.section(res$ferx_text, "structural_model"), "y = PRED")
+  expect_true("PRED = TVE0 + ETA_E0" %in% .section(res$ferx_text, "individual_parameters"))
+})
+
+test_that("row 1: a prediction is not inlined past a reassignment of what it reads", {
+  # Break caught (review #75, #2): inlining moves the prediction to the end of
+  # the model, so `y = E0 - EFF` read the later `EFF = 0` and predicted E0.
+  f <- function() {
+    ini({ e0 <- 9; temax <- 2; eta.e ~ 1; sdw <- 1 })
+    model({
+      E0 <- e0 + eta.e; eff <- temax * DOSE; pred <- E0 - eff; eff <- 0
+      pred ~ add(sdw)
+    })
+  }
+  res <- .cf(f)
+  expect_identical(.section(res$ferx_text, "structural_model"), "y = PRED")
+  expect_identical(.section(res$ferx_text, "individual_parameters"),
+                   c("E0 = TVE0 + ETA_E", "EFF = TEMAX * DOSE", "PRED = E0 - EFF",
+                     "EFF = 0"))
+  # A reassignment BEFORE the prediction does not stop the inlining.
+  g <- function() {
+    ini({ e0 <- 9; temax <- 2; eta.e ~ 1; sdw <- 1 })
+    model({
+      E0 <- e0 + eta.e; eff <- 0; eff <- temax * DOSE; pred <- E0 - eff
+      pred ~ add(sdw)
+    })
+  }
+  expect_identical(.section(.cf(g)$ferx_text, "structural_model"), "y = E0 - EFF")
 })
 
 # -- row 2: one-line if after a default ---------------------------------------
@@ -173,6 +210,30 @@ test_that("row 4: weighting = 'weight' refuses what it cannot represent", {
   expect_error(.cf(no_sqrt, weighting = "weight"), "f \\* sqrt\\(W\\)")
   expect_error(.cf(prop, weighting = "weight"), "single additive")
   expect_error(.cf(w_param, weighting = "weight"), "not a data column")
+  # A W assigned only inside `if` arms is a model variable, not a column: it
+  # was declared in [covariates] and ferx_weighted_data() then aborted on a
+  # column that does not exist (review #75, #4).
+  w_in_if <- function() {
+    ini({ tve0 <- 9; eta.e0 ~ 1; sdw <- 1 })
+    model({
+      E0 <- tve0 + eta.e0
+      if (TIME > 0) { WW <- 2 } else { WW <- 1 }
+      pred <- E0 * sqrt(WW); pred ~ add(sdw)
+    })
+  }
+  # A solver builtin is not a column: `sqrt(TIME)` declared TIME continuous
+  # (review #75, #6).
+  w_builtin <- function() {
+    ini({ tve0 <- 9; eta.e0 ~ 1; sdw <- 1 })
+    model({ E0 <- tve0 + eta.e0; pred <- E0 * sqrt(TIME); pred ~ add(sdw) })
+  }
+  reassigned <- function() {
+    ini({ tve0 <- 9; eta.e0 ~ 1; sdw <- 1 })
+    model({ E0 <- tve0 + eta.e0; pred <- E0 * sqrt(W); E0 <- 0; pred ~ add(sdw) })
+  }
+  expect_error(.cf(w_in_if, weighting = "weight"), "'WW' in sqrt\\(WW\\) is a model")
+  expect_error(.cf(w_builtin, weighting = "weight"), "'TIME' .* is a ferx builtin")
+  expect_error(.cf(reassigned, weighting = "weight"), "reassigned after")
   expect_error(.cf(lincmt, weighting = "weight"), "compartment-free")
   expect_error(to_ferx(nm_path("1cpt_oral.ctl"), "nonmem", validate = FALSE,
                        weighting = "weight"), "only available for nlmixr2")
@@ -187,6 +248,17 @@ test_that("row 4: ferx_weighted_data divides DV back by sqrt(W) on observations"
   bad <- d; bad$W[2] <- 0
   expect_error(ferx_weighted_data(bad, "W"), "positive and finite")
   expect_error(ferx_weighted_data(d, "SE"), "must name a column")
+
+  # No EVID: observation rows are found from MDV, then from AMT, so a dose row
+  # with W missing is neither checked nor divided (review #75, #7).
+  nm <- data.frame(ID = 1, TIME = 0:2, DV = c(0, 6, 9), AMT = c(100, 0, 0),
+                   MDV = c(1, 0, 0), W = c(NA, 4, 9))
+  expect_identical(ferx_weighted_data(nm, "W")$DV, c(0, 3, 3))
+  expect_identical(ferx_weighted_data(nm[, names(nm) != "MDV"], "W")$DV, c(0, 3, 3))
+  # MDV wins over AMT when both are present: an MDV = 1 row with AMT = 0 (a
+  # reset or other non-observation record) is not divided.
+  other <- nm; other$AMT[1] <- 0
+  expect_identical(ferx_weighted_data(other, "W")$DV, c(0, 3, 3))
 })
 
 # -- row 5: constant expressions and fix() in ini() -----------------------------
@@ -257,6 +329,80 @@ test_that("row 6: collisions an owner already resolves are renamed, not refused"
   expect_length(res$unsupported, 0)
   expect_true(any(grepl("^theta TVE0\\(", .section(res$ferx_text, "parameters"))))
   expect_false(any(grepl("the same name to ferx", res$warnings)))
+})
+
+test_that("row 6: a theta or eta under a data column's header is renamed", {
+  # Break caught (review #75, #1): ferx resolves theta and eta before a
+  # covariate, so `theta W` beside the column `W` made `sqrt(W)` read the
+  # theta (OFV 1364.8 against 2206.4 on the engine), and `omega DOSE` beside
+  # the column `DOSE` read the eta, both with empty $unsupported.
+  th <- function() {
+    ini({ e <- 1; w <- 2; eta.e ~ 0.1; sd <- 0.5 })
+    model({ E <- e + eta.e; G <- E * w; pred <- G * sqrt(W); pred ~ add(sd) })
+  }
+  res <- .cf(th)
+  expect_true(any(grepl("^theta TVW\\(", .section(res$ferx_text, "parameters"))))
+  expect_identical(.section(res$ferx_text, "individual_parameters"),
+                   c("E = TVE + ETA_E", "G = E * TVW"))
+  expect_identical(.section(res$ferx_text, "structural_model"), "y = G * sqrt(W)")
+  expect_true(any(grepl("^WARN .*theta 'W' has the name of the data column 'W'",
+                        res$warnings)))
+  et <- function() {
+    ini({ e <- 1; dose ~ 0.1; sd <- 0.5 })
+    model({ G <- e + dose + DOSE; pred <- G; pred ~ add(sd) })
+  }
+  res <- .cf(et)
+  expect_true("omega DOSE_1 ~ 0.1" %in% .section(res$ferx_text, "parameters"))
+  expect_identical(.section(res$ferx_text, "individual_parameters"), "G = E + DOSE_1 + DOSE")
+
+  # Exact header, not case-folded: ferx binds a column case-sensitively, and a
+  # theta `W` leaves a column `w` readable (OFV identical either way), so it is
+  # not renamed.
+  lower <- function() {
+    ini({ e <- 1; W <- 2; eta.e ~ 0.1; sd <- 0.5 })
+    model({ E <- e + eta.e; G <- E * W; pred <- G * sqrt(w); pred ~ add(sd) })
+  }
+  expect_true(any(grepl("^theta W\\(", .section(.cf(lower)$ferx_text, "parameters"))))
+})
+
+test_that("row 6: data columns differing only in case are two columns", {
+  # Break caught (review #75, #3): the key upper-cased columns too, so `wt`
+  # and `WT` were refused, while ferx reads them as two columns.
+  f <- function() {
+    ini({ e0 <- 1; eta.e ~ 0.1; sd <- 0.5 })
+    model({ E0 <- e0 + eta.e + wt + WT; pred <- E0; pred ~ add(sd) })
+  }
+  res <- .cf(f)
+  expect_length(res$unsupported, 0)
+  expect_identical(.section(res$ferx_text, "individual_parameters"), "E0 = TVE0 + ETA_E + wt + WT")
+
+  # The same rule decides a variable against a column: `dose` emits `DOSE`,
+  # which a column `Dose` does not match. Measured on ferx-r main
+  # (maxiter = 0): a variable `W` beside a column `w` gives the OFV of the
+  # renamed model (1035.56); only beside a column `W` does it shadow (995.66).
+  g <- function() {
+    ini({ e0 <- 1; eta.e ~ 0.1; sd <- 0.5 })
+    model({ dose <- 3; E0 <- e0 + eta.e + Dose * dose; pred <- E0; pred ~ add(sd) })
+  }
+  expect_length(.cf(g)$unsupported, 0)
+})
+
+test_that("row 6: an ODE state is left to the state sanitiser, not refused", {
+  # Break caught (review #75, #12): a state read on a right-hand side was taken
+  # for a data column, so a state `CENTR` beside a variable `centr` was refused
+  # as "(data column)" although .sanitise_state_names() already renames the
+  # state.
+  f <- function() {
+    ini({ tk <- 0.1; eta.k ~ 0.1; sd <- 0.5 })
+    model({
+      k <- tk * exp(eta.k); centr <- 2 * k
+      d/dt(CENTR) <- -centr * CENTR
+      cp <- CENTR; cp ~ add(sd)
+    })
+  }
+  res <- .cf(f)
+  expect_false(any(grepl("the same name to ferx", res$warnings)))
+  expect_false(any(grepl("cannot tell apart", res$unsupported)))
 })
 
 test_that("row 6: a reserved dose-attribute name is renamed with a warning", {
@@ -345,6 +491,20 @@ test_that("row 8: an estimated variance below the guard starts at 1e-5, a FIX on
   expect_true(any(grepl("^WARN .*kappa IOV_K", floored)))
 })
 
+test_that("row 8: the floor names an omega as the emitted file does", {
+  # Break caught (review #75, #9): the floor ran before random-effect renaming,
+  # so its WARN named `ETA_E` while the file floored `ETA_E_1`.
+  f <- function() {
+    ini({ e0 <- 9; eta.e ~ 0.1; ETA.E ~ 1e-8; sdw <- 1 })
+    model({ E <- e0 + eta.e; E2 <- E + ETA.E; pred <- E2; pred ~ add(sdw) })
+  }
+  res <- .cf(f)
+  expect_true("omega ETA_E_1 ~ 0.00001" %in% .section(res$ferx_text, "parameters"))
+  floored <- grep("below the smallest variance", res$warnings, value = TRUE)
+  expect_length(floored, 1)
+  expect_match(floored, "omega ETA_E_1 starts at")
+})
+
 test_that("row 8: a block omega below the guard is reported, not moved", {
   oms <- list(list(type = "block", names = c("A", "B"),
                    values = c(1e-8, 0, 0.1), fixed = FALSE))
@@ -372,4 +532,36 @@ test_that("a weight is refused on a proportional or per-CMT error model", {
     list(dv = "DV", type = "additive", params = "A", cmt = 1L, weight = "W"),
     list(dv = "DV", type = "additive", params = "B", cmt = 2L)))
   expect_error(validate_ferx_ir(ir), "single-endpoint")
+})
+
+test_that("a fitted nlmixr2 object is translated from its finalUi", {
+  # Break caught (review #75, #8): rxode2() on the fit itself returns no usable
+  # iniDf. A stub with the fit's class stands in for nlmixr2est.
+  ui  <- rxode2::rxode2(mbma)
+  fit <- structure(list(finalUi = ui), class = c("nlmixr2FitCore", "list"))
+  expect_identical(.cf(fit)$ferx_text, .cf(mbma)$ferx_text)
+})
+
+test_that("an IR with NULL covariates still emits", {
+  # Break caught (review #75, #10): an IR built by hand, or saved before the
+  # field existed, has no `covariates` and was refused by validate_ferx_ir().
+  ir <- rxui_to_ir(rxode2::rxode2(mbma))
+  ir$covariates <- NULL
+  expect_match(emit_ferx(ir), "y = (E0 - EFF) * sqrt(W)", fixed = TRUE)
+})
+
+test_that("[covariates] is in the same order whatever the collation locale", {
+  # Break caught (review #75, #11): sort() follows LC_COLLATE, which testthat
+  # forces to C but a user session does not.
+  f <- function() {
+    ini({ e0 <- 9; eta.e ~ 1; sdw <- 1 })
+    model({ E0 <- e0 + eta.e + alpha + Beta; pred <- E0 * sqrt(W); pred ~ add(sdw) })
+  }
+  old <- Sys.getlocale("LC_COLLATE")
+  on.exit(Sys.setlocale("LC_COLLATE", old), add = TRUE)
+  set <- suppressWarnings(Sys.setlocale("LC_COLLATE", "en_US.UTF-8"))
+  skip_if_not(nzchar(set) && identical(sort(c("alpha", "Beta")), c("alpha", "Beta")),
+              "no en_US.UTF-8 collation on this machine")
+  expect_identical(.section(.cf(f, weighting = "weight")$ferx_text, "covariates"),
+                   c("Beta continuous", "W continuous", "alpha continuous"))
 })

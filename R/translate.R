@@ -188,10 +188,16 @@ ferx_weighted_data <- function(data, weight_column) {
       is.na(weight_column) || !weight_column %in% names(data))
     cli::cli_abort("{.arg weight_column} must name a column of {.arg data}.")
   w <- data[[weight_column]]
-  # Only observation rows carry a weight that matters, but a dose row's DV is
-  # ignored by ferx anyway, so every row is checked: a W of 0, a negative W or
-  # a missing W on an observation would divide DV into Inf or NaN silently.
-  obs <- if ("EVID" %in% names(data)) data$EVID %in% 0 else rep(TRUE, nrow(data))
+  # Only observation rows are divided and checked: a dose row's DV is ignored
+  # by ferx, and its W is often missing. Observation rows are found the way the
+  # data say it -- EVID == 0, else MDV == 0, else AMT == 0 (NONMEM-style data
+  # often have no EVID) -- and only data with none of the three are taken to be
+  # all observations. On an observation, a W of 0, a negative W or a missing W
+  # would divide DV into Inf or NaN silently, so those abort.
+  obs <- if ("EVID" %in% names(data)) data$EVID %in% 0
+         else if ("MDV" %in% names(data)) data$MDV %in% 0
+         else if ("AMT" %in% names(data)) data$AMT %in% 0 | is.na(data$AMT)
+         else rep(TRUE, nrow(data))
   bad <- obs & !(is.finite(w) & w > 0)
   if (any(bad))
     cli::cli_abort("{.field {weight_column}} must be positive and finite on every observation row ({sum(bad)} row{?s} {?is/are} not).")

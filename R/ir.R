@@ -220,6 +220,8 @@ validate_ferx_ir <- function(ir) {
     if (!is.character(e$weight) || length(e$weight) != 1L || !nzchar(e$weight))
       cli::cli_abort("error_model weight must be a single non-empty string.")
   }
+  # NULL is an IR built by hand, or saved before the field existed: no block.
+  if (is.null(ir$covariates)) ir$covariates <- character()
   if (!is.character(ir$covariates) || anyNA(ir$covariates))
     cli::cli_abort("covariates must be a character vector without NA.")
 

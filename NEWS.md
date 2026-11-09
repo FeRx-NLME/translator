@@ -39,10 +39,13 @@
     `$unsupported` entry. Examples: `eff` and `EFF`,
     `a.b` and `a_b`, and a variable `dose` beside a data column `DOSE`. Each of
     these was silently merged before. The `dose` case emitted `DOSE = 3` and then
-    read it where the source read the column. Collisions that already have an
-    owner keep being renamed with a warning: a theta beside its variable
-    (`TVE0`), an eta beside a variable, and the reserved dose-attribute names
-    (`F_PAR`).
+    read it where the source read the column. A data column is matched by its
+    exact header, as ferx binds it, so columns `wt` and `WT` are two columns and
+    are not refused. Collisions that already have an owner keep being renamed
+    with a warning: a theta beside its variable (`TVE0`), an eta beside a
+    variable, the reserved dose-attribute names (`F_PAR`), and now a theta or
+    eta under a data column's exact header (`ini(w <- 2)` beside a column `W`
+    emitted `theta W`, and every `W` then read the theta).
   - **Linear thetas stay on the natural scale.** ferx log-packs a theta whose
     lower bound is >= 0. An unbounded nlmixr2 theta already got `-1e15`, which
     keeps it linear. The new test shows why that matters: a theta starting at +9
