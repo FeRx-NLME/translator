@@ -3770,3 +3770,110 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
   expect_length(diag_only$warnings, 0L)
   expect_length(diag_only$unsupported, 0L)
 })
+
+# -- rxode2 built-in constants (#76) --------------------------------------------
+#
+# ferx-core has no `pi` and none of rxode2's `M_*` constants: a name it does not
+# know is read as a data column. Each fixture below separates "substituted" from
+# "copied verbatim" (the output differs), and the bound-`pi` cases separate
+# "substitute a FREE pi" from "substitute every pi".
+
+test_that(".normalise_expr writes a free rxode2 constant as its value", {
+  # The exact double, before deparse() rounds it -- the substitution itself must
+  # not lose precision even though the emitted text does.
+  expect_identical(.normalise_expr(quote(pi), list()), pi)
+  expect_identical(.normalise_expr(quote(M_E), list()), exp(1))
+  out <- .normalise_expr(quote(sin(2 * pi * TIME / 24)), list())
+  expect_false("pi" %in% all.names(out))
+  expect_identical(out[[2]][[2]][[2]][[3]], pi)
+  # The call head is never a constant: only symbols in argument positions move.
+  expect_identical(.normalise_expr(quote(pi(x)), list())[[1]], quote(pi))
+})
+
+test_that(".normalise_expr leaves a pi the model defines to the rename map", {
+  out <- .normalise_expr(quote(sin(pi * TIME)), list(pi = "PI"))
+  expect_identical(out, quote(sin(PI * TIME)))
+})
+
+test_that("a free constant is not reported as a covariate", {
+  lst <- list(quote(e0 <- t.E0 + sin(pi * TIME)))
+  map <- list(t.E0 = "E0")
+  expect_false("PI" %in% .covariate_names(lst, map))
+  expect_false("pi" %in% .unmapped_symbols(lst, map))
+  # ...but a column the model genuinely reads still is.
+  lst2 <- list(quote(e0 <- t.E0 + sin(pi * WT)))
+  expect_true("WT" %in% .covariate_names(lst2, map))
+})
+
+test_that("every name in .RX_CONSTANTS is one rxode2 reserves", {
+  # Guards the table against a misspelled name, which would silently never
+  # match. `.rxIsReservedName()` is not in every rxode2 build.
+  skip_if_not_installed("rxode2")
+  is_reserved <- get0(".rxIsReservedName", envir = asNamespace("rxode2"),
+                      inherits = FALSE)
+  skip_if(is.null(is_reserved), "rxode2 has no .rxIsReservedName()")
+  expect_true(all(is_reserved(names(.RX_CONSTANTS))))
+})
+
+test_that("every .RX_CONSTANTS value matches the Rmath.h macro of its name", {
+  # rxode2 compiles these names to the C macros, so Rmath.h is the reference --
+  # and an independent one: a wrong formula in the table (log2(10) for
+  # M_LOG10_2, say) is caught here and nowhere else.
+  hdr <- file.path(R.home("include"), "Rmath.h")
+  skip_if_not(file.exists(hdr), "no Rmath.h in R.home('include')")
+  defs <- regmatches(readLines(hdr),
+                     regexec("^#define[[:space:]]+(M_[A-Za-z0-9_]+)[[:space:]]+([0-9.]+)",
+                             readLines(hdr)))
+  defs <- defs[lengths(defs) == 3L]
+  rmath <- setNames(as.numeric(vapply(defs, `[`, "", 3L)),
+                    vapply(defs, `[`, "", 2L))
+  m <- names(.RX_CONSTANTS)[startsWith(names(.RX_CONSTANTS), "M_")]
+  expect_true(all(m %in% names(rmath)))
+  expect_equal(.RX_CONSTANTS[m], rmath[m], tolerance = 1e-15)
+  expect_identical(.RX_CONSTANTS[["pi"]], pi)
+})
+
+test_that("pi in an nlmixr2 model is emitted as a literal, not a column", {
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ e0 <- 1; eta.e ~ 0.1; sd <- 0.5 })
+    model({ E0 <- e0 + eta.e + sin(pi * TIME) + M_E
+            pred <- E0; pred ~ add(sd) })
+  }
+  txt <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(f, validate = FALSE)))$ferx_text
+  expect_match(txt, "E0 = TVE0 + ETA_E + sin(3.14159265358979 * TIME) + 2.71828182845905",
+               fixed = TRUE)
+  expect_no_match(txt, "\\bpi\\b|M_E")
+})
+
+test_that("a pi the nlmixr2 model assigns keeps meaning the model's variable", {
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ e0 <- 1; eta.e ~ 0.1; sd <- 0.5 })
+    model({ pi <- 2; E0 <- e0 + eta.e + sin(pi * TIME)
+            pred <- E0; pred ~ add(sd) })
+  }
+  txt <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(f, validate = FALSE)))$ferx_text
+  expect_match(txt, "PI = 2", fixed = TRUE)
+  expect_match(txt, "sin(PI * TIME)", fixed = TRUE)
+  expect_no_match(txt, "3.14159")
+})
+
+test_that("pi in an ODE right-hand side no longer reads as an undeclared name", {
+  # On main this raised `ERROR | [odes] references PI` and aborted under strict.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ tcl <- log(2); tv <- log(10); eta.cl ~ 0.1; sd <- 0.1 })
+    model({ cl <- exp(tcl + eta.cl); v <- exp(tv)
+            d/dt(centr) <- -cl / v * centr * (1 + 0.1 * sin(2 * pi * time / 24))
+            cp <- centr / v; cp ~ add(sd) })
+  }
+  ir <- suppressWarnings(suppressMessages(
+    rxui_to_ir(rxode2::rxode2(f), source_format = "nlmixr2")))
+  expect_no_match(ir$warnings, "\\[odes\\] references")
+  expect_length(ir$unsupported, 0L)
+  txt <- emit_ferx(ir)
+  expect_match(txt, "sin(2 * 3.14159265358979 * time/24)", fixed = TRUE)
+})

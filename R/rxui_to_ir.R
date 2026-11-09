@@ -1424,12 +1424,71 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   setNames(vapply(nms, function(nm) .norm(.strip_prefix(nm)), ""), nms)
 }
 
+# rxode2's built-in numeric constants, by the name a model writes them.
+#
+# ferx-core defines none of these (its only built-in constant is MACHEPS), and it
+# reads any name it does not know as a data column. Emitted verbatim, `pi` in
+# `sin(2*pi*TIME/24)` therefore becomes a covariate: E_MISSING_COVARIATE at fit
+# time, or -- worse -- a silently wrong model if the dataset has a `pi` column.
+# So each one is replaced by its value wherever it is a FREE symbol (#76).
+#
+# The list is rxode2's own: `pi` plus the `M_*` names `isReservedVariable()` in
+# rxode2's parseVars.h accepts (rxode2 5.1.8), with the values of the Rmath.h
+# macros of the same names. `M_SQRT_2dPI` is in the parser but missing from
+# rxode2's documented table; the parser is what decides.
+#
+# Deliberately absent: `Inf`, `NaN` and `NA` also reach the output verbatim, but
+# R parses them as constants rather than symbols, so they never pass through the
+# symbol branch below, and no finite literal could stand in for them anyway.
+# What ferx makes of them is not measured here; they need their own handling.
+#
+# The emitted precision is whatever deparse() gives every other literal in the
+# output: 15 significant digits, so `pi` is written 3.14159265358979, which is
+# 3.2e-15 below the double. Changing that is a change to every literal, not to
+# this table.
+.RX_CONSTANTS <- c(
+  pi             = pi,
+  M_E            = exp(1),
+  M_LOG2E        = log2(exp(1)),
+  M_LOG10E       = log10(exp(1)),
+  M_LN2          = log(2),
+  M_LN10         = log(10),
+  M_PI           = pi,
+  M_PI_2         = pi / 2,
+  M_PI_4         = pi / 4,
+  M_1_PI         = 1 / pi,
+  M_2_PI         = 2 / pi,
+  M_2_SQRTPI     = 2 / sqrt(pi),
+  M_SQRT2        = sqrt(2),
+  M_SQRT1_2      = 1 / sqrt(2),
+  M_SQRT_3       = sqrt(3),
+  M_SQRT_32      = sqrt(32),
+  M_LOG10_2      = log10(2),
+  M_2PI          = 2 * pi,
+  M_SQRT_PI      = sqrt(pi),
+  M_1_SQRT_2PI   = 1 / sqrt(2 * pi),
+  M_SQRT_2dPI    = sqrt(2 / pi),
+  M_LN_SQRT_PI   = log(sqrt(pi)),
+  M_LN_SQRT_2PI  = log(sqrt(2 * pi)),
+  M_LN_SQRT_PId2 = log(sqrt(pi / 2))
+)
+
+# Raw symbols that are rxode2 constants rather than references. A name the model
+# defines itself is a key of the map and is NOT one of these: rxode2 lets a model
+# assign `pi` (it then means the model's variable), so only a free `pi` is the
+# constant. The `M_*` names cannot be assigned at all -- rxode2 refuses the model.
+.free_constants <- function(syms, map) {
+  syms[syms %in% names(.RX_CONSTANTS) & !(syms %in% names(map))]
+}
+
 # Recursively substitute known parameter names in an expression.
 # Does NOT touch the function-name position of a call (call[[1]]).
 .normalise_expr <- function(expr, map) {
   if (is.symbol(expr)) {
     nm <- as.character(expr)
-    return(as.name(if (nm %in% names(map)) map[[nm]] else nm))
+    if (nm %in% names(map)) return(as.name(map[[nm]]))
+    if (nm %in% names(.RX_CONSTANTS)) return(.RX_CONSTANTS[[nm]])
+    return(expr)
   }
   if (!is.call(expr)) return(expr)
   as.call(c(list(expr[[1]]),
@@ -1568,6 +1627,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   known <- unique(c(assigned,
                     toupper(unlist(name_map, use.names = FALSE)),
                     .norm(names(name_map))))
+  # A free rxode2 constant is emitted as its value, not read from the data.
+  used <- setdiff(used, .free_constants(used, name_map))
   setdiff(unique(.norm(used)), known)
 }
 
@@ -1618,6 +1679,9 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     if (is.symbol(lhs))               assigned <- c(assigned, as.character(lhs))
     else if (.is_ddt_lhs(lhs))        assigned <- c(assigned, .ddt_state(lhs))
   }
+  # A free rxode2 constant is emitted as a numeric literal, so it is not a
+  # symbol in the output at all.
+  used <- setdiff(used, .free_constants(used, name_map))
   setdiff(unique(used), c(names(name_map), assigned))
 }
 
