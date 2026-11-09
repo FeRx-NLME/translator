@@ -3815,6 +3815,27 @@ test_that("every name in .RX_CONSTANTS is one rxode2 reserves", {
   expect_true(all(is_reserved(names(.RX_CONSTANTS))))
 })
 
+test_that(".RX_CONSTANTS holds exactly the constants rxode2's parser knows", {
+  # The other direction (review round 1, finding 5). A constant a later rxode2
+  # adds is emitted verbatim -- a data column to ferx -- until it is in the
+  # table, and a reserved name that is NOT a constant (`tlast`, `rxFlag`) must
+  # never be in it: `.rxIsReservedName()` says yes to both, so it cannot tell.
+  # The parser's own list is the reference: the `M_*` names
+  # isReservedVariable() skips in parseVars.h, plus `pi`, which rxode2 handles
+  # apart because a model may assign it.
+  skip_if_not_installed("rxode2")
+  hdr <- system.file("include", "parseVars.h", package = "rxode2")
+  skip_if(!nzchar(hdr), "this rxode2 build ships no include/parseVars.h")
+  src <- readLines(hdr, warn = FALSE)
+  hits <- regmatches(src, regexpr('strcmp\\("M_[A-Za-z0-9_]+"', src))
+  parser_m <- unique(sub('^strcmp\\("', "", sub('"$', "", hits)))
+  skip_if(length(parser_m) == 0L, "no M_ constants found in parseVars.h")
+  expect_true(any(grepl('strcmp("pi", s)', src, fixed = TRUE)))
+  table_m <- grep("^M_", names(.RX_CONSTANTS), value = TRUE)
+  expect_setequal(table_m, parser_m)
+  expect_setequal(setdiff(names(.RX_CONSTANTS), table_m), "pi")
+})
+
 test_that("every .RX_CONSTANTS value matches the Rmath.h macro of its name", {
   # rxode2 compiles these names to the C macros, so Rmath.h is the reference --
   # and an independent one: a wrong formula in the table (log2(10) for
