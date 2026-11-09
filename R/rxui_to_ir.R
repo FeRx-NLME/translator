@@ -24,6 +24,9 @@
 #'   route doses differently; `NA` means unknown and reports nothing. The
 #'   comparison is by compartment NAME, not by `$MODEL` ordinal, because the
 #'   two agree only while the state list could be put in `$MODEL` COMP order.
+#' @param weighting `"as_written"` (default) or `"weight"`: how a
+#'   compartment-free model's hand-built inverse-variance weighting
+#'   (`pred <- f * sqrt(W)`) is emitted. See [to_ferx()].
 #'
 #' @return A `ferx_ir` object.
 #'
@@ -44,7 +47,8 @@
 #' @export
 rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_character_,
                        scaling_hint = list(), obs_hint = NULL,
-                       has_cmt_col = NA) {
+                       has_cmt_col = NA, weighting = "as_written") {
+  weighting <- match.arg(weighting, c("as_written", "weight"))
   ini  <- ui$iniDf
   lst  <- ui$lstExpr
   warn <- character()
@@ -106,10 +110,20 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   for (e in lst)
     if (.is_assignment(e) && is.symbol(e[[2]]))
       assigned_lhs_raw <- c(assigned_lhs_raw, .norm(as.character(e[[2]])))
+  # The data columns, as the source spells them: every free symbol that is not
+  # a parameter (theta, eta, kappa or sigma, by raw name), a variable or a state.
+  # ferx resolves theta and eta before covariate, so a parameter emitted under a
+  # column's exact header hides the column -- `ini(w <- 2)` beside a column `W`
+  # emitted `theta W` and `y = G * sqrt(W)` read the theta, no diagnostic.
+  # Reserved in both naming owners below; matched by exact header there, since
+  # ferx binds a column case-sensitively (a theta `W` leaves a column `w` alone).
+  source_cols <- .model_covariates(
+    lst, c(.norm_map_from_ini(ini),
+           setNames(nm = c(theta_out$raw_names, unlist(lapply(re_entries, `[[`, "raw"))))))
   re_out <- .uniquify_random_names(
     re_entries,
     taken = c(vapply(theta_out$thetas, function(t) t$name, ""),
-              assigned_lhs_raw, .RESERVED_ODE_NAMES))
+              assigned_lhs_raw, .RESERVED_ODE_NAMES, source_cols))
   warn   <- c(warn, re_out$warnings)
 
   # Write back by channel tag, not by computed offset.
@@ -118,6 +132,14 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   for (i in seq_along(omega_out$omegas)) omega_out$omegas[[i]]$names <- om[[i]]$name
   for (i in seq_along(kappa_out$kappas)) kappa_out$kappas[[i]]$name  <- ka[[i]]$name
   for (i in seq_along(sigma_out$sigmas)) sigma_out$sigmas[[i]]$name  <- sg[[i]]$name
+
+  # A variance below ferx's guard is moved by the engine without a word; move it
+  # here instead, where it can be reported (translator#74). After the renaming
+  # above, so the message names the omega as the emitted file does.
+  floor_out <- .floor_variances(omega_out$omegas, kappa_out$kappas)
+  omega_out$omegas <- floor_out$omegas
+  kappa_out$kappas <- floor_out$kappas
+  warn      <- c(warn, floor_out$warnings)
 
   # The flattening (ETA-coded IOV read as IIV) is a nonmem2rx behaviour, so the
   # warning -- which names nonmem2rx -- is only emitted for NONMEM sources.
@@ -407,7 +429,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       # (The current theta names need not be listed -- .deshadow_theta_names()
       # already folds them into `taken`.)
       reserved    = c(reserved_base,
-                      .ode_states(expr_out$odes))
+                      .ode_states(expr_out$odes)),
+      columns     = source_cols
     )
     if (!any(!is.na(desh$map))) break
     for (i in seq_along(theta_out$thetas)) {
@@ -444,6 +467,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
         "INFO  | theta '", theta_orig[i], "' shares a name with an individual ",
         "parameter -- renamed to '", final, "' (in ferx a theta silently shadows ",
         "an identically named individual parameter)"))
+    if (any(rename_why[[i]] == "column")) warn <- c(warn, paste0(
+      "WARN  | theta '", theta_orig[i], "' has the name of the data column '",
+      theta_orig[i], "' -- renamed to '", final, "'. ferx resolves a theta before ",
+      "a covariate, so every reference to the column would have read the theta."))
     if (any(rename_why[[i]] == "builtin")) warn <- c(warn, paste0(
       "WARN  | theta '", theta_orig[i], "' collides with a ferx solver builtin (",
       paste(.RESERVED_ODE_NAMES, collapse = ", "), ") -- renamed to '", final,
@@ -1209,6 +1236,34 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   warn      <- c(warn, expr_out$warnings)
   unsp      <- c(unsp, expr_out$unsupported)
 
+  coll <- .source_name_collisions(lst, name_map)
+  warn <- c(warn, coll$warnings)
+  unsp <- c(unsp, coll$unsupported)
+
+  # A compartment-free model (translator#74): no linCmt(), no d/dt(), and an
+  # error line reading an ordinary variable. Its prediction becomes `y = ...`.
+  weight_column <- NA_character_
+  if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
+    cf <- .lower_compartment_free(
+      expr_out,
+      kappa_names = vapply(kappa_out$kappas, function(k) k$name, ""),
+      param_names = c(vapply(theta_out$thetas, function(t) t$name, ""),
+                      random_names),
+      weighting = weighting)
+    if (!is.null(cf)) {
+      expr_out$indiv_params <- cf$indiv_params
+      expr_out$error_model  <- cf$error_model
+      structural            <- cf$structural
+      weight_column         <- cf$weight_column
+      warn                  <- c(warn, cf$warnings)
+    }
+  }
+  if (identical(weighting, "weight") && is.na(weight_column))
+    cli::cli_abort(c(
+      "{.code weighting = \"weight\"} applies only to a compartment-free model whose error line reads a prediction written as {.code f * sqrt(W)}.",
+      i = "This model has a linCmt(), a d/dt(), or no such error line."),
+      call = NULL)
+
   if (!lincmt_found && length(structural) == 0 && length(expr_out$odes) == 0) {
     warn <- c(warn, "ERROR | No structural model detected -- [structural_model] section omitted")
     unsp <- c(unsp, "structural model (no linCmt() or d/dt() found in model block)")
@@ -1301,6 +1356,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                                    map = dose_out$map)
     if (is.character(scaling$obs_scale))
       scaling$obs_scale <- .rewrite_syms(scaling$obs_scale, dose_out$map)
+    if (identical(structural$type, "algebraic"))
+      structural$y <- .rewrite_syms(structural$y, dose_out$map)
   }
 
   # Drop $ERROR scaffolding from [individual_parameters] (issue #6 defect 6).
@@ -1331,6 +1388,8 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
       .ip_refs(expr_out$indiv_params),
       unlist(lapply(init_conds, function(x) sym_of(x$rhs))),
       if (is.character(scaling$obs_scale)) sym_of(scaling$obs_scale),
+      # A compartment-free `y = PRED` reads PRED; never treat it as scaffolding.
+      if (identical(structural$type, "algebraic")) sym_of(structural$y),
       unlist(structural$pk_args)))
 
     # Per STATEMENT, not per name. `.ip_names()` walks into branches, so a
@@ -1379,6 +1438,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
     error_suggestion = expr_out$error_suggestion,
     scaling       = scaling,
     fit_options   = fit_opts,
+    covariates    = if (is.na(weight_column)) character() else
+                      sort(unique(c(weight_column, .model_covariates(lst, name_map))),
+                           method = "radix"),
+    weight_column = weight_column,
     warnings      = warn,
     unsupported   = unsp,
     state_renames = state_map
@@ -2142,9 +2205,10 @@ bound_name <- function(entries, raw) {
       if (!identical(cand, nms[j]))
         warn <- c(warn, paste0(
           "INFO  | random effect '", raw[j], "' emits as '", cand, "': '", nms[j],
-          "' is already taken by another emitted name (ferx compares names ",
-          "case-insensitively, and distinct source names can normalise onto ",
-          "one spelling)"))
+          "' is already taken by another emitted name or a data column (ferx ",
+          "compares names case-insensitively, distinct source names can ",
+          "normalise onto one spelling, and a random effect resolves before a ",
+          "column)"))
       new[j] <- cand
       used   <- c(used, cand)
     }
@@ -2283,7 +2347,7 @@ bound_name <- function(entries, raw) {
 # to both the emitted name and `name_map`; renaming in one without the other
 # leaves references pointing at a name nothing declares.
 .deshadow_theta_names <- function(theta_names, indiv_names,
-                                  reserved = character()) {
+                                  reserved = character(), columns = character()) {
   n   <- length(theta_names)
   map <- rep(NA_character_, n)
   if (n == 0L) return(list(map = map, reasons = list(), warnings = character()))
@@ -2297,11 +2361,17 @@ bound_name <- function(entries, raw) {
   # reason it is for a shadowing theta: this function owns theta naming, and
   # `theta TVTIME` + `KA = TVTIME * ...` is the same model under another label.
   builtin  <- toupper(theta_names) %in% .RESERVED_ODE_NAMES
-  todo     <- which(shadowed | duped | builtin)
+  # A theta under a data column's exact header hides the column (theta resolves
+  # first). Exact, not case-folded: ferx binds a column by its case-sensitive
+  # header, and a theta `W` leaves a column `w` readable (measured, ferx-r main,
+  # maxiter = 0: OFV 1203.57 either way, 1060.93 for theta `W` beside column `W`).
+  column   <- theta_names %in% columns
+  todo     <- which(shadowed | duped | builtin | column)
   if (length(todo) == 0L)
     return(list(map = map, reasons = vector("list", n), warnings = character()))
 
-  taken   <- toupper(c(theta_names, indiv_names, reserved, .RESERVED_ODE_NAMES))
+  taken   <- toupper(c(theta_names, indiv_names, reserved, .RESERVED_ODE_NAMES,
+                       columns))
   reasons <- vector("list", n)
   for (i in todo) {
     new    <- .free_theta_name(theta_names[i], taken)
@@ -2314,6 +2384,7 @@ bound_name <- function(entries, raw) {
     if (duped[i])    reasons[[i]] <- c(reasons[[i]], "duplicate")
     if (shadowed[i]) reasons[[i]] <- c(reasons[[i]], "shadow")
     if (builtin[i])  reasons[[i]] <- c(reasons[[i]], "builtin")
+    if (column[i])   reasons[[i]] <- c(reasons[[i]], "column")
   }
   list(map = map, reasons = reasons, warnings = character())
 }
@@ -2943,6 +3014,7 @@ bound_name <- function(entries, raw) {
   structural   <- list()
   warnings     <- character()
   unsupported  <- character()
+  tilde_lhs    <- character()
 
   # Seed every ordinary assignment target before the walk, so a reference that
   # appears BEFORE its defining assignment resolves to the same emitted name as
@@ -3069,6 +3141,13 @@ bound_name <- function(entries, raw) {
     }
 
     if (.is_tilde(expr)) {
+      # The variable the error line reads -- `pred` in `pred ~ add(sd)`. With no
+      # linCmt() and no d/dt() it IS the prediction of a compartment-free model,
+      # and .lower_compartment_free() moves it into [structural_model] as `y`.
+      # Recorded as emitted (normalised), which is how [individual_parameters]
+      # spells its assignment.
+      if (is.symbol(expr[[2]]))
+        tilde_lhs <- c(tilde_lhs, .norm(as.character(expr[[2]])))
       err_out     <- .parse_error_rhs(expr[[3]], name_map)
       if (is.na(err_out$type))
         error_suggestion <- .error_model_suggestion(deparse1(expr[[3]]), err_out$eps)
@@ -3527,6 +3606,7 @@ bound_name <- function(entries, raw) {
     error_suggestion = error_suggestion,
     readout      = readout,
     structural   = structural,
+    tilde_lhs    = tilde_lhs,
     warnings     = warnings,
     unsupported  = unsupported
   )

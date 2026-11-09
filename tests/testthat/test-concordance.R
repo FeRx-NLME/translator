@@ -519,6 +519,11 @@ test_that("a parameter named like a dose attribute is not applied to the dose", 
 # the `sigma` lines in [parameters], so that is what this guards. A test written
 # against the combined() arguments would pass whether or not the bug is fixed --
 # it was, until this was measured.
+#
+# ferx-core#1001 has since been answered by refusing the mismatch
+# (E_SIGMA_ORDER_MISMATCH, ferx-core 3cd1586 / ferx-r 4d73254): the names are
+# now checked against the positions. The test below asserts that contract; the
+# history above is why the declaration order is what this translator owns.
 test_that("sigma declaration order follows the error roles, and is load-bearing", {
   ctl <- c(
     "$PROBLEM combined error, additive term written first",
@@ -574,19 +579,27 @@ test_that("sigma declaration order follows the error roles, and is load-bearing"
     fit$ofv
   }
   correct <- ofv_of(emitted)
-  swapped <- ofv_of(sub("sigma EPS2 ~ 0.05 (sd)\n  sigma EPS1 ~ 2.0 (sd)",
-                        "sigma EPS1 ~ 2.0 (sd)\n  sigma EPS2 ~ 0.05 (sd)",
-                        emitted, fixed = TRUE))
-  # The discriminating half. If this ever stops holding, the declaration order has
-  # stopped mattering and the assertion above has become decorative.
-  expect_false(isTRUE(all.equal(correct, swapped, tolerance = 1e-6)))
+  swap_decl <- function(txt) sub("sigma EPS2 ~ 0.05 (sd)\n  sigma EPS1 ~ 2.0 (sd)",
+                                 "sigma EPS1 ~ 2.0 (sd)\n  sigma EPS2 ~ 0.05 (sd)",
+                                 txt, fixed = TRUE)
+  swap_args <- function(txt) sub("combined(EPS2, EPS1)", "combined(EPS1, EPS2)",
+                                 txt, fixed = TRUE)
 
-  # And the transposed ARGUMENT order really is inert -- the fact that makes the
-  # declaration order the only lever. Stated as a test so it cannot quietly
-  # change under us.
-  arg_swapped <- ofv_of(sub("combined(EPS2, EPS1)", "combined(EPS1, EPS2)",
-                            emitted, fixed = TRUE))
-  expect_equal(arg_swapped, correct, tolerance = 1e-9)
+  # Since ferx-core 3cd1586 (ferx-r 4d73254, ferx-core#1001) the engine checks
+  # the names against the positions and REFUSES a mismatch, where ferx-r
+  # 9c97c13 bound positionally and silently: swapping the declarations used to
+  # move the OFV, swapping the arguments used to do nothing. Either half alone
+  # is now E_SIGMA_ORDER_MISMATCH -- so the declaration order this translator
+  # emits is load-bearing in the loud direction, and the argument order (which
+  # .order_sigmas_for_error() also keeps in role order) has stopped being inert.
+  expect_error(ofv_of(swap_decl(emitted)), "E_SIGMA_ORDER_MISMATCH")
+  expect_error(ofv_of(swap_args(emitted)), "E_SIGMA_ORDER_MISMATCH")
+
+  # The discriminating half. Swapping BOTH consistently parses, and makes the
+  # SD-2.0 sigma the proportional one. If this stops moving the OFV, the role
+  # assignment the assertions above protect has stopped mattering.
+  both <- ofv_of(swap_args(swap_decl(emitted)))
+  expect_false(isTRUE(all.equal(correct, both, tolerance = 1e-6)))
 })
 
 # ===========================================================================
@@ -750,4 +763,149 @@ test_that("a FIXed omega, sigma and theta are HELD by the engine, and a free one
   # is estimated -- every assertion above would still hold.
   expect_gt(abs(om[["ETA_KA"]] / 0.01 - 1), 0.5,
             label = "free omega ETA_KA moved off its initial")
+})
+
+# ===========================================================================
+# COMPARTMENT-FREE MBMA (Tier 4, translator#74)
+# Bill Denney's arm-level Emax meta-analysis (FeRx-NLME/ferx-r#721), on the
+# simulated data of data-raw/generate_mbma_emax_data.R. The check is his: ferx's
+# OFV at nlmixr2's FOCEi estimates must equal nlmixr2's objf, and objf minus
+# sum(log(W)) for the `weight =` translation. Both engines leave out the
+# N*log(2*pi) term. `maxiter = 0` holds every parameter at the translated
+# initials, which here ARE nlmixr2's estimates, so this is an evaluation, not
+# a fit, and the 1e-3 tolerance is about printing precision rather than
+# optimizer noise (measured: both differences are -2.9e-7).
+# ===========================================================================
+
+.mbma_ref <- function() {
+  ref <- utils::read.csv(system.file("testdata", "mbma_emax_nlmixr2_ref.csv",
+                                     package = "ferxtranslate", mustWork = TRUE))
+  stats::setNames(ref$value, ref$name)
+}
+
+.mbma_data <- function() {
+  utils::read.csv(system.file("testdata", "mbma_emax_nlmixr2.csv",
+                              package = "ferxtranslate", mustWork = TRUE))
+}
+
+# The bundled model with nlmixr2's estimates as its initial values -- what
+# nlmixr2_to_ferx(fit) gives, without needing nlmixr2est at test time.
+.mbma_ui_at_ref <- function() {
+  env <- new.env()
+  sys.source(r2_path("mbma_emax_nlmixr2.R"), envir = env)
+  ui  <- rxode2::rxode2(env$mbma_emax)
+  ref <- .mbma_ref()
+  est <- ref[names(ref) != "objf"]
+  ini <- ui$iniDf
+  stopifnot(all(names(est) %in% ini$name))
+  ini$est[match(names(est), ini$name)] <- est
+  ui$iniDf <- ini
+  ui
+}
+
+# A path, not a data frame: ferx-r@9c97c13 (the previous pin) accepts only a
+# path (`stopifnot(file.exists(data))`); 4d73254 accepts either. A path keeps
+# these tests runnable against both while a pin bump is being checked.
+.csv_tmp <- function(d) {
+  f <- tempfile(fileext = ".csv")
+  utils::write.csv(d, f, row.names = FALSE)
+  f
+}
+
+.mbma_ofv <- function(txt, data) {
+  fit <- suppressWarnings(ferx_fit(.write_tmp(.eval_only(txt)),
+                                   data = .csv_tmp(data), verbose = FALSE))
+  fit$ofv
+}
+
+test_that("MBMA as written: ferx's OFV at nlmixr2's estimates equals nlmixr2's objf", {
+  skip_if_not_installed("rxode2")
+  res <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(.mbma_ui_at_ref(), validate = FALSE)))
+  expect_length(res$unsupported, 0)
+  ofv <- .mbma_ofv(res$ferx_text, .mbma_data())
+  expect_equal(ofv, .mbma_ref()[["objf"]], tolerance = 1e-3, scale = 1)
+})
+
+test_that("MBMA weight = : ferx's OFV equals nlmixr2's objf minus sum(log(W))", {
+  skip_if_not_installed("rxode2")
+  res <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(.mbma_ui_at_ref(), validate = FALSE, weighting = "weight")))
+  d   <- .mbma_data()
+  ofv <- .mbma_ofv(res$ferx_text, ferx_weighted_data(d, res$weight_column))
+  expect_equal(ofv, .mbma_ref()[["objf"]] - sum(log(d$W)), tolerance = 1e-3,
+               scale = 1)
+})
+
+test_that("MBMA OFV check can see a broken translation", {
+  # The two tests above prove nothing unless a wrong translation misses the
+  # target. Each mutation is one of the ways this translation could break,
+  # applied to the emitted text; each must move the OFV by far more than the
+  # 1e-3 tolerance.
+  skip_if_not_installed("rxode2")
+  ui  <- .mbma_ui_at_ref()
+  d   <- .mbma_data()
+  ref <- .mbma_ref()[["objf"]]
+  txt <- suppressWarnings(suppressMessages(nlmixr2_to_ferx(ui, validate = FALSE)))$ferx_text
+  mut <- function(from, to, x = txt) {
+    stopifnot(grepl(from, x, fixed = TRUE))
+    sub(from, to, x, fixed = TRUE)
+  }
+  # Row 3: the occasion effect read as a subject effect.
+  iiv <- mut("  iov_column = OCC", "", mut("kappa IOV_EMAX", "omega IOV_EMAX"))
+  # Row 2: the one-line if dropped, so ONSET keeps its default 0.
+  no_if <- sub("\n  if \\(TIME > 0\\) \\{[^\n]*\\}", "", txt)
+  stopifnot(!identical(no_if, txt))
+  for (bad in list(iiv = iiv, no_if = no_if))
+    expect_gt(abs(.mbma_ofv(bad, d) - ref), 1)
+
+  # Row 4: the weighted form with `* sqrt(W)` left in the prediction.
+  wtxt <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(ui, validate = FALSE, weighting = "weight")))$ferx_text
+  double <- mut("y = (E0 - EFF)", "y = (E0 - EFF) * sqrt(W)", wtxt)
+  expect_gt(abs(.mbma_ofv(double, ferx_weighted_data(d, "W")) -
+                  (ref - sum(log(d$W)))), 1)
+})
+
+test_that("MBMA row 7: a theta starting positive reaches a negative estimate", {
+  # What the negative lower bound buys. The baseline is written with an offset
+  # of +20, so the data put TVE0 near -10.7 while it starts at +9, and TVE0
+  # enters linearly, so nothing but the packing stands in the way. Identity
+  # packing gets there; the control -- the same file with the lower bound at 0,
+  # which ferx log-packs -- stops at its floor. Measured on ferx-r df7ffa7:
+  # -10.67 (OFV 209.44) against 0.00 (OFV 250.01).
+  #
+  # The obvious fixture -- the Emax written with the opposite sign, TVEMAX
+  # starting at +6 -- does NOT discriminate: started there, both packings
+  # escape to a degenerate optimum with LED50 at 13.9 and TVEMAX at +0.4, the
+  # effect switched off rather than its sign flipped.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({
+      tve0 <- 9
+      tvemax <- 6
+      led50 <- log(30)
+      lt50 <- log(2)
+      eta.e0 ~ 1
+      sdw <- 1
+    })
+    model({
+      E0 <- tve0 + eta.e0
+      ONSET <- 0
+      if (TIME > 0) ONSET <- TIME / (exp(lt50) + TIME)
+      EFF <- tvemax * DOSE / (exp(led50) + DOSE) * ONSET
+      pred <- (E0 + 20 - EFF) * sqrt(W)
+      pred ~ add(sdw)
+    })
+  }
+  txt <- suppressWarnings(suppressMessages(nlmixr2_to_ferx(f, validate = FALSE)))$ferx_text
+  expect_match(txt, "theta TVE0(9.0, -1e15, 1e15)", fixed = TRUE)
+  fit_theta <- function(x) {
+    x <- sub("covariance = true", "covariance = false", x, fixed = TRUE)
+    suppressWarnings(ferx_fit(.write_tmp(x), data = .csv_tmp(.mbma_data()),
+                              verbose = FALSE))$theta[["TVE0"]]
+  }
+  expect_lt(fit_theta(txt), -5)
+  expect_gte(fit_theta(sub("theta TVE0(9.0, -1e15, 1e15)",
+                           "theta TVE0(9.0, 0.0, 1e15)", txt, fixed = TRUE)), 0)
 })

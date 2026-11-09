@@ -170,7 +170,13 @@ test_that("pk_1cmt_oral_ampsim: fixed-effect V passthrough appears in pk macro",
 
 test_that("TMDD with a FLAG dispatch: Form C readout + selected error model", {
   skip_if_not_installed("nonmem2rx")
-  result <- suppressWarnings(nm_to_ferx(nm_path("qss_tmdd.mod")))
+  # validate = FALSE: the snapshot is of the TRANSLATION, and must not depend on
+  # which engine (if any) the job has. Validation folds engine findings into the
+  # file, and from ferx-r 4d73254 the engine reports two advisory W_PARSE /
+  # W_ODE_RHS_INTERPRETED notes on this model's `if` in [odes] -- present in the
+  # engine job, absent in the fast job that has no ferx, so one snapshot cannot
+  # serve both. Engine acceptance of this model is the concordance tier's job.
+  result <- suppressWarnings(nm_to_ferx(nm_path("qss_tmdd.mod"), validate = FALSE))
   expect_snapshot(cat(norm_snap(result$ferx_text)))
   expect_length(result$unsupported, 0L)
   # The three halves of defect 5, asserted rather than left to the snapshot: a

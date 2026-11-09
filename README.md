@@ -90,6 +90,8 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
 | Source feature | Status |
 |---|---|
 | 1, 2, 3-compartment, oral and IV | Translated |
+| Compartment-free (nlmixr2 `pred <- ...; pred ~ add(sd)`, e.g. MBMA) | Translated as `y = ...` [^cf] |
+| Hand-built inverse-variance weighting (`pred <- f * sqrt(W)`) | As written, or `weight = 1/sqrt(W)` with `weighting = "weight"` [^cf] |
 | Covariates (allometric power, linear) | Translated |
 | Block omega | Translated |
 | IOV (diagonal kappas) | Translated [^iov] |
@@ -108,6 +110,17 @@ See `vignette("translating-nonmem")` for the full catalogue. Short version:
     translator emits a `WARN` when a `KAPPA*`/`IOV*`-named eta lands in the
     `[omega]` block, telling you to declare it as a `kappa` and set
     `iov_column`.
+
+[^cf]: For a compartment-free model the prediction becomes `y = <expr>` in
+    `[structural_model]`, with no `pk`/`ode` line. A meta-analysis that weights
+    each arm by hand -- `DV` pre-multiplied by `sqrt(W)`, `pred <- f * sqrt(W)`
+    -- can be emitted as written, or with `nlmixr2_to_ferx(m, weighting =
+    "weight")` as `y = f` plus `DV ~ additive(SD) weight = 1/sqrt(W)`, fitted
+    to `ferx_weighted_data(data, "W")`. The likelihoods are the same; ferx's
+    OFV for the weighted form is the source's minus `sum(log(W))`. Needs a ferx
+    engine at or after ferx-r `4d73254`: earlier builds refuse a model with no
+    `pk`/`ode` line. Adapted from Bill Denney's standalone translator
+    (FeRx-NLME/ferx-r#721).
 
 [^dvid]: ferx supports multiple observation types via a per-CMT error model
     (`CMT=2: DV ~ proportional(...)`, `CMT=3: DV ~ additive(...)`, with per-CMT

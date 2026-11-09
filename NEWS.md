@@ -1,5 +1,82 @@
 # ferxtranslate 0.1.0.9000
 
+## New features
+
+* `nlmixr2_to_ferx()` translates compartment-free models, the kind a
+  model-based meta-analysis writes (translator#74). Adapted from Bill Denney's
+  standalone nlmixr2 -> ferx translator (FeRx-NLME/ferx-r#721), with his
+  permission. On his simulated arm-level Emax example, ferx's OFV at nlmixr2's
+  FOCEi estimates matches nlmixr2's `objf` to 3e-7 for both weightings below.
+  Case by case:
+
+  - **No `linCmt()`, no `d/dt()`.** The variable the error line reads becomes
+    `y = <expr>` in `[structural_model]`, with no `pk`/`ode` line. It is
+    inlined when it is assigned once and read nowhere else. Otherwise, or when
+    it reads a kappa directly, the assignment stays in `[individual_parameters]`
+    and `y = <NAME>` reads it. ferx refuses a kappa in a `y =` expression.
+  - **One-line `if` after a default** (`ONSET <- 0; if (TIME > 0) ONSET <- ...`)
+    is emitted as a block `if` after its default. This was already the case and
+    is now tested. An `if` with no earlier default is translator#43, whose fix
+    lives in the shared `rxui_to_ir()` and so covers nlmixr2 too.
+  - **`iov ~ v | OCC`** gives `kappa` plus `iov_column = OCC`. This was already
+    the case and is now tested, including at the engine. Weighted kappas and
+    `level` lines have no nlmixr2 spelling, so they are out of scope.
+  - **Hand-built inverse-variance weighting** (`pred <- f * sqrt(W)`, DV
+    pre-multiplied by `sqrt(W)`). The new `weighting` argument emits it either
+    as written (the default) or, with `weighting = "weight"`, as `y = f` plus
+    `DV ~ additive(SD) weight = 1/sqrt(W)`. The weighted form is fitted to
+    `ferx_weighted_data(data, "W")` (new, exported), which divides DV back by
+    `sqrt(W)`. ferx's OFV is then the source's minus `sum(log(W))`. A model the
+    weighted form cannot represent is refused rather than emitted as written.
+    Examples: a non-additive error, a prediction assigned twice, or a `W` that
+    is a parameter. The weight is written as the expression rather than a
+    precomputed `SE` column, so the model reads the one column the source
+    already reads.
+  - **Constant expressions and `fix()` in `ini()`** (`led50 <- log(30)`,
+    `fix(...)`). These were already evaluated and kept as `FIX`, and are now
+    tested.
+  - **Names ferx cannot tell apart** are refused by name, with an `ERROR` and a
+    `$unsupported` entry. Examples: `eff` and `EFF`,
+    `a.b` and `a_b`, and a variable `dose` beside a data column `DOSE`. Each of
+    these was silently merged before. The `dose` case emitted `DOSE = 3` and then
+    read it where the source read the column. A data column is matched by its
+    exact header, as ferx binds it, so columns `wt` and `WT` are two columns and
+    are not refused. Collisions that already have an owner keep being renamed
+    with a warning: a theta beside its variable (`TVE0`), an eta beside a
+    variable, the reserved dose-attribute names (`F_PAR`), and now a theta or
+    eta under a data column's exact header (`ini(w <- 2)` beside a column `W`
+    emitted `theta W`, and every `W` then read the theta).
+  - **Linear thetas stay on the natural scale.** ferx log-packs a theta whose
+    lower bound is >= 0. An unbounded nlmixr2 theta already got `-1e15`, which
+    keeps it linear. The new test shows why that matters: a theta starting at +9
+    whose estimate is -10.7 gets there, and with a lower bound of 0 it stops at
+    0. Bill's `(init - 100, init + 100)` box was measured to fit identically on
+    his example, so it is not imposed. It would add a range nlmixr2 never had.
+  - **Variances below ferx's guard** (`exp(-12)` = 6.144e-6) start at 1e-5 with
+    a `WARN`, for estimated omegas and kappas from any source. ferx otherwise
+    moves them to its rail silently. A `FIX` variance is not moved, because
+    ferx holds it exactly. Measured: a `FIX` omega at 1e-8 gives a different OFV
+    from one at 1e-5. A block omega's diagonal is reported, not moved.
+
+  `nlmixr2_to_ferx()` also accepts a fitted nlmixr2 object (via `$finalUi`),
+  whose estimates become the initial values.
+
+## CI
+
+* The engine pin moves to `ferx-r@4d73254` (ferx-r main; ferx-core
+  `3cd15863`), from `ferx-r@9c97c13`. The pinned engine refused every
+  compartment-free model ("No PK model found in [structural_model] block") and
+  had no `weight =`, so the compartment-free translation of translator#74
+  could not be checked in CI without the move. The full suite was run locally against a build of exactly
+  `4d73254`. The reference omegas and `inst/testdata/` did not need
+  re-baselining. Two tests changed with the engine:
+  - The sigma-order test now asserts `E_SIGMA_ORDER_MISMATCH`, ferx-core#1001's
+    resolution. The engine checks sigma names against positions and refuses a
+    mismatch, where it used to bind positionally and silently.
+  - The `qss_tmdd.mod` snapshot is taken with `validate = FALSE`. The newer
+    engine adds two advisory notes about the model's `if` in `[odes]`, and those
+    would make one snapshot disagree between the engine job and the fast job.
+
 ## Bug fixes
 
 * R's constant `pi` and rxode2's `M_*` constants (`M_E`, `M_SQRT2`,
