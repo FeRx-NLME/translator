@@ -1473,26 +1473,35 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   M_LN_SQRT_PId2 = log(sqrt(pi / 2))
 )
 
-# Raw symbols that are rxode2 constants rather than references. A name the model
-# defines itself is a key of the map and is NOT one of these: rxode2 lets a model
-# assign `pi` (it then means the model's variable), so only a free `pi` is the
-# constant. The `M_*` names cannot be assigned at all -- rxode2 refuses the model.
-.free_constants <- function(syms, map) {
-  syms[syms %in% names(.RX_CONSTANTS) & !(syms %in% names(map))]
-}
+# The raw symbols in `syms` that name an rxode2 constant. Callers subtract the
+# names the model defines itself before asking, so this is a name filter only.
+.free_constants <- function(syms) intersect(syms, names(.RX_CONSTANTS))
 
 # Recursively substitute known parameter names in an expression.
 # Does NOT touch the function-name position of a call (call[[1]]).
-.normalise_expr <- function(expr, map) {
+#
+# With `constants = TRUE` (the walk over the SOURCE model) a free rxode2 constant
+# becomes its value. That is correct only against the full name map: rxode2 lets
+# a model assign `pi` -- or use it as a state -- and then it means the model's
+# name, which the map knows and this function sees first.
+#
+# Passes that re-parse EMITTED text (`.rewrite_syms()`,
+# `.scope_odes_to_params()`) pass `constants = FALSE`. They hold only a partial
+# map -- theta carriers, dose-attribute renames -- in which a model's own `pi`
+# is not a key, and by then every free constant is already a literal, so any
+# `pi` symbol still present IS the model's. A state keeps its lowercase name, so
+# substituting there turned `d/dt(pi) = -K * pi` into zero-order elimination.
+.normalise_expr <- function(expr, map, constants = TRUE) {
   if (is.symbol(expr)) {
     nm <- as.character(expr)
     if (nm %in% names(map)) return(as.name(map[[nm]]))
-    if (nm %in% names(.RX_CONSTANTS)) return(.RX_CONSTANTS[[nm]])
+    if (constants && nm %in% names(.RX_CONSTANTS)) return(.RX_CONSTANTS[[nm]])
     return(expr)
   }
   if (!is.call(expr)) return(expr)
   as.call(c(list(expr[[1]]),
-            lapply(as.list(expr[-1]), .normalise_expr, map = map)))
+            lapply(as.list(expr[-1]), .normalise_expr, map = map,
+                   constants = constants)))
 }
 
 # Overwrite `map` with `pins`, unconditionally. State renames are folded in this
@@ -1628,7 +1637,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                     toupper(unlist(name_map, use.names = FALSE)),
                     .norm(names(name_map))))
   # A free rxode2 constant is emitted as its value, not read from the data.
-  used <- setdiff(used, .free_constants(used, name_map))
+  used <- setdiff(used, .free_constants(used))
   setdiff(unique(.norm(used)), known)
 }
 
@@ -1681,7 +1690,7 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   }
   # A free rxode2 constant is emitted as a numeric literal, so it is not a
   # symbol in the output at all.
-  used <- setdiff(used, .free_constants(used, name_map))
+  used <- setdiff(used, .free_constants(used))
   setdiff(unique(used), c(names(name_map), assigned))
 }
 
@@ -2445,7 +2454,8 @@ bound_name <- function(entries, raw) {
     return(txt)
   e <- tryCatch(str2lang(txt), error = function(e) NULL)
   if (is.null(e)) return(txt)
-  paste(deparse(.normalise_expr(e, map), width.cutoff = 500L), collapse = " ")
+  paste(deparse(.normalise_expr(e, map, constants = FALSE), width.cutoff = 500L),
+        collapse = " ")
 }
 
 # -- iniDf extractors ---------------------------------------------------------
@@ -2818,7 +2828,8 @@ bound_name <- function(entries, raw) {
   rw <- function(x) {
     e <- tryCatch(str2lang(x), error = function(e) NULL)
     if (is.null(e)) return(x)
-    paste(deparse(.normalise_expr(e, as.list(carrier)), width.cutoff = 500L),
+    paste(deparse(.normalise_expr(e, as.list(carrier), constants = FALSE),
+                  width.cutoff = 500L),
           collapse = " ")
   }
   # A conditional carries a carrier reference in its condition as readily as in

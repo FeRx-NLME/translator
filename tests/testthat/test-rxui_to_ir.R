@@ -3877,3 +3877,47 @@ test_that("pi in an ODE right-hand side no longer reads as an undeclared name", 
   txt <- emit_ferx(ir)
   expect_match(txt, "sin(2 * 3.14159265358979 * time/24)", fixed = TRUE)
 })
+
+test_that("a STATE named pi survives the passes that re-parse emitted text", {
+  # Review round 1, finding 1. A state keeps its lowercase name, so the partial
+  # maps of the re-parse passes do not hold it, and substituting there turned
+  # first-order elimination into zero-order. Two fixtures, one per pass: the
+  # theta read from [odes] goes through .scope_odes_to_params(), the dose-shaped
+  # `F1` through .rewrite_syms(). main got both right.
+  skip_if_not_installed("rxode2")
+  carrier <- function() {
+    ini({ tcl <- log(2); v <- 10; eta.cl ~ 0.1; sd <- 0.1 })
+    model({ k <- exp(tcl + eta.cl)
+            d/dt(pi) <- -exp(tcl) / v * pi * k
+            cp <- pi / v; cp ~ add(sd) })
+  }
+  dose_attr <- function() {
+    ini({ cl <- 1; v <- 10; eta.cl ~ 0.1; sd <- 0.1 })
+    model({ cl <- cl * exp(eta.cl); F1 <- 2
+            d/dt(pi) <- -cl / v * pi * F1
+            cp <- pi / v; cp ~ add(sd) })
+  }
+  odes <- function(f) {
+    txt <- suppressWarnings(suppressMessages(
+      nlmixr2_to_ferx(f, validate = FALSE)))$ferx_text
+    grep("d/dt(pi)", strsplit(txt, "\n")[[1]], fixed = TRUE, value = TRUE)
+  }
+  expect_identical(trimws(odes(carrier)), "d/dt(pi) = -exp(TCL)/V * pi * K")
+  expect_identical(trimws(odes(dose_attr)), "d/dt(pi) = -CL/V * pi * F1_PAR")
+})
+
+test_that("pi in an initial condition is emitted as a literal", {
+  # Review round 1, finding 2. main dropped this statement with an ERROR, so the
+  # compartment started at 0 instead of 100*pi.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ cl <- 1; v <- 10; eta.cl ~ 0.1; sd <- 0.1 })
+    model({ cl <- cl * exp(eta.cl); centr(0) <- 100 * pi
+            d/dt(centr) <- -cl / v * centr
+            cp <- centr / v; cp ~ add(sd) })
+  }
+  r <- suppressWarnings(suppressMessages(nlmixr2_to_ferx(f, validate = FALSE)))
+  expect_match(r$ferx_text, "init(centr) = 100 * 3.14159265358979", fixed = TRUE)
+  expect_no_match(r$ferx_text, "\\bpi\\b|\\bPI\\b")
+  expect_length(r$unsupported, 0L)
+})
