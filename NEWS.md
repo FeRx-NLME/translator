@@ -88,7 +88,9 @@
   aborted translation. An initial condition such as `centr(0) <- 100*pi` was
   dropped with an ERROR, leaving the compartment to start at 0. A `pi`
   the model defines itself -- an assigned variable, a parameter or a state --
-  still means the model's name. `Inf`, `NaN` and `NA` are still emitted
+  still means the model's name. A free constant is also kept out of the
+  `[covariates]` block a compartment-free model emits, where `pi continuous`
+  made ferx demand a `pi` data column. `Inf`, `NaN` and `NA` are still emitted
   verbatim and are not covered by this fix.
 
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
