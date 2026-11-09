@@ -109,12 +109,6 @@
 .model_covariates <- function(lst, name_map) {
   nm <- .walk_names(lst)
   covs <- setdiff(nm$used, c(nm$assigned, nm$states, names(name_map)))
-  # A free rxode2 constant (`pi`, `M_SQRT2`, ...) is emitted as its value by
-  # .normalise_expr(), so it is not a column: declaring it made ferx demand a
-  # `pi` column, E_MISSING_COVARIATE. The model's own names were removed above,
-  # so a constant name left here is free. Same table as the emitter, so the two
-  # cannot drift apart (#76).
-  covs <- setdiff(covs, names(.RX_CONSTANTS))
   covs[!toupper(covs) %in% .RESERVED_ODE_NAMES]
 }
 

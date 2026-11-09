@@ -3779,31 +3779,58 @@ test_that("$SIGMA BLOCK residual covariances are reported rather than dropped in
 # "substitute a FREE pi" from "substitute every pi". The tests that read files
 # or run the whole translation are in test-integration-constants.R.
 
-test_that(".normalise_expr writes a free rxode2 constant as its value", {
-  # The exact double, before deparse() rounds it -- the substitution itself must
-  # not lose precision even though the emitted text does.
-  expect_identical(.normalise_expr(quote(pi), list()), pi)
-  expect_identical(.normalise_expr(quote(M_E), list()), exp(1))
-  out <- .normalise_expr(quote(sin(2 * pi * TIME / 24)), list())
-  expect_false("pi" %in% all.names(out))
-  expect_identical(out[[2]][[2]][[2]][[3]], pi)
+test_that(".substitute_free_constants writes a free constant as its value", {
+  ini <- data.frame(name = c("t.E0", NA), stringsAsFactors = FALSE)
+  lst <- list(quote(e0 <- t.E0 + sin(2 * pi * TIME / 24) + M_E))
+  out <- .substitute_free_constants(lst, ini)[[1]]
+  expect_false(any(c("pi", "M_E") %in% all.names(out)))
+  # The exact doubles, before deparse() rounds them -- the substitution itself
+  # must not lose precision even though the emitted text does.
+  nums <- function(e) if (is.numeric(e)) list(e) else if (is.call(e))
+    unlist(lapply(as.list(e)[-1], nums), recursive = FALSE) else list()
+  leaves <- nums(out)
+  expect_true(any(vapply(leaves, identical, NA, pi)))
+  expect_true(any(vapply(leaves, identical, NA, exp(1))))
+  # Inside an `if` too: the walk descends into both the condition and the arms.
+  cond <- list(quote(if (TIME > pi) { e1 <- pi } else { e1 <- 0 }))
+  expect_false("pi" %in% all.names(.substitute_free_constants(cond, ini)[[1]]))
   # The call head is never a constant: only symbols in argument positions move.
-  expect_identical(.normalise_expr(quote(pi(x)), list())[[1]], quote(pi))
+  expect_identical(
+    .substitute_free_constants(list(quote(y <- pi(x))), ini)[[1]][[3]][[1]],
+    quote(pi))
 })
 
-test_that(".normalise_expr leaves a pi the model defines to the rename map", {
-  out <- .normalise_expr(quote(sin(pi * TIME)), list(pi = "PI"))
-  expect_identical(out, quote(sin(PI * TIME)))
+test_that(".substitute_free_constants leaves a pi the model defines, everywhere", {
+  # rxode2 lets a model define `pi` three ways; each makes EVERY `pi` the
+  # model's name, including reads in other statements. A fixture with only a
+  # free `pi` could not tell "substitute a free pi" from "substitute every pi".
+  ini0 <- data.frame(name = "t.E0", stringsAsFactors = FALSE)
+  assigned <- list(quote(pi <- 2), quote(e0 <- t.E0 + sin(pi * TIME)))
+  state    <- list(quote(d/dt(pi) <- -k * pi), quote(cp <- pi / v))
+  param    <- list(quote(e0 <- t.E0 + sin(pi * TIME)))
+  expect_identical(.substitute_free_constants(assigned, ini0), assigned)
+  expect_identical(.substitute_free_constants(state, ini0), state)
+  expect_identical(
+    .substitute_free_constants(param, data.frame(name = c("t.E0", "pi"))), param)
+  # Defining `pi` does not shield the OTHER constants.
+  mixed <- .substitute_free_constants(
+    list(quote(pi <- 2), quote(e0 <- pi * M_E)), ini0)
+  expect_identical(mixed[[2]], call("<-", quote(e0), call("*", quote(pi), exp(1))))
 })
 
-test_that("a free constant is not reported as a covariate", {
-  lst <- list(quote(e0 <- t.E0 + sin(pi * TIME)))
+test_that("after the pre-pass no classifier sees a constant as a column", {
+  # The classifiers carry no constant logic of their own; they rely on the
+  # pre-pass having removed every free constant from the statement list.
+  ini <- data.frame(name = "t.E0", stringsAsFactors = FALSE)
+  lst <- .substitute_free_constants(
+    list(quote(e0 <- t.E0 + sin(pi * TIME) + M_SQRT2 * WT)), ini)
   map <- list(t.E0 = "E0")
-  expect_false("PI" %in% .covariate_names(lst, map))
-  expect_false("pi" %in% .unmapped_symbols(lst, map))
-  # ...but a column the model genuinely reads still is.
-  lst2 <- list(quote(e0 <- t.E0 + sin(pi * WT)))
-  expect_true("WT" %in% .covariate_names(lst2, map))
+  consts <- c(names(.RX_CONSTANTS), toupper(names(.RX_CONSTANTS)))
+  for (got in list(.covariate_names(lst, map), .unmapped_symbols(lst, map),
+                   .model_covariates(lst, map))) {
+    expect_false(any(got %in% consts))
+    expect_true("WT" %in% got)   # a column the model really reads still is one
+  }
 })
 
 test_that("every name in .RX_CONSTANTS is one rxode2 reserves", {

@@ -135,3 +135,18 @@ test_that("pi in an initial condition is emitted as a literal", {
   expect_no_match(r$ferx_text, "\\bpi\\b|\\bPI\\b")
   expect_length(r$unsupported, 0L)
 })
+
+test_that("a parameter named pi keeps meaning the parameter", {
+  # The third way a model can define `pi`: as an ini() name. Every read is then
+  # the theta, not the constant.
+  skip_if_not_installed("rxode2")
+  f <- function() {
+    ini({ pi <- 3; e0 <- 1; eta.e ~ 0.1; sd <- 0.5 })
+    model({ E0 <- e0 + eta.e + sin(pi * TIME); pred <- E0; pred ~ add(sd) })
+  }
+  txt <- suppressWarnings(suppressMessages(
+    nlmixr2_to_ferx(f, validate = FALSE)))$ferx_text
+  expect_match(txt, "theta PI(3.0", fixed = TRUE)
+  expect_match(txt, "sin(PI * TIME)", fixed = TRUE)
+  expect_no_match(txt, "3.14159")
+})
