@@ -79,6 +79,20 @@
 
 ## Bug fixes
 
+* R's constant `pi` and rxode2's `M_*` constants (`M_E`, `M_SQRT2`,
+  `M_LN2`, ...) are now emitted as numeric literals (issue #76). ferx-core
+  defines none of them and reads an unknown name as a data column, so
+  `sin(2*pi*TIME/24)` in `[individual_parameters]` became a covariate
+  reference -- `E_MISSING_COVARIATE` at fit time, or a silently wrong model on a
+  dataset that happened to have a `pi` column -- and the same term in `[odes]`
+  aborted translation. An initial condition such as `centr(0) <- 100*pi` was
+  dropped with an ERROR, leaving the compartment to start at 0. A `pi`
+  the model defines itself -- an assigned variable, a parameter or a state --
+  still means the model's name. A free constant is also kept out of the
+  `[covariates]` block a compartment-free model emits, where `pi continuous`
+  made ferx demand a `pi` data column. `Inf`, `NaN` and `NA` are still emitted
+  verbatim and are not covered by this fix.
+
 * `FIX` on a `$OMEGA`, `$SIGMA` or IOV variance is no longer dropped
   (issue #31). A source that pinned a parameter -- an IIV held at a literature
   value, a residual held at a known assay CV -- translated into one that

@@ -565,3 +565,19 @@ test_that("[covariates] is in the same order whatever the collation locale", {
   expect_identical(.section(.cf(f, weighting = "weight")$ferx_text, "covariates"),
                    c("Beta continuous", "W continuous", "alpha continuous"))
 })
+
+test_that("a free rxode2 constant is not declared as a covariate (#76 x #74)", {
+  # pi and M_SQRT2 are emitted as literals, so they are not data columns.
+  # Declaring them made ferx demand a `pi` column: on ferx-r 4d73254 the fit
+  # stopped at E_MISSING_COVARIATE. Weighted mode is the trigger because it
+  # always emits [covariates] (for W), and a block lists every column.
+  f <- function() {
+    ini({ e0 <- 9; eta.e ~ 1; sd <- 1 })
+    model({ E0 <- e0 + eta.e + sin(pi * TIME) + M_SQRT2
+            pred <- E0 * sqrt(W); pred ~ add(sd) })
+  }
+  res <- .cf(f, weighting = "weight")
+  expect_identical(.section(res$ferx_text, "covariates"), "W continuous")
+  expect_match(res$ferx_text, "sin(3.14159265358979 * TIME) + 1.4142135623731",
+               fixed = TRUE)
+})

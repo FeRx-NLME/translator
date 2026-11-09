@@ -50,7 +50,10 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
                        has_cmt_col = NA, weighting = "as_written") {
   weighting <- match.arg(weighting, c("as_written", "weight"))
   ini  <- ui$iniDf
-  lst  <- ui$lstExpr
+  # Free rxode2 constants become literals HERE, once, before anything reads the
+  # model -- so every later pass, classifier and re-parse sees either a number
+  # or a name the model defines, and none of them needs to know about constants.
+  lst  <- .substitute_free_constants(ui$lstExpr, ini)
   warn <- character()
   unsp <- character()
 
@@ -1485,6 +1488,88 @@ rxui_to_ir <- function(ui, source_format = NA_character_, source_file = NA_chara
   nms <- unique(ini$name[!is.na(ini$name)])
   # Map the raw iniDf name (e.g. "t.TVCL") to the normalised ferx name ("TVCL").
   setNames(vapply(nms, function(nm) .norm(.strip_prefix(nm)), ""), nms)
+}
+
+# rxode2's built-in numeric constants, by the name a model writes them.
+#
+# ferx-core defines none of these (its only built-in constant is MACHEPS), and it
+# reads any name it does not know as a data column. Emitted verbatim, `pi` in
+# `sin(2*pi*TIME/24)` therefore becomes a covariate: E_MISSING_COVARIATE at fit
+# time, or -- worse -- a silently wrong model if the dataset has a `pi` column.
+# So each one is replaced by its value wherever it is a FREE symbol (#76), by
+# .substitute_free_constants().
+#
+# The list is rxode2's own: `pi` plus the `M_*` names `isReservedVariable()` in
+# rxode2's parseVars.h accepts (rxode2 5.1.8), with the values of the Rmath.h
+# macros of the same names. `M_SQRT_2dPI` is in the parser but missing from
+# rxode2's documented table; the parser is what decides.
+#
+# Deliberately absent: `Inf`, `NaN` and `NA` also reach the output verbatim, but
+# R parses them as constants rather than symbols, so they never pass through the
+# symbol branch below, and no finite literal could stand in for them anyway.
+# What ferx makes of them is not measured here; they need their own handling.
+#
+# The emitted precision is whatever deparse() gives every other literal in the
+# output: 15 significant digits, so `pi` is written 3.14159265358979, which is
+# 3.2e-15 below the double. Changing that is a change to every literal, not to
+# this table.
+.RX_CONSTANTS <- c(
+  pi             = pi,
+  M_E            = exp(1),
+  M_LOG2E        = log2(exp(1)),
+  M_LOG10E       = log10(exp(1)),
+  M_LN2          = log(2),
+  M_LN10         = log(10),
+  M_PI           = pi,
+  M_PI_2         = pi / 2,
+  M_PI_4         = pi / 4,
+  M_1_PI         = 1 / pi,
+  M_2_PI         = 2 / pi,
+  M_2_SQRTPI     = 2 / sqrt(pi),
+  M_SQRT2        = sqrt(2),
+  M_SQRT1_2      = 1 / sqrt(2),
+  M_SQRT_3       = sqrt(3),
+  M_SQRT_32      = sqrt(32),
+  M_LOG10_2      = log10(2),
+  M_2PI          = 2 * pi,
+  M_SQRT_PI      = sqrt(pi),
+  M_1_SQRT_2PI   = 1 / sqrt(2 * pi),
+  M_SQRT_2dPI    = sqrt(2 / pi),
+  M_LN_SQRT_PI   = log(sqrt(pi)),
+  M_LN_SQRT_2PI  = log(sqrt(2 * pi)),
+  M_LN_SQRT_PId2 = log(sqrt(pi / 2))
+)
+
+# Replace every FREE rxode2 constant in a model() statement list by its value.
+#
+# Free means the model does not define the name itself. rxode2 lets a model
+# assign `pi`, declare it as a state, or name a parameter `pi`, and then every
+# `pi` in the model is that name -- so a constant the model defines anywhere is
+# left alone everywhere, which is what the rename map then resolves. (A `pi`
+# read ABOVE its own assignment is the constant in rxode2; that is #79.) The
+# `M_*` names cannot be defined at all -- rxode2 refuses the model.
+#
+# Doing this once, on the source, is the design rather than a convenience. It
+# used to happen inside .normalise_expr(), where it was right only against the
+# FULL name map: the passes that re-parse emitted text hold a partial one, and
+# there a state named `pi` -- which keeps its lowercase name -- became the
+# number, turning `d/dt(pi) = -K * pi` into zero-order elimination. Each such
+# pass, and each classifier of free symbols, had to opt out. Here no pass can
+# forget to. The call-name position is never touched: `pi(x)` is a function.
+.substitute_free_constants <- function(lst, ini) {
+  nm  <- .walk_names(lst)
+  own <- c(ini$name[!is.na(ini$name)], nm$assigned, nm$states)
+  free <- setdiff(names(.RX_CONSTANTS), own)
+  if (length(free) == 0L) return(lst)
+  sub <- function(e) {
+    if (is.symbol(e)) {
+      nm <- as.character(e)
+      return(if (nm %in% free) .RX_CONSTANTS[[nm]] else e)
+    }
+    if (!is.call(e)) return(e)
+    as.call(c(list(e[[1]]), lapply(as.list(e)[-1], sub)))
+  }
+  lapply(lst, sub)
 }
 
 # Recursively substitute known parameter names in an expression.
