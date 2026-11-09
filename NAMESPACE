@@ -3,6 +3,7 @@
 S3method(print,ferx_ir)
 S3method(print,ferx_translate_result)
 export(emit_ferx)
+export(ferx_weighted_data)
 export(mlx_to_ferx)
 export(new_ferx_ir)
 export(nlmixr2_to_ferx)

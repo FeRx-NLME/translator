@@ -29,6 +29,7 @@ emit_ferx <- function(ir) {
   parts <- list(
     .emit_header(ir),
     .emit_parameters_section(ir),
+    if (length(ir$covariates)    > 0) .emit_covariates_section(ir),
     if (length(ir$indiv_params)  > 0) .emit_indiv_params_section(ir),
     if (length(ir$structural)    > 0) .emit_structural_section(ir),
     if (length(ir$odes)          > 0) .emit_odes_section(ir),
@@ -260,7 +261,11 @@ emit_ferx <- function(ir) {
 
 .emit_structural_section <- function(ir) {
   s    <- ir$structural
-  body <- if (identical(s$type, "pk_macro")) {
+  body <- if (identical(s$type, "algebraic")) {
+    # A compartment-free model: the prediction itself, ferx's Form C output
+    # expression with no pk/ode line above it.
+    paste0("  y = ", s$y)
+  } else if (identical(s$type, "pk_macro")) {
     args_str <- paste(names(s$pk_args), unlist(s$pk_args), sep = "=",
                       collapse = ", ")
     paste0("  pk ", s$pk_call, "(", args_str, ")")
@@ -319,7 +324,8 @@ emit_ferx <- function(ir) {
 # it is marked by a NULL `cond`.
 .emit_error_model_section <- function(ir) {
   dv <- function(e) paste0(e$dv, " ~ ", e$type, "(",
-                           paste(e$params, collapse = ", "), ")")
+                           paste(e$params, collapse = ", "), ")",
+                           if (!is.null(e$weight)) paste0(" weight = ", e$weight))
   has <- function(f) any(vapply(ir$error_model,
                                 function(e) !is.null(e[[f]]), logical(1)))
   lines <- if (has("cmt")) {
@@ -335,6 +341,16 @@ emit_ferx <- function(ir) {
     vapply(ir$error_model, function(e) paste0("  ", dv(e)), "")
   }
   paste0("[error_model]\n", paste(lines, collapse = "\n"))
+}
+
+# ferx refuses a `weight =` expression that names an undeclared column ("an
+# undeclared name silently evaluates to 0"), so a weighted model gets this block.
+# Every other block resolves an unknown name as a covariate without one, so no
+# other model does -- and a block, once present, lists every covariate, because
+# ferx warns (W_PARSE) about any it leaves out.
+.emit_covariates_section <- function(ir) {
+  paste0("[covariates]\n",
+         paste0("  ", ir$covariates, " continuous", collapse = "\n"))
 }
 
 .emit_scaling_section <- function(ir) {

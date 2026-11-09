@@ -13,7 +13,8 @@ to_ferx(
   output = NULL,
   overwrite = FALSE,
   validate = TRUE,
-  strict = TRUE
+  strict = TRUE,
+  weighting = c("as_written", "weight")
 )
 
 nm_to_ferx(ctl_file, output = NULL, ...)
@@ -46,17 +47,29 @@ covariate reads an unknown name as one.}
 Default \code{TRUE}. Pass \code{FALSE} to downgrade to a warning and return the
 result anyway. Ignored when \code{validate = FALSE}.}
 
+\item{weighting}{For a compartment-free nlmixr2 model whose prediction is
+written for hand-built inverse-variance weighting, \code{pred <- f * sqrt(W)}
+with DV already multiplied by \code{sqrt(W)}: \code{"as_written"} (default) emits
+the model unchanged, to be fitted to the same data; \code{"weight"} emits
+\code{y = f} and \verb{DV ~ additive(SD) weight = 1/sqrt(W)}, to be fitted to the
+data returned by \code{\link[=ferx_weighted_data]{ferx_weighted_data()}}. Both have the same likelihood;
+ferx's OFV for \code{"weight"} is the source's minus \code{sum(log(W))}. Only
+\code{"nlmixr2"} sources accept \code{"weight"}, and a model that does not have that
+shape is refused rather than translated as written.}
+
 \item{ctl_file}{Path to a NONMEM control stream file.}
 
 \item{...}{Additional arguments passed to \code{\link[=to_ferx]{to_ferx()}} (e.g. \code{overwrite}).}
 
-\item{model_fn}{An nlmixr2 / rxode2 model function.}
+\item{model_fn}{An nlmixr2 / rxode2 model function, or a fitted nlmixr2
+object (its estimates become the initial values).}
 
 \item{mlxtran}{Path to a Monolix \code{.mlxtran} project file.}
 }
 \value{
 A \code{ferx_translate_result} invisibly, with fields \verb{$ferx_text},
-\verb{$warnings}, \verb{$unsupported}, and \verb{$validation} (\code{NULL} when
+\verb{$warnings}, \verb{$unsupported}, \verb{$weight_column} (the data column \code{W} for
+\code{weighting = "weight"}, otherwise \code{NA}), and \verb{$validation} (\code{NULL} when
 \code{validate = FALSE}, otherwise a list with \code{ok}, \code{diagnostics}, the
 \code{data_file} used, and the full \code{warnings} including the \code{INFO} notes on how
 validation ran). Only engine findings about the model reach \verb{$warnings} and

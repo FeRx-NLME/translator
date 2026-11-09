@@ -801,7 +801,7 @@ test_that("an unresolvable name collision is reported, never emitted silently", 
   # hand-built IR and asserted nothing about the package at all.)
   skip_if_not_installed("nonmem2rx")
   local_mocked_bindings(
-    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character(), ...)
       list(map = rep(NA_character_, length(theta_names)), warnings = character())
   )
   ir <- suppressWarnings(rxui_to_ir(nonmem2rx::nonmem2rx(nm_path("pk_1cmt_oral.mod")),
@@ -1015,7 +1015,7 @@ test_that("the invariant covers individual parameters the linCmt passthrough add
   # passthrough comment says it exists to prevent.
   skip_if_not_installed("nonmem2rx")
   local_mocked_bindings(
-    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character())
+    .deshadow_theta_names = function(theta_names, indiv_names, reserved = character(), ...)
       list(map = rep(NA_character_, length(theta_names)),
            reasons = vector("list", length(theta_names)), warnings = character())
   )

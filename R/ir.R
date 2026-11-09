@@ -29,8 +29,10 @@
 #'   An element with no `kind` is read as an `"assign"`, which is the shape this
 #'   field held before statement lists. Order is preserved exactly.
 #' @param structural List describing the structural model. Must have `type`:
-#'   `"pk_macro"` (add `pk_call` and `pk_args`) or `"ode"` (add `obs_cmt`
-#'   and `states`). May be empty during incremental construction. An optional
+#'   `"pk_macro"` (add `pk_call` and `pk_args`), `"ode"` (add `obs_cmt`
+#'   and `states`) or `"algebraic"` (add `y`, a single expression string,
+#'   rendered as `y = ...` for a compartment-free model). May be empty during
+#'   incremental construction. An optional
 #'   `note` is emitted as a comment line directly above the `ode(...)` /
 #'   `pk ...` line, for a warning that belongs where a reader looks rather than
 #'   only in the header block.
@@ -57,7 +59,9 @@
 #' @param error_model List of error model entries. Each element is a list
 #'   with `dv` (character), `type` (`"proportional"`, `"additive"`, or
 #'   `"combined"`), and `params` (character vector of parameter names). An entry
-#'   may additionally carry `cmt` (integer, rendered as `CMT=N: DV ~ ...`) or
+#'   may additionally carry `weight` (character expression, rendered as a
+#'   trailing `weight = ...` modifier; single-endpoint additive only) and
+#'   `cmt` (integer, rendered as `CMT=N: DV ~ ...`) or
 #'   `cond` (character, rendered as an `if`/`else if` chain whose last entry
 #'   omits `cond` and becomes the `else` ferx requires). The three forms are
 #'   mutually exclusive within one list.
@@ -73,6 +77,12 @@
 #'   cannot be combined with either readout: ferx applies it on top of them.
 #' @param fit_options List with named elements such as `method`, `maxiter`,
 #'   `covariance`, and (when IOV is present) `iov_column`.
+#' @param covariates Character vector of data columns declared `continuous` in
+#'   a `[covariates]` block. Emitted only when ferx requires one -- currently
+#'   for the column a `weight =` expression reads -- and then listing every
+#'   data column the model reads, since ferx warns about any it leaves out.
+#' @param weight_column The data column `W` of a model translated with
+#'   `weighting = "weight"`, or `NA`. See [ferx_weighted_data()].
 #' @param warnings Character vector of diagnostic messages, each prefixed
 #'   with `INFO`, `WARN`, or `ERROR`.
 #' @param unsupported Character vector of features detected in the source
@@ -115,6 +125,8 @@ new_ferx_ir <- function(
   error_suggestion = character(),
   scaling       = list(),
   fit_options   = list(),
+  covariates    = character(),
+  weight_column = NA_character_,
   warnings      = character(),
   unsupported   = character(),
   state_renames = character()
@@ -136,6 +148,8 @@ new_ferx_ir <- function(
       error_suggestion = error_suggestion,
       scaling       = scaling,
       fit_options   = fit_options,
+      covariates    = covariates,
+      weight_column = weight_column,
       warnings      = warnings,
       unsupported   = unsupported,
       state_renames = state_renames
@@ -169,16 +183,47 @@ validate_ferx_ir <- function(ir) {
   if (length(ir$structural) > 0 && is.null(ir$structural$type))
     cli::cli_abort(
       "structural$type is missing.",
-      i = 'Must be {.val pk_macro} or {.val ode}.'
+      i = 'Must be {.val pk_macro}, {.val ode} or {.val algebraic}.'
     )
 
   if (!is.null(ir$structural$type)) {
-    valid_types <- c("pk_macro", "ode")
+    valid_types <- c("pk_macro", "ode", "algebraic")
     if (!ir$structural$type %in% valid_types)
       cli::cli_abort(
         "structural$type must be {.or {.val {valid_types}}}, not {.val {ir$structural$type}}."
       )
   }
+
+  # A compartment-free model's whole prediction is this one string. An empty or
+  # vector-valued `y` would emit `y = ` or two lines, neither of which the engine
+  # reads as the model meant.
+  if (identical(ir$structural$type, "algebraic")) {
+    y <- ir$structural$y
+    if (!is.character(y) || length(y) != 1L || is.na(y) || !nzchar(y))
+      cli::cli_abort(
+        "structural$y must be a single non-empty string when structural$type is {.val algebraic}.")
+    if (length(ir$odes) > 0 || length(ir$scaling) > 0)
+      cli::cli_abort(
+        "an {.val algebraic} structural model cannot carry [odes] or [scaling]: its {.code y} is the readout.")
+  }
+
+  # `weight =` scales only an additive loading, and ferx refuses it on per-CMT
+  # and covariate-selected error models; validate here what the emitter would
+  # otherwise write without complaint.
+  wt <- vapply(ir$error_model, function(e) !is.null(e$weight), logical(1))
+  if (any(wt)) {
+    e <- ir$error_model[[which(wt)[1]]]
+    if (length(ir$error_model) != 1L || !is.null(e$cmt) || !is.null(e$cond))
+      cli::cli_abort("a {.code weight} is only valid on a single-endpoint error model.")
+    if (!e$type %in% c("additive", "combined"))
+      cli::cli_abort("a {.code weight} is not valid on a {.val {e$type}} error model: ferx scales the additive loading only.")
+    if (!is.character(e$weight) || length(e$weight) != 1L || !nzchar(e$weight))
+      cli::cli_abort("error_model weight must be a single non-empty string.")
+  }
+  # NULL is an IR built by hand, or saved before the field existed: no block.
+  if (is.null(ir$covariates)) ir$covariates <- character()
+  if (!is.character(ir$covariates) || anyNA(ir$covariates))
+    cli::cli_abort("covariates must be a character vector without NA.")
 
   # `fixed` decides whether a parameter is estimated or held, and both the
   # emitter and every reader of the emitted file take it on trust. A malformed
